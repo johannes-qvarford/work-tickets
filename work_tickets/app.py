@@ -120,6 +120,20 @@ def create_subtask(
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/subtasks/{subtask_id}/delete")
+def delete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    subtask = db.get(Ticket, subtask_id)
+    if subtask is None:
+        return _redirect_with_message("error", "Subtask was not found.")
+    if subtask.parent_id is None:
+        return _redirect_with_message("error", "Top-level tickets cannot be deleted here.")
+
+    summary = subtask.summary
+    db.delete(subtask)
+    db.commit()
+    return _redirect_with_message("success", f"Subtask {summary} deleted.")
+
+
 @app.post("/tickets/{ticket_id}")
 def update_ticket(
     ticket_id: int,

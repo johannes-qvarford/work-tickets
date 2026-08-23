@@ -316,12 +316,16 @@ def test_create_subtasks_in_edit_section_persists_fields_and_orders_them() -> No
         assert parent.subtasks[0].parent_id == parent_id
         assert parent.subtasks[0].description == "First details"
         assert parent.subtasks[0].planned_date == date(2026, 8, 24)
+        subtask_ids = [subtask.id for subtask in parent.subtasks]
 
     page = client.get("/")
     assert page.status_code == 200
     assert "Subtasks" in page.text
     assert "First subtask" in page.text
     assert "Second subtask" in page.text
+    for subtask_id in subtask_ids:
+        assert f'action="/subtasks/{subtask_id}/delete"' in page.text
+    assert "Delete this subtask?" in page.text
 
 
 def test_create_subtask_validates_summary_and_planned_date() -> None:
@@ -380,3 +384,56 @@ def test_create_subtask_rejects_missing_and_nested_parents() -> None:
     with SessionLocal() as db:
         assert db.scalar(select(Ticket).where(Ticket.parent_id == nested_parent_id)) is None
         assert db.get(Ticket, parent_id) is not None
+
+
+def test_delete_subtask_removes_only_the_requested_subtask_and_preserves_order() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Delete parent", position=203)
+        first = Ticket(summary="First subtask", position=0, parent=parent)
+        target = Ticket(summary="Target subtask", position=1, parent=parent)
+        remaining = Ticket(summary="Remaining subtask", position=2, parent=parent)
+        other_parent = Ticket(summary="Other parent", position=204)
+        other_subtask = Ticket(summary="Other subtask", position=0, parent=other_parent)
+        db.add_all([parent, first, target, remaining, other_parent, other_subtask])
+        db.commit()
+        target_id = target.id
+        parent_id = parent.id
+        other_parent_id = other_parent.id
+        other_subtask_id = other_subtask.id
+
+    response = client.post(f"/subtasks/{target_id}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "Subtask%20Target%20subtask%20deleted" in response.headers["location"]
+    with SessionLocal() as db:
+        assert db.get(Ticket, target_id) is None
+        parent = db.get(Ticket, parent_id)
+        other_parent = db.get(Ticket, other_parent_id)
+        assert parent is not None
+        assert other_parent is not None
+        assert [(subtask.summary, subtask.position) for subtask in parent.subtasks] == [
+            ("First subtask", 0),
+            ("Remaining subtask", 2),
+        ]
+        assert db.get(Ticket, other_subtask_id) is not None
+
+
+def test_delete_subtask_rejects_missing_ids_and_top_level_tickets() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Protected parent", position=205)
+        subtask = Ticket(summary="Protected subtask", position=0, parent=parent)
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    missing = client.post("/subtasks/999999/delete", follow_redirects=False)
+    top_level = client.post(f"/subtasks/{parent_id}/delete", follow_redirects=False)
+
+    assert missing.status_code == 303
+    assert "Subtask%20was%20not%20found" in missing.headers["location"]
+    assert top_level.status_code == 303
+    assert "Top-level%20tickets%20cannot%20be%20deleted%20here" in top_level.headers["location"]
+    with SessionLocal() as db:
+        assert db.get(Ticket, parent_id) is not None
+        assert db.get(Ticket, subtask_id) is not None
