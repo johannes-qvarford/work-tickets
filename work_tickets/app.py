@@ -298,6 +298,20 @@ def complete_ticket(ticket_id: int, db: Session = Depends(get_db)) -> RedirectRe
     return _redirect_with_message("success", f"Ticket {ticket.summary} marked {state}.")
 
 
+@app.post("/subtasks/{subtask_id}/complete")
+def complete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    subtask = db.get(Ticket, subtask_id)
+    if subtask is None:
+        return _redirect_with_message("error", "Subtask was not found.")
+    if subtask.parent_id is None:
+        return _redirect_with_message("error", "Top-level tickets cannot be completed here.")
+
+    subtask.local_completed = not subtask.local_completed
+    db.commit()
+    state = "done" if subtask.local_completed else "active"
+    return _redirect_with_message("success", f"Subtask {subtask.summary} marked {state}.")
+
+
 @app.post("/categories")
 def create_category(
     name: Annotated[str, Form()], db: Session = Depends(get_db)

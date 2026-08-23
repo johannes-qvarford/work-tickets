@@ -568,3 +568,82 @@ def test_move_subtask_handles_boundaries_and_rejects_invalid_targets() -> None:
         child = db.get(Ticket, only_id)
         assert child is not None
         assert child.position == 0
+
+
+def test_toggle_subtask_completion_persists_without_changing_parent_or_jira_fields() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(
+            summary="Completion parent",
+            description="Parent details",
+            position=209,
+            local_completed=False,
+            jira_issue_key="WORK-20",
+            jira_status_name="In Progress",
+        )
+        subtask = Ticket(
+            summary="Complete this subtask",
+            description="Subtask details",
+            position=0,
+            parent=parent,
+            local_completed=False,
+            jira_issue_key="WORK-21",
+            jira_status_name="To Do",
+        )
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    response = client.post(f"/subtasks/{subtask_id}/complete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "Subtask%20Complete%20this%20subtask%20marked%20done" in response.headers["location"]
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        subtask = db.get(Ticket, subtask_id)
+        assert parent is not None
+        assert subtask is not None
+        assert parent.local_completed is False
+        assert parent.jira_issue_key == "WORK-20"
+        assert parent.jira_status_name == "In Progress"
+        assert subtask.local_completed is True
+        assert subtask.jira_issue_key == "WORK-21"
+        assert subtask.jira_status_name == "To Do"
+
+    page = client.get("/")
+    assert f'action="/subtasks/{subtask_id}/complete"' in page.text
+    assert "Complete this subtask" in page.text
+    assert "Subtask marked done" not in page.text
+    assert "Mark as active" in page.text
+
+    response = client.post(f"/subtasks/{subtask_id}/complete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "Subtask%20Complete%20this%20subtask%20marked%20active" in response.headers["location"]
+    with SessionLocal() as db:
+        subtask = db.get(Ticket, subtask_id)
+        assert subtask is not None
+        assert subtask.local_completed is False
+
+
+def test_subtask_completion_rejects_missing_ids_and_top_level_tickets() -> None:
+    with SessionLocal() as db:
+        top_level = Ticket(summary="Not a subtask", position=210)
+        db.add(top_level)
+        db.commit()
+        top_level_id = top_level.id
+
+    missing = client.post("/subtasks/999999/complete", follow_redirects=False)
+    top_level_response = client.post(f"/subtasks/{top_level_id}/complete", follow_redirects=False)
+
+    assert missing.status_code == 303
+    assert "Subtask%20was%20not%20found" in missing.headers["location"]
+    assert top_level_response.status_code == 303
+    assert (
+        "Top-level%20tickets%20cannot%20be%20completed%20here"
+        in top_level_response.headers["location"]
+    )
+    with SessionLocal() as db:
+        top_level = db.get(Ticket, top_level_id)
+        assert top_level is not None
+        assert top_level.local_completed is False
