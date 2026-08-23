@@ -2,4 +2,9 @@
 - [x] Use a separate Jira browser URL for clickable issue links, such as https://johannesqvarford.atlassian.net/browse/SCRUM-5.
 - [x] Prevent changing a ticket's category after creation.
 - [x] Make ticket data compact: keep Done, Date, Sync, and subtask actions small and on existing rows.
-- The Html has some really long and hard-to-read lines - format them better. Is there a python-backed html formatter that we can use with uv e.g. ?
+- [x] Format the HTML template with a Jinja-safe Python-backed formatter managed by uv.
+- [ ] When syncing to Jira, sync all subtasks. Also, only allow syncing from/to Jira on the parent which also syncs all subtasks.
+- [ ] Planned date and category should fit next to summary when creating ticket, while date should fit next to summary when editing a ticket.
+- [ ] You should be able to edit a subtask like you can its' parent.
+- [ ] Changing subtask order should not require page refresh.
+- [ ] Adding and editing tickets and subtasks should not require page refresh.

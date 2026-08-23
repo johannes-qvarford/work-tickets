@@ -374,10 +374,10 @@ def test_synced_ticket_label_links_to_jira_issue() -> None:
     page = client.get("/")
 
     assert page.status_code == 200
-    assert (
-        '<a class="badge" href="https://jira.example.test/browse/WORK-42" '
-        'target="_blank" rel="noopener noreferrer">WORK-42</a>'
-    ) in page.text
+    assert 'href="https://jira.example.test/browse/WORK-42"' in page.text
+    assert 'target="_blank"' in page.text
+    assert 'rel="noopener noreferrer"' in page.text
+    assert ">WORK-42</a>" in page.text
 
 
 def test_synced_ticket_label_uses_configured_browser_base_url() -> None:

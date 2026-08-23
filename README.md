@@ -25,6 +25,13 @@ Checks:
 ```sh
 uv run ruff check .
 uv run ruff format --check .
+uv run djlint --check work_tickets/templates/index.html
 uv run mypy work_tickets
 uv run pytest
+```
+
+Format the Jinja template with:
+
+```sh
+uv run djlint --reformat work_tickets/templates/index.html
 ```
