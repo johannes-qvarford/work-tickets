@@ -63,6 +63,58 @@ def test_ticket_controls_use_compact_accessible_actions() -> None:
     assert 'aria-label="Delete Compact subtask"' in page.text
 
 
+def test_subtask_move_controls_have_no_refresh_hooks() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Hook parent", position=0)
+        first = Ticket(summary="Hook first", position=0, parent=parent)
+        second = Ticket(summary="Hook second", position=1, parent=parent)
+        db.add_all([parent, first, second])
+        db.commit()
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert 'class="subtasks" data-subtasks' in page.text
+    assert f'data-subtask-id="{first.id}"' in page.text
+    assert f'data-subtask-id="{second.id}"' in page.text
+    assert page.text.count('class="move-subtask-form"') >= 4
+    assert 'data-move-direction="up"' in page.text
+    assert 'data-move-direction="down"' in page.text
+    assert 'headers: { Accept: "application/json" }' in page.text
+    assert 'id="move-status"' in page.text
+
+
+def test_subtask_move_returns_json_order_for_enhanced_requests() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="JSON ordering parent", position=1)
+        first = Ticket(summary="JSON first", position=0, parent=parent)
+        second = Ticket(summary="JSON second", position=1, parent=parent)
+        db.add_all([parent, first, second])
+        db.commit()
+        second_id = second.id
+        first_id = first.id
+        parent_id = parent.id
+
+    response = client.post(
+        f"/subtasks/{second_id}/move-up",
+        headers={"Accept": "application/json"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "ok": True,
+        "message": "Subtask JSON second moved up.",
+        "parent_id": parent_id,
+        "order": [second_id, first_id],
+    }
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [subtask.id for subtask in parent.subtasks] == [second_id, first_id]
+
+
 def test_create_category_and_ticket() -> None:
     assert (
         client.post("/categories", data={"name": "Planning"}, follow_redirects=False).status_code

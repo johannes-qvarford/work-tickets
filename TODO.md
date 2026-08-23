@@ -6,5 +6,5 @@
 - [x] When syncing to Jira, sync all subtasks. Also, only allow syncing from/to Jira on the parent which also syncs all subtasks.
 - [ ] Planned date and category should fit next to summary when creating ticket, while date should fit next to summary when editing a ticket.
 - [x] You should be able to edit a subtask like you can its' parent.
-- [ ] Changing subtask order should not require page refresh.
+- [x] Changing subtask order should not require page refresh.
 - [ ] Adding and editing tickets and subtasks should not require page refresh.

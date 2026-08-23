@@ -7,7 +7,7 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -135,21 +135,21 @@ def delete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> RedirectRe
 
 
 @app.post("/subtasks/{subtask_id}/move-up")
-def move_subtask_up(subtask_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
-    return _move_subtask(subtask_id, -1, db)
+def move_subtask_up(subtask_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+    return _move_subtask(subtask_id, -1, request, db)
 
 
 @app.post("/subtasks/{subtask_id}/move-down")
-def move_subtask_down(subtask_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
-    return _move_subtask(subtask_id, 1, db)
+def move_subtask_down(subtask_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+    return _move_subtask(subtask_id, 1, request, db)
 
 
-def _move_subtask(subtask_id: int, offset: int, db: Session) -> RedirectResponse:
+def _move_subtask(subtask_id: int, offset: int, request: Request, db: Session) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
-        return _redirect_with_message("error", "Subtask was not found.")
+        return _move_response(request, "error", "Subtask was not found.", 404)
     if subtask.parent_id is None:
-        return _redirect_with_message("error", "Top-level tickets cannot be reordered here.")
+        return _move_response(request, "error", "Top-level tickets cannot be reordered here.", 400)
 
     siblings = list(
         db.scalars(
@@ -171,8 +171,13 @@ def _move_subtask(subtask_id: int, offset: int, db: Session) -> RedirectResponse
     if target_index < 0 or target_index >= len(siblings):
         db.commit()
         boundary = "top" if offset < 0 else "bottom"
-        return _redirect_with_message(
-            "success", f"Subtask {subtask.summary} is already at the {boundary}."
+        return _move_response(
+            request,
+            "success",
+            f"Subtask {subtask.summary} is already at the {boundary}.",
+            200,
+            subtask.parent_id,
+            [sibling.id for sibling in siblings],
         )
 
     siblings[current_index].position, siblings[target_index].position = (
@@ -181,7 +186,15 @@ def _move_subtask(subtask_id: int, offset: int, db: Session) -> RedirectResponse
     )
     db.commit()
     direction = "up" if offset < 0 else "down"
-    return _redirect_with_message("success", f"Subtask {subtask.summary} moved {direction}.")
+    ordered_ids = [sibling.id for sibling in sorted(siblings, key=lambda sibling: sibling.position)]
+    return _move_response(
+        request,
+        "success",
+        f"Subtask {subtask.summary} moved {direction}.",
+        200,
+        subtask.parent_id,
+        ordered_ids,
+    )
 
 
 @app.post("/tickets/{ticket_id}")
@@ -503,3 +516,20 @@ def _save_jira_issue(
 
 def _redirect_with_message(kind: str, message: str) -> RedirectResponse:
     return RedirectResponse(f"/?{kind}={quote(message)}", status_code=303)
+
+
+def _move_response(
+    request: Request,
+    kind: str,
+    message: str,
+    status_code: int,
+    parent_id: int | None = None,
+    order: list[int] | None = None,
+) -> Response:
+    if "application/json" in request.headers.get("accept", "").lower():
+        payload: dict[str, object] = {"ok": kind == "success", "message": message}
+        if parent_id is not None and order is not None:
+            payload["parent_id"] = parent_id
+            payload["order"] = order
+        return JSONResponse(payload, status_code=status_code)
+    return _redirect_with_message(kind, message)

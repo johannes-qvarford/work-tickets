@@ -144,6 +144,7 @@
     </header>
     {% if error %}<div class="panel notice error" role="alert">{{ error }}</div>{% endif %}
     {% if success %}<div class="panel notice success" role="status">{{ success }}</div>{% endif %}
+    <div id="move-status" class="sr-only" role="status" aria-live="polite"></div>
     <div class="grid">
       <main>
         <section class="panel">
@@ -293,13 +294,13 @@
                   <div class="meta">Category: {{ ticket.category.name if ticket.category else 'Uncategorized' }}</div>
                   <button type="submit">{% if ticket.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
                 </form>
-                <div class="subtasks">
+                <div class="subtasks" data-subtasks>
                   <div class="subtasks-heading">
                     <h4>Subtasks</h4>
                     <span class="meta">{{ ticket.subtasks|length }}</span>
                   </div>
                   {% for subtask in ticket.subtasks %}
-                  <div class="subtask">
+                  <div class="subtask" data-subtask-id="{{ subtask.id }}">
                     <details class="subtask-details">
                       <summary>
                         <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">
@@ -337,10 +338,16 @@
                           <span class="sr-only">{% if subtask.local_completed %}Mark as active{% else %}Mark as done{% endif %}</span>
                         </button>
                       </form>
-                      <form method="post" action="/subtasks/{{ subtask.id }}/move-up">
+                      <form
+                        class="move-subtask-form"
+                        data-move-subtask
+                        method="post"
+                        action="/subtasks/{{ subtask.id }}/move-up"
+                      >
                         <button
                           class="compact-control"
                           type="submit"
+                          data-move-direction="up"
                           {% if loop.first %}disabled{% endif %}
                           aria-label="Move up {{ subtask.summary }}"
                           title="Move up"
@@ -348,10 +355,16 @@
                           <span aria-hidden="true">↑</span><span class="sr-only">Move up</span>
                         </button>
                       </form>
-                      <form method="post" action="/subtasks/{{ subtask.id }}/move-down">
+                      <form
+                        class="move-subtask-form"
+                        data-move-subtask
+                        method="post"
+                        action="/subtasks/{{ subtask.id }}/move-down"
+                      >
                         <button
                           class="compact-control"
                           type="submit"
+                          data-move-direction="down"
                           {% if loop.last %}disabled{% endif %}
                           aria-label="Move down {{ subtask.summary }}"
                           title="Move down"
@@ -507,5 +520,67 @@
         </section>
       </aside>
     </div>
+    <script>
+      (() => {
+        if (!window.fetch) return;
+
+        const status = document.getElementById("move-status");
+
+        function announce(message) {
+          if (status) status.textContent = message;
+        }
+
+        function updateMoveControls(container) {
+          const subtasks = [...container.querySelectorAll(".subtask")];
+          subtasks.forEach((subtask, index) => {
+            const up = subtask.querySelector('[data-move-direction="up"]');
+            const down = subtask.querySelector('[data-move-direction="down"]');
+            if (up) up.disabled = index === 0;
+            if (down) down.disabled = index === subtasks.length - 1;
+          });
+        }
+
+        function applyOrder(container, order) {
+          const byId = new Map(
+            [...container.querySelectorAll(".subtask")].map((subtask) => [
+              subtask.dataset.subtaskId,
+              subtask,
+            ])
+          );
+          order.forEach((subtaskId) => {
+            const subtask = byId.get(String(subtaskId));
+            if (subtask) container.appendChild(subtask);
+          });
+          updateMoveControls(container);
+        }
+
+        document.querySelectorAll("[data-move-subtask]").forEach((form) => {
+          form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            const container = form.closest("[data-subtasks]");
+            const buttons = container?.querySelectorAll("[data-move-direction]");
+            buttons?.forEach((button) => (button.disabled = true));
+            try {
+              const response = await fetch(form.action, {
+                method: "POST",
+                headers: { Accept: "application/json" },
+              });
+              const result = await response.json();
+              if (!response.ok || !result.ok) {
+                throw new Error(result.message || "Unable to move subtask.");
+              }
+              if (container && Array.isArray(result.order)) {
+                applyOrder(container, result.order);
+              }
+              announce(result.message);
+            } catch (error) {
+              announce(error instanceof Error ? error.message : "Unable to move subtask.");
+            } finally {
+              if (container) updateMoveControls(container);
+            }
+          });
+        });
+      })();
+    </script>
   </body>
 </html>
