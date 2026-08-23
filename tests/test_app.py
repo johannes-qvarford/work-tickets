@@ -437,3 +437,82 @@ def test_delete_subtask_rejects_missing_ids_and_top_level_tickets() -> None:
     with SessionLocal() as db:
         assert db.get(Ticket, parent_id) is not None
         assert db.get(Ticket, subtask_id) is not None
+
+
+def test_move_subtasks_reorders_only_siblings_and_normalizes_positions() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Ordering parent", position=206)
+        first = Ticket(summary="First", position=20, parent=parent)
+        middle = Ticket(summary="Middle", position=20, parent=parent)
+        last = Ticket(summary="Last", position=80, parent=parent)
+        other_parent = Ticket(summary="Other ordering parent", position=207)
+        other = Ticket(summary="Other child", position=0, parent=other_parent)
+        db.add_all([parent, first, middle, last, other_parent, other])
+        db.commit()
+        parent_id = parent.id
+        first_id = first.id
+        middle_id = middle.id
+        last_id = last.id
+        other_parent_id = other_parent.id
+        other_id = other.id
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "Move up" in page.text
+    assert "Move down" in page.text
+    assert "/subtasks/${match[1]}/move-up" in page.text
+    assert "/subtasks/${match[1]}/move-down" in page.text
+
+    move_middle_up = client.post(f"/subtasks/{middle_id}/move-up", follow_redirects=False)
+    assert move_middle_up.status_code == 303
+    assert "Subtask%20Middle%20moved%20up" in move_middle_up.headers["location"]
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [(subtask.id, subtask.position) for subtask in parent.subtasks] == [
+            (middle_id, 0),
+            (first_id, 1),
+            (last_id, 2),
+        ]
+
+    move_middle_down = client.post(f"/subtasks/{middle_id}/move-down", follow_redirects=False)
+    assert move_middle_down.status_code == 303
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        other_parent = db.get(Ticket, other_parent_id)
+        assert parent is not None
+        assert other_parent is not None
+        assert [(subtask.id, subtask.position) for subtask in parent.subtasks] == [
+            (first_id, 0),
+            (middle_id, 1),
+            (last_id, 2),
+        ]
+        assert [(subtask.id, subtask.position) for subtask in other_parent.subtasks] == [
+            (other_id, 0)
+        ]
+
+
+def test_move_subtask_handles_boundaries_and_rejects_invalid_targets() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Boundary parent", position=208)
+        only = Ticket(summary="Only child", position=5, parent=parent)
+        db.add_all([parent, only])
+        db.commit()
+        parent_id = parent.id
+        only_id = only.id
+
+    at_top = client.post(f"/subtasks/{only_id}/move-up", follow_redirects=False)
+    assert at_top.status_code == 303
+    assert "already%20at%20the%20top" in at_top.headers["location"]
+    at_bottom = client.post(f"/subtasks/{only_id}/move-down", follow_redirects=False)
+    assert at_bottom.status_code == 303
+    assert "already%20at%20the%20bottom" in at_bottom.headers["location"]
+
+    missing = client.post("/subtasks/999999/move-up", follow_redirects=False)
+    top_level = client.post(f"/subtasks/{parent_id}/move-down", follow_redirects=False)
+    assert "Subtask%20was%20not%20found" in missing.headers["location"]
+    assert "Top-level%20tickets%20cannot%20be%20reordered" in top_level.headers["location"]
+    with SessionLocal() as db:
+        child = db.get(Ticket, only_id)
+        assert child is not None
+        assert child.position == 0

@@ -14,8 +14,11 @@
     .ticket { display:flex; justify-content:space-between; gap:16px; margin:10px 0; }
     .ticket h3 { margin:0 0 8px; } .meta { color:#9ba7b8; font-size:.9rem; }
     .subtasks { margin-top:16px; padding-top:12px; border-top:1px solid #2c3544; }
-    .subtask { padding:8px 0; border-bottom:1px solid #2c3544; }
+    .subtask { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid #2c3544; }
     .subtask:last-of-type { border-bottom:0; }
+    .subtask-info { min-width:0; } .subtask-actions { display:flex; align-items:center; gap:6px; flex-shrink:0; }
+    .subtask-actions form { display:block; } .subtask-actions button { padding:7px 9px; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
     .badge { border-radius:99px; padding:4px 9px; background:#263b57; font-size:.78rem; white-space:nowrap; }
     form { display:grid; gap:10px; } input, textarea, select, button { font:inherit; border-radius:8px; border:1px solid #384558; padding:10px; background:#11151d; color:inherit; }
     textarea { min-height:80px; resize:vertical; } button { background:#7c5cff; border:0; cursor:pointer; font-weight:700; } button.secondary { background:#2b3545; } button.danger { background:#7a3546; }
@@ -43,5 +46,41 @@
       <section class="panel" style="margin-top:20px"><h2>Jira</h2>{% if jira_config %}<p class="muted">Connected to {{ jira_config.base_url }} · project {{ jira_config.project_key }} · issue type {{ jira_config.issue_type }}.</p>{% else %}<p class="muted">Configure Jira to sync selected tickets.</p>{% endif %}<form method="post" action="/jira/config"><input name="base_url" type="url" placeholder="https://your-company.atlassian.net" value="{{ jira_config.base_url if jira_config else '' }}" required><input name="email" type="email" placeholder="Jira account email" value="{{ jira_config.email if jira_config else '' }}" required><input name="api_token" type="password" placeholder="API token (leave blank to keep saved token)" autocomplete="new-password" {% if not jira_config %}required{% endif %}><input name="project_key" placeholder="Project key, e.g. WORK" value="{{ jira_config.project_key if jira_config else '' }}" required><input name="issue_type" placeholder="Issue type, e.g. Task" value="{{ jira_config.issue_type if jira_config else 'Task' }}" required><input name="completed_statuses" placeholder="Completed statuses, comma separated" value="{{ jira_config.completed_statuses if jira_config else 'Done' }}"><div class="actions"><button type="submit">Save configuration</button><button class="secondary" type="submit" name="validate" value="1">Save &amp; test connection</button></div></form><p class="muted">Use a Jira Cloud API token. The token is stored only in this local SQLite database and is never shown after saving. Categories, dates, and local priority remain local.</p></section>
     </aside>
   </div>
+  <script>
+    document.querySelectorAll('.subtasks').forEach((subtasks) => {
+      const rows = [...subtasks.querySelectorAll('.subtask')];
+      rows.forEach((row, index) => {
+        const deleteForm = row.querySelector('form[action*="/delete"]');
+        if (!deleteForm) return;
+        const match = deleteForm.action.match(/\/subtasks\/(\d+)\/delete$/);
+        if (!match) return;
+
+        const actions = document.createElement('div');
+        actions.className = 'subtask-actions';
+        const info = row.querySelector('div > strong')?.parentElement?.parentElement;
+        if (info) info.className = 'subtask-info';
+        for (const [direction, label, disabled] of [
+          ['up', 'Move up', index === 0],
+          ['down', 'Move down', index === rows.length - 1],
+        ]) {
+          const form = document.createElement('form');
+          form.method = 'post';
+          form.action = direction === 'up'
+            ? `/subtasks/${match[1]}/move-up`
+            : `/subtasks/${match[1]}/move-down`;
+          const button = document.createElement('button');
+          button.className = 'secondary';
+          button.type = 'submit';
+          button.textContent = label;
+          button.disabled = disabled;
+          button.setAttribute('aria-label', `${label} ${row.querySelector('strong').textContent}`);
+          form.append(button);
+          actions.append(form);
+        }
+        actions.append(deleteForm);
+        row.append(actions);
+      });
+    });
+  </script>
 </body>
 </html>

@@ -134,6 +134,56 @@ def delete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> RedirectRe
     return _redirect_with_message("success", f"Subtask {summary} deleted.")
 
 
+@app.post("/subtasks/{subtask_id}/move-up")
+def move_subtask_up(subtask_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    return _move_subtask(subtask_id, -1, db)
+
+
+@app.post("/subtasks/{subtask_id}/move-down")
+def move_subtask_down(subtask_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    return _move_subtask(subtask_id, 1, db)
+
+
+def _move_subtask(subtask_id: int, offset: int, db: Session) -> RedirectResponse:
+    subtask = db.get(Ticket, subtask_id)
+    if subtask is None:
+        return _redirect_with_message("error", "Subtask was not found.")
+    if subtask.parent_id is None:
+        return _redirect_with_message("error", "Top-level tickets cannot be reordered here.")
+
+    siblings = list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.parent_id == subtask.parent_id)
+            .order_by(Ticket.position, Ticket.created_at, Ticket.id)
+        )
+    )
+    current_index = next(
+        index for index, sibling in enumerate(siblings) if sibling.id == subtask.id
+    )
+
+    # Normalize first so old or manually edited data cannot leave duplicate or sparse
+    # positions after a move. The explicit id tie-breaker makes the order deterministic.
+    for index, sibling in enumerate(siblings):
+        sibling.position = index
+
+    target_index = current_index + offset
+    if target_index < 0 or target_index >= len(siblings):
+        db.commit()
+        boundary = "top" if offset < 0 else "bottom"
+        return _redirect_with_message(
+            "success", f"Subtask {subtask.summary} is already at the {boundary}."
+        )
+
+    siblings[current_index].position, siblings[target_index].position = (
+        siblings[target_index].position,
+        siblings[current_index].position,
+    )
+    db.commit()
+    direction = "up" if offset < 0 else "down"
+    return _redirect_with_message("success", f"Subtask {subtask.summary} moved {direction}.")
+
+
 @app.post("/tickets/{ticket_id}")
 def update_ticket(
     ticket_id: int,

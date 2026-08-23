@@ -53,7 +53,7 @@ class Ticket(Base):
     subtasks: Mapped[list[Ticket]] = relationship(
         back_populates="parent",
         cascade="all, delete-orphan",
-        order_by=lambda: (Ticket.position, Ticket.created_at),
+        order_by=lambda: (Ticket.position, Ticket.created_at, Ticket.id),
     )
 
 
