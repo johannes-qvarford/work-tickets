@@ -18,7 +18,13 @@ os.environ["WORK_TICKETS_DATABASE_URL"] = f"sqlite:///{_test_db_path}"
 atexit.register(_test_db_path.unlink, missing_ok=True)
 
 from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
-from work_tickets.jira import JiraClient, JiraError, JiraIssue, JiraIssueWithSubtasks  # noqa: E402
+from work_tickets.jira import (  # noqa: E402
+    JiraApiConventions,
+    JiraClient,
+    JiraError,
+    JiraIssue,
+    JiraIssueWithSubtasks,
+)
 from work_tickets.models import (  # noqa: E402
     Base,
     Category,
@@ -812,7 +818,7 @@ def test_jira_client_creates_issue_and_refreshes_status() -> None:
         return httpx.Response(200, json={"key": "WORK-7", "fields": {"status": {"name": "To Do"}}})
 
     config = JiraConfig(
-        base_url="https://jira.example.test",
+        base_url="https://work.atlassian.net",
         email="person@example.test",
         api_token="test-token",
         project_key="WORK",
@@ -829,6 +835,69 @@ def test_jira_client_creates_issue_and_refreshes_status() -> None:
     ]
     assert requests[0].headers["Authorization"].startswith("Basic ")
     assert requests[0].read().decode().find('"project":{"key":"WORK"') >= 0
+
+
+def test_jira_api_conventions_identify_cloud_and_server_urls() -> None:
+    cloud_urls = (
+        "https://work.example.atlassian.net",
+        "https://api.atlassian.com/ex/jira/cloud-id",
+    )
+    for url in cloud_urls:
+        conventions = JiraApiConventions.from_base_url(url)
+        assert conventions.deployment == "cloud"
+        assert conventions.api_version == 3
+        assert conventions.uses_adf_descriptions is True
+        assert conventions.path("issue") == "/rest/api/3/issue"
+
+    server = JiraApiConventions.from_base_url("https://jira.example.test/jira")
+    assert server.deployment == "server"
+    assert server.api_version == 2
+    assert server.uses_adf_descriptions is False
+    assert server.path("issue/WORK-1") == "/rest/api/2/issue/WORK-1"
+    compatibility = JiraApiConventions.from_base_url("https://jira.example.test")
+    assert compatibility.api_version == 3
+    assert compatibility.uses_adf_descriptions is True
+
+
+def test_jira_client_uses_server_api_v2_and_plain_text_descriptions() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"key": "WORK-10"})
+        if request.method == "PUT":
+            payload = json.loads(request.content)
+            assert payload["fields"]["description"] == "Updated details"
+            return httpx.Response(200, json={})
+        return httpx.Response(
+            200,
+            json={
+                "key": "WORK-10",
+                "fields": {"summary": "Server issue", "description": "Server details"},
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test/jira",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    created = jira.create_issue("Server issue", "Server details")
+    jira.update_issue(created.key, "Server issue", "Updated details")
+    jira.close()
+
+    assert [request.url.path for request in requests] == [
+        "/jira/rest/api/2/issue",
+        "/jira/rest/api/2/issue/WORK-10",
+        "/jira/rest/api/2/issue/WORK-10",
+        "/jira/rest/api/2/issue/WORK-10",
+    ]
+    create_payload = json.loads(requests[0].content)
+    assert create_payload["fields"]["description"] == "Server details"
 
 
 def test_jira_client_fetches_remote_fields_and_converts_adf_description() -> None:

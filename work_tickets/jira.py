@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -34,8 +34,59 @@ class JiraIssueWithSubtasks:
     subtasks: tuple[JiraIssue, ...]
 
 
+@dataclass(frozen=True)
+class JiraApiConventions:
+    """The REST conventions that differ between Jira Cloud and Jira Server."""
+
+    deployment: str
+    api_version: int
+    uses_adf_descriptions: bool
+
+    @classmethod
+    def from_base_url(cls, base_url: str) -> JiraApiConventions:
+        """Select conventions from the common Jira Cloud and Server URL formats.
+
+        Atlassian Cloud site URLs and the ``api.atlassian.com/ex/jira`` gateway
+        are unambiguous. A non-root context path is the usual Server/Data
+        Center URL format and selects REST v2. Root URLs retain the existing
+        v3 behavior for compatibility with installations that do not expose
+        enough information in their hostname to identify the deployment.
+        """
+        parsed = urlsplit(base_url)
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        path = parsed.path.rstrip("/").lower()
+        is_cloud_site = hostname.endswith(".atlassian.net")
+        is_cloud_gateway = hostname == "api.atlassian.com" and path.startswith("/ex/jira/")
+        if is_cloud_site or is_cloud_gateway:
+            return cls(deployment="cloud", api_version=3, uses_adf_descriptions=True)
+        if path and path != "/rest":
+            return cls(deployment="server", api_version=2, uses_adf_descriptions=False)
+        return cls(deployment="cloud-compatible", api_version=3, uses_adf_descriptions=True)
+
+    def path(self, resource: str) -> str:
+        return f"/rest/api/{self.api_version}/{resource}"
+
+    def description_payload(self, description: str) -> str | dict[str, Any]:
+        return self._adf(description) if self.uses_adf_descriptions else description
+
+    @staticmethod
+    def _adf(description: str) -> dict[str, Any]:
+        paragraphs = description.splitlines() or [""]
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": line}],
+                }
+                for line in paragraphs
+            ],
+        }
+
+
 class JiraClient:
-    """Small Jira Cloud REST client with no dependency on Jira credentials at import time."""
+    """Small Jira REST client with no dependency on Jira credentials at import time."""
 
     def __init__(self, config: JiraConfig, transport: httpx.BaseTransport | None = None) -> None:
         self._client = httpx.Client(
@@ -47,6 +98,7 @@ class JiraClient:
         )
         self._project_key = config.project_key
         self._issue_type = config.issue_type
+        self._conventions = JiraApiConventions.from_base_url(config.base_url)
 
     def close(self) -> None:
         self._client.close()
@@ -54,9 +106,9 @@ class JiraClient:
     def validate(self) -> JiraValidation:
         """Check project access and the configured issue type."""
         project = self._request_dict(
-            "GET", f"/rest/api/3/project/{quote(self._project_key, safe='')}"
+            "GET", self._api_path(f"project/{quote(self._project_key, safe='')}")
         )
-        issue_types = self._request_list("GET", "/rest/api/3/issuetype")
+        issue_types = self._request_list("GET", self._api_path("issuetype"))
         available_types = {
             str(item.get("name"))
             for item in issue_types
@@ -73,7 +125,7 @@ class JiraClient:
     def create_issue(self, summary: str, description: str) -> JiraIssue:
         response = self._request_dict(
             "POST",
-            "/rest/api/3/issue",
+            self._api_path("issue"),
             json={"fields": self._issue_fields(summary, description)},
         )
         key = response.get("key")
@@ -91,7 +143,7 @@ class JiraClient:
         fields["parent"] = {"key": parent_key}
         response = self._request_dict(
             "POST",
-            "/rest/api/3/issue",
+            self._api_path("issue"),
             json={"fields": fields},
         )
         key = response.get("key")
@@ -102,7 +154,7 @@ class JiraClient:
     def _get_subtask_issue_type_id(self) -> str:
         metadata = self._request_dict(
             "GET",
-            f"/rest/api/3/issue/createmeta/{quote(self._project_key, safe='')}/issuetypes",
+            self._api_path(f"issue/createmeta/{quote(self._project_key, safe='')}/issuetypes"),
             params={"maxResults": 100},
         )
         issue_types = metadata.get("issueTypes")
@@ -119,8 +171,13 @@ class JiraClient:
     def update_issue(self, key: str, summary: str, description: str) -> JiraIssue:
         self._request_dict(
             "PUT",
-            f"/rest/api/3/issue/{quote(key, safe='')}",
-            json={"fields": {"summary": summary, "description": self._adf(description)}},
+            self._api_path(f"issue/{quote(key, safe='')}"),
+            json={
+                "fields": {
+                    "summary": summary,
+                    "description": self._conventions.description_payload(description),
+                }
+            },
         )
         return self.get_issue(key)
 
@@ -128,14 +185,14 @@ class JiraClient:
         """Delete an issue from Jira."""
         self._request(
             "DELETE",
-            f"/rest/api/3/issue/{quote(key, safe='')}",
+            self._api_path(f"issue/{quote(key, safe='')}"),
             expect_json=False,
         )
 
     def get_issue(self, key: str) -> JiraIssue:
         response = self._request_dict(
             "GET",
-            f"/rest/api/3/issue/{quote(key, safe='')}",
+            self._api_path(f"issue/{quote(key, safe='')}"),
             params={"fields": "summary,description,issuetype,status"},
         )
         return self._issue_from_payload(key, response)
@@ -144,7 +201,7 @@ class JiraClient:
         """Fetch an issue and the subtasks Jira currently links beneath it."""
         response = self._request_dict(
             "GET",
-            f"/rest/api/3/issue/{quote(key, safe='')}",
+            self._api_path(f"issue/{quote(key, safe='')}"),
             params={"fields": "summary,description,issuetype,status,subtasks"},
         )
         issue = self._issue_from_payload(key, response)
@@ -194,28 +251,15 @@ class JiraClient:
             "project": {"key": self._project_key},
             "issuetype": {"name": self._issue_type},
             "summary": summary,
-            "description": self._adf(description),
+            "description": self._conventions.description_payload(description),
         }
 
-    @staticmethod
-    def _adf(description: str) -> dict[str, Any]:
-        # Jira Cloud API v3 expects Atlassian Document Format for descriptions.
-        paragraphs = description.splitlines() or [""]
-        return {
-            "type": "doc",
-            "version": 1,
-            "content": [
-                {
-                    "type": "paragraph",
-                    "content": [{"type": "text", "text": line}],
-                }
-                for line in paragraphs
-            ],
-        }
+    def _api_path(self, resource: str) -> str:
+        return self._conventions.path(resource)
 
     @classmethod
     def _description_text(cls, description: Any) -> str | None:
-        """Convert Jira Cloud's ADF description into the local plain-text form."""
+        """Convert Jira's description representation into local plain text."""
         if description is None:
             return None
         if isinstance(description, str):

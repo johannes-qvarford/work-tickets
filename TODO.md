@@ -19,4 +19,4 @@
 - [x] Be able to delete tickets - if the linked Jira ticket could not be deleted, then print an error message about it, but delete the local ticket data still.
 - [x] SQL Migrations - make them idempotent and create an initial migration that creates the current schema.
 - [x] When syncing from Jira, extra subtasks that don't exist for the Jira ticket should be deleted locally.
-- [ ] Refactor Jira Client(s) so that we can handle either Jira Cloud and Jira Server urls and conventions depending on the base url format - we may need to support v2 API and not just v3.
+- [x] Refactor Jira Client(s) so that we can handle either Jira Cloud and Jira Server urls and conventions depending on the base url format - we may need to support v2 API and not just v3.
