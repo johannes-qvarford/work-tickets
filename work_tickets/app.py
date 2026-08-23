@@ -208,6 +208,43 @@ def update_ticket(
     return RedirectResponse("/", status_code=303)
 
 
+@app.post("/subtasks/{subtask_id}")
+def update_subtask(
+    subtask_id: int,
+    summary: Annotated[str, Form()],
+    description: Annotated[str, Form()] = "",
+    planned_date: Annotated[str, Form()] = "",
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    subtask = db.get(Ticket, subtask_id)
+    if subtask is None:
+        return _redirect_with_message("error", "Subtask was not found.")
+    if subtask.parent_id is None:
+        return _redirect_with_message("error", "Top-level tickets cannot be edited here.")
+
+    summary_value = summary.strip()
+    if not summary_value:
+        return _redirect_with_message("error", "Subtask summary is required.")
+
+    try:
+        planned_date_value = date.fromisoformat(planned_date) if planned_date else None
+    except ValueError:
+        return _redirect_with_message("error", "Subtask planned date is invalid.")
+
+    subtask.summary = summary_value
+    subtask.description = description
+    subtask.planned_date = planned_date_value
+    if subtask.jira_issue_key:
+        try:
+            _sync_subtask(subtask, db)
+        except JiraError as exc:
+            db.rollback()
+            return _redirect_with_message("error", str(exc))
+    else:
+        db.commit()
+    return _redirect_with_message("success", f"Subtask {subtask.summary} updated.")
+
+
 @app.post("/tickets/{ticket_id}/sync")
 def sync_ticket(ticket_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
     ticket = db.get(Ticket, ticket_id)
@@ -380,6 +417,24 @@ def _sync_ticket(ticket: Ticket, db: Session) -> None:
                 subtask_issue = jira.create_subtask(issue.key, subtask.summary, subtask.description)
             _save_jira_issue(subtask, subtask_issue, synced_at)
             db.commit()
+    finally:
+        jira.close()
+
+
+def _sync_subtask(subtask: Ticket, db: Session) -> None:
+    if subtask.parent_id is None:
+        raise JiraError("Only subtasks can use the subtask edit sync path.")
+    if not subtask.jira_issue_key:
+        raise JiraError("Subtask has not been synced to Jira yet.")
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before syncing.")
+
+    jira = JiraClient(config)
+    try:
+        issue = jira.update_issue(subtask.jira_issue_key, subtask.summary, subtask.description)
+        _save_jira_issue(subtask, issue, datetime.utcnow())
+        db.commit()
     finally:
         jira.close()
 

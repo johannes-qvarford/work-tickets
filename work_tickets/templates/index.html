@@ -103,6 +103,8 @@
     .subtasks-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px; }
     .subtask { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid var(--border); }
     .subtask:last-of-type { border-bottom:0; }
+    .subtask-details { min-width:0; flex:1; }
+    .subtask-details > summary { cursor:pointer; list-style-position:outside; }
     .subtask-info { min-width:0; flex:1; }
     .subtask-info strong { display:block; overflow-wrap:anywhere; }
     .subtask-info.completed strong { color:var(--muted); text-decoration:line-through; }
@@ -298,13 +300,31 @@
                   </div>
                   {% for subtask in ticket.subtasks %}
                   <div class="subtask">
-                    <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">
-                      <strong>{{ subtask.summary }}</strong>
-                      <div class="subtask-meta">
-                        {% if subtask.planned_date %}<time datetime="{{ subtask.planned_date }}">{{ subtask.planned_date }}</time>{% else %}Unscheduled{% endif %}
-                        {% if subtask.local_completed %}· Done{% endif %}
-                      </div>
-                    </div>
+                    <details class="subtask-details">
+                      <summary>
+                        <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">
+                          <strong>{{ subtask.summary }}</strong>
+                          <div class="subtask-meta">
+                            {% if subtask.planned_date %}<time datetime="{{ subtask.planned_date }}">{{ subtask.planned_date }}</time>{% else %}Unscheduled{% endif %}
+                            {% if subtask.local_completed %}· Done{% endif %}
+                          </div>
+                        </div>
+                      </summary>
+                      <form class="edit-form subtask-edit-form" method="post" action="/subtasks/{{ subtask.id }}">
+                        <div class="form-field-row edit-fields">
+                          <label>
+                            <span class="field-label">Summary</span><input name="summary" value="{{ subtask.summary }}" required>
+                          </label>
+                          <label>
+                            <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ subtask.planned_date or '' }}">
+                          </label>
+                        </div>
+                        <label>
+                          <span class="field-label">Description</span><textarea name="description">{{ subtask.description }}</textarea>
+                        </label>
+                        <button type="submit">{% if subtask.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
+                      </form>
+                    </details>
                     <div class="subtask-actions" aria-label="Actions for {{ subtask.summary }}">
                       <form method="post" action="/subtasks/{{ subtask.id }}/complete">
                         <button

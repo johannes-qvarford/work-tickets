@@ -952,6 +952,189 @@ def test_create_subtasks_in_edit_section_persists_fields_and_orders_them() -> No
     assert "Delete this subtask?" in page.text
 
 
+def test_edit_subtask_persists_fields_without_changing_relationship_or_order() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Edit parent", position=211)
+        subtask = Ticket(
+            summary="Original subtask",
+            description="Original details",
+            planned_date=date(2026, 8, 24),
+            position=7,
+            parent=parent,
+            local_completed=True,
+        )
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    response = client.post(
+        f"/subtasks/{subtask_id}",
+        data={
+            "summary": "  Updated subtask  ",
+            "description": "Updated details",
+            "planned_date": "2026-09-03",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "Subtask%20Updated%20subtask%20updated" in response.headers["location"]
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        subtask = db.get(Ticket, subtask_id)
+        assert parent is not None
+        assert subtask is not None
+        assert subtask.summary == "Updated subtask"
+        assert subtask.description == "Updated details"
+        assert subtask.planned_date == date(2026, 9, 3)
+        assert subtask.parent_id == parent_id
+        assert subtask.position == 7
+        assert subtask.local_completed is True
+
+    page = client.get("/")
+    assert f'action="/subtasks/{subtask_id}"' in page.text
+    assert 'name="summary" value="Updated subtask"' in page.text
+    assert f'action="/subtasks/{subtask_id}/sync"' not in page.text
+
+
+def test_edit_subtask_validates_summary_and_planned_date() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Edit validation parent", position=212)
+        subtask = Ticket(summary="Keep this subtask", position=0, parent=parent)
+        db.add_all([parent, subtask])
+        db.commit()
+        subtask_id = subtask.id
+
+    missing_summary = client.post(
+        f"/subtasks/{subtask_id}",
+        data={"summary": "   ", "planned_date": "2026-08-25"},
+        follow_redirects=False,
+    )
+    invalid_date = client.post(
+        f"/subtasks/{subtask_id}",
+        data={"summary": "Updated subtask", "planned_date": "not-a-date"},
+        follow_redirects=False,
+    )
+
+    assert missing_summary.status_code == 303
+    assert "Subtask%20summary%20is%20required" in missing_summary.headers["location"]
+    assert invalid_date.status_code == 303
+    assert "Subtask%20planned%20date%20is%20invalid" in invalid_date.headers["location"]
+    with SessionLocal() as db:
+        subtask = db.get(Ticket, subtask_id)
+        assert subtask is not None
+        assert subtask.summary == "Keep this subtask"
+        assert subtask.planned_date is None
+
+
+def test_edit_subtask_rejects_missing_ids_and_top_level_tickets() -> None:
+    with SessionLocal() as db:
+        top_level = Ticket(summary="Not a subtask to edit", position=213)
+        db.add(top_level)
+        db.commit()
+        top_level_id = top_level.id
+
+    missing = client.post(
+        "/subtasks/999999",
+        data={"summary": "Missing"},
+        follow_redirects=False,
+    )
+    top_level_response = client.post(
+        f"/subtasks/{top_level_id}",
+        data={"summary": "Should not edit"},
+        follow_redirects=False,
+    )
+
+    assert missing.status_code == 303
+    assert "Subtask%20was%20not%20found" in missing.headers["location"]
+    assert top_level_response.status_code == 303
+    assert (
+        "Top-level%20tickets%20cannot%20be%20edited%20here"
+        in top_level_response.headers["location"]
+    )
+
+
+def test_edit_synced_subtask_updates_only_that_jira_issue(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.project_key == "WORK"
+
+        def update_issue(self, key: str, summary: str, description: str) -> JiraIssue:
+            calls.append((key, summary, description))
+            return JiraIssue(
+                key=key,
+                summary="Remote updated subtask",
+                description="Remote updated details",
+                status_name="In Progress",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.project_key = "WORK"
+        parent = Ticket(summary="Synced edit parent", position=214, jira_issue_key="WORK-60")
+        subtask = Ticket(
+            summary="Local subtask",
+            description="Local details",
+            planned_date=date(2026, 9, 4),
+            position=3,
+            parent=parent,
+            local_completed=True,
+            jira_issue_key="WORK-61",
+            jira_status_name="To Do",
+        )
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    response = client.post(
+        f"/subtasks/{subtask_id}",
+        data={
+            "summary": "Edited locally",
+            "description": "Edited details",
+            "planned_date": "2026-09-05",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert calls == [("WORK-61", "Edited locally", "Edited details")]
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        subtask = db.get(Ticket, subtask_id)
+        assert parent is not None
+        assert subtask is not None
+        assert parent.summary == "Synced edit parent"
+        assert parent.jira_issue_key == "WORK-60"
+        assert subtask.summary == "Remote updated subtask"
+        assert subtask.description == "Remote updated details"
+        assert subtask.planned_date == date(2026, 9, 5)
+        assert subtask.parent_id == parent_id
+        assert subtask.position == 3
+        assert subtask.local_completed is True
+        assert subtask.jira_issue_key == "WORK-61"
+        assert subtask.jira_status_name == "In Progress"
+
+
 def test_create_subtask_validates_summary_and_planned_date() -> None:
     with SessionLocal() as db:
         parent = Ticket(summary="Validation parent", position=201)
