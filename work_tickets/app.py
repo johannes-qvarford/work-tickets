@@ -34,6 +34,20 @@ def get_db() -> Generator[Session, None, None]:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
+    categories = list(db.scalars(select(Category).order_by(Category.name)))
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            **_ticket_list_context(db),
+            "categories": categories,
+            "error": request.query_params.get("error"),
+            "success": request.query_params.get("success"),
+        },
+    )
+
+
+def _ticket_list_context(db: Session) -> dict[str, object]:
     tickets = list(
         db.scalars(
             select(Ticket)
@@ -41,7 +55,6 @@ def index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResp
             .order_by(Ticket.position, Ticket.created_at)
         )
     )
-    categories = list(db.scalars(select(Category).order_by(Category.name)))
     today = date.today()
     today_tickets = [
         ticket
@@ -52,60 +65,104 @@ def index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResp
             and ticket.planned_date <= today
         )
     ]
-    return templates.TemplateResponse(
+    return {
+        "tickets": tickets,
+        "today_tickets": today_tickets,
+        "jira_config": db.get(JiraConfig, 1),
+        "today": today,
+    }
+
+
+def _render_fragment(request: Request, template_name: str, context: dict[str, object]) -> str:
+    response = templates.TemplateResponse(request, template_name, context)
+    return bytes(response.body).decode()
+
+
+def _render_ticket(request: Request, ticket: Ticket, db: Session) -> str:
+    return _render_fragment(
         request,
-        "index.html",
-        {
-            "tickets": tickets,
-            "today_tickets": today_tickets,
-            "categories": categories,
-            "jira_config": db.get(JiraConfig, 1),
-            "today": today,
-            "error": request.query_params.get("error"),
-            "success": request.query_params.get("success"),
-        },
+        "ticket.html",
+        {"ticket": ticket, "jira_config": db.get(JiraConfig, 1)},
     )
+
+
+def _render_ticket_lists(request: Request, db: Session) -> str:
+    return _render_fragment(request, "ticket_lists.html", _ticket_list_context(db))
 
 
 @app.post("/tickets")
 def create_ticket(
+    request: Request,
     summary: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
     planned_date: Annotated[str, Form()] = "",
     category_id: Annotated[str, Form()] = "",
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> Response:
+    summary_value = summary.strip()
+    if not summary_value:
+        return _mutation_response(request, "error", "Ticket summary is required.", 422)
+
+    try:
+        planned_date_value = date.fromisoformat(planned_date) if planned_date else None
+    except ValueError:
+        return _mutation_response(request, "error", "Ticket planned date is invalid.", 422)
+
+    try:
+        category_id_value = int(category_id) if category_id else None
+    except ValueError:
+        return _mutation_response(request, "error", "Ticket category is invalid.", 422)
+
+    if category_id_value is not None and db.get(Category, category_id_value) is None:
+        return _mutation_response(request, "error", "Ticket category was not found.", 422)
+
     count = db.scalar(select(func.count()).select_from(Ticket)) or 0
-    ticket = Ticket(summary=summary.strip(), description=description, position=count)
-    ticket.planned_date = date.fromisoformat(planned_date) if planned_date else None
-    ticket.category_id = int(category_id) if category_id else None
+    ticket = Ticket(
+        summary=summary_value,
+        description=description,
+        planned_date=planned_date_value,
+        category_id=category_id_value,
+        position=count,
+    )
     db.add(ticket)
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return _mutation_response(
+        request,
+        "success",
+        f"Ticket {ticket.summary} added.",
+        200,
+        tickets_html=_render_ticket_lists(request, db),
+    )
 
 
 @app.post("/tickets/{ticket_id}/subtasks")
 def create_subtask(
     ticket_id: int,
+    request: Request,
     summary: Annotated[str, Form()] = "",
     description: Annotated[str, Form()] = "",
     planned_date: Annotated[str, Form()] = "",
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> Response:
     parent = db.get(Ticket, ticket_id)
     if parent is None:
-        return _redirect_with_message("error", "Parent ticket was not found.")
+        return _mutation_response(request, "error", "Parent ticket was not found.", 404)
     if parent.parent_id is not None:
-        return _redirect_with_message("error", "Subtasks can only be added to top-level tickets.")
+        return _mutation_response(
+            request,
+            "error",
+            "Subtasks can only be added to top-level tickets.",
+            400,
+        )
 
     summary_value = summary.strip()
     if not summary_value:
-        return _redirect_with_message("error", "Subtask summary is required.")
+        return _mutation_response(request, "error", "Subtask summary is required.", 422)
 
     try:
         planned_date_value = date.fromisoformat(planned_date) if planned_date else None
     except ValueError:
-        return _redirect_with_message("error", "Subtask planned date is invalid.")
+        return _mutation_response(request, "error", "Subtask planned date is invalid.", 422)
 
     max_position = db.scalar(select(func.max(Ticket.position)).where(Ticket.parent_id == parent.id))
     subtask = Ticket(
@@ -117,7 +174,14 @@ def create_subtask(
     )
     db.add(subtask)
     db.commit()
-    return RedirectResponse("/", status_code=303)
+    return _mutation_response(
+        request,
+        "success",
+        f"Subtask {subtask.summary} added.",
+        200,
+        ticket_html=_render_ticket(request, parent, db),
+        ticket_target=f"ticket-{parent.id}",
+    )
 
 
 @app.post("/subtasks/{subtask_id}/delete")
@@ -200,50 +264,69 @@ def _move_subtask(subtask_id: int, offset: int, request: Request, db: Session) -
 @app.post("/tickets/{ticket_id}")
 def update_ticket(
     ticket_id: int,
+    request: Request,
     summary: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
     planned_date: Annotated[str, Form()] = "",
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> Response:
     ticket = db.get(Ticket, ticket_id)
-    if ticket is not None and summary.strip():
-        ticket.summary = summary.strip()
-        ticket.description = description
-        ticket.planned_date = date.fromisoformat(planned_date) if planned_date else None
-        if ticket.jira_issue_key:
-            try:
-                _sync_ticket(ticket, db)
-            except JiraError as exc:
-                db.rollback()
-                return _redirect_with_message("error", str(exc))
-        else:
-            db.commit()
-    return RedirectResponse("/", status_code=303)
+    if ticket is None:
+        return _mutation_response(request, "error", "Ticket was not found.", 404)
+
+    summary_value = summary.strip()
+    if not summary_value:
+        return _mutation_response(request, "error", "Ticket summary is required.", 422)
+    try:
+        planned_date_value = date.fromisoformat(planned_date) if planned_date else None
+    except ValueError:
+        return _mutation_response(request, "error", "Ticket planned date is invalid.", 422)
+
+    ticket.summary = summary_value
+    ticket.description = description
+    ticket.planned_date = planned_date_value
+    if ticket.jira_issue_key:
+        try:
+            _sync_ticket(ticket, db)
+        except JiraError as exc:
+            db.rollback()
+            return _mutation_response(request, "error", str(exc), 422)
+    else:
+        db.commit()
+    return _mutation_response(
+        request,
+        "success",
+        f"Ticket {ticket.summary} updated.",
+        200,
+        tickets_html=_render_ticket_lists(request, db),
+    )
 
 
 @app.post("/subtasks/{subtask_id}")
 def update_subtask(
     subtask_id: int,
+    request: Request,
     summary: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
     planned_date: Annotated[str, Form()] = "",
     db: Session = Depends(get_db),
-) -> RedirectResponse:
+) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
-        return _redirect_with_message("error", "Subtask was not found.")
+        return _mutation_response(request, "error", "Subtask was not found.", 404)
     if subtask.parent_id is None:
-        return _redirect_with_message("error", "Top-level tickets cannot be edited here.")
+        return _mutation_response(request, "error", "Top-level tickets cannot be edited here.", 400)
 
     summary_value = summary.strip()
     if not summary_value:
-        return _redirect_with_message("error", "Subtask summary is required.")
+        return _mutation_response(request, "error", "Subtask summary is required.", 422)
 
     try:
         planned_date_value = date.fromisoformat(planned_date) if planned_date else None
     except ValueError:
-        return _redirect_with_message("error", "Subtask planned date is invalid.")
+        return _mutation_response(request, "error", "Subtask planned date is invalid.", 422)
 
+    parent_id = subtask.parent_id
     subtask.summary = summary_value
     subtask.description = description
     subtask.planned_date = planned_date_value
@@ -252,10 +335,21 @@ def update_subtask(
             _sync_subtask(subtask, db)
         except JiraError as exc:
             db.rollback()
-            return _redirect_with_message("error", str(exc))
+            return _mutation_response(request, "error", str(exc), 422)
     else:
         db.commit()
-    return _redirect_with_message("success", f"Subtask {subtask.summary} updated.")
+    parent = db.get(Ticket, parent_id)
+    if parent is None:
+        return _mutation_response(request, "error", "Parent ticket was not found.", 404)
+    db.expire(parent, ["subtasks"])
+    return _mutation_response(
+        request,
+        "success",
+        f"Subtask {subtask.summary} updated.",
+        200,
+        ticket_html=_render_ticket(request, parent, db),
+        ticket_target=f"ticket-{parent.id}",
+    )
 
 
 @app.post("/tickets/{ticket_id}/sync")
@@ -516,6 +610,26 @@ def _save_jira_issue(
 
 def _redirect_with_message(kind: str, message: str) -> RedirectResponse:
     return RedirectResponse(f"/?{kind}={quote(message)}", status_code=303)
+
+
+def _mutation_response(
+    request: Request,
+    kind: str,
+    message: str,
+    status_code: int,
+    *,
+    tickets_html: str | None = None,
+    ticket_html: str | None = None,
+    ticket_target: str | None = None,
+) -> Response:
+    if "application/json" in request.headers.get("accept", "").lower():
+        payload: dict[str, object] = {"ok": kind == "success", "message": message}
+        if tickets_html is not None:
+            payload.update({"target": "ticket-lists", "html": tickets_html})
+        elif ticket_html is not None:
+            payload.update({"target": ticket_target, "html": ticket_html})
+        return JSONResponse(payload, status_code=status_code)
+    return _redirect_with_message(kind, message)
 
 
 def _move_response(

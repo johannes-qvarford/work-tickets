@@ -7,4 +7,4 @@
 - [ ] Planned date and category should fit next to summary when creating ticket, while date should fit next to summary when editing a ticket.
 - [x] You should be able to edit a subtask like you can its' parent.
 - [x] Changing subtask order should not require page refresh.
-- [ ] Adding and editing tickets and subtasks should not require page refresh.
+- [x] Adding and editing tickets and subtasks should not require page refresh.

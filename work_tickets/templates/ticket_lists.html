@@ -1,0 +1,41 @@
+<div id="ticket-lists">
+  <section class="panel">
+    <h2>Today</h2>
+    <p class="muted">Due today and overdue, in priority order.</p>
+    {% for ticket in today_tickets %}
+    <article class="ticket{% if ticket.local_completed %} completed{% endif %}" data-ticket-id="{{ ticket.id }}">
+      <div class="ticket-header">
+        <div class="ticket-heading">
+          <h3>{{ ticket.summary }}</h3>
+          <div class="ticket-meta">
+            {% if ticket.category %}<span>{{ ticket.category.name }}</span>{% endif %}
+            <span class="compact-meta" aria-label="Planned date: {{ ticket.planned_date }}" title="Planned date">
+              <span aria-hidden="true">◷</span><time datetime="{{ ticket.planned_date }}">{{ ticket.planned_date }}</time>
+            </span>
+          </div>
+        </div>
+        <div class="ticket-actions" aria-label="Ticket actions">
+          {% if ticket.jira_issue_key and jira_config %}<a
+  class="badge"
+  href="{{ (jira_config.browser_base_url or jira_config.base_url) }}/browse/{{ ticket.jira_issue_key }}"
+  target="_blank"
+  rel="noopener noreferrer"
+>{{ ticket.jira_issue_key }}</a>{% elif ticket.jira_issue_key %}<span class="badge">{{ ticket.jira_issue_key }}</span>{% else %}<span class="badge">LOCAL</span>{% endif %}
+          <form method="post" action="/tickets/{{ ticket.id }}/complete">
+            <button
+              class="compact-control completion-control"
+              type="submit"
+              aria-label="Mark {{ ticket.summary }} as done"
+              title="Mark as done"
+            ><span aria-hidden="true">✓</span><span class="sr-only">Done</span></button>
+          </form>
+        </div>
+      </div>
+    </article>
+  {% else %}<div class="empty">Nothing due. Add the next useful thing.</div>{% endfor %}
+  </section>
+  <section class="panel section-spaced">
+    <h2>All tickets</h2>
+    {% for ticket in tickets %}{% include "ticket.html" %}{% else %}<div class="empty">No tickets yet.</div>{% endfor %}
+  </section>
+</div>

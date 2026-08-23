@@ -144,274 +144,16 @@
     </header>
     {% if error %}<div class="panel notice error" role="alert">{{ error }}</div>{% endif %}
     {% if success %}<div class="panel notice success" role="status">{{ success }}</div>{% endif %}
+    <div id="action-status" class="panel notice" aria-live="polite" hidden></div>
     <div id="move-status" class="sr-only" role="status" aria-live="polite"></div>
     <div class="grid">
       <main>
-        <section class="panel">
-          <h2>Today</h2>
-          <p class="muted">Due today and overdue, in priority order.</p>
-          {% for ticket in today_tickets %}
-          <article class="ticket{% if ticket.local_completed %} completed{% endif %}">
-            <div class="ticket-header">
-              <div class="ticket-heading">
-                <h3>{{ ticket.summary }}</h3>
-                <div class="ticket-meta">
-                  {% if ticket.category %}
-                  <span>{{ ticket.category.name }}</span>
-                  {% endif %}
-                  <span class="compact-meta" aria-label="Planned date: {{ ticket.planned_date }}" title="Planned date">
-                    <span aria-hidden="true">◷</span>
-                    <time datetime="{{ ticket.planned_date }}">{{ ticket.planned_date }}</time>
-                  </span>
-                </div>
-              </div>
-              <div class="ticket-actions" aria-label="Ticket actions">
-                {% if ticket.jira_issue_key %}
-                {% if jira_config %}
-                <a
-                  class="badge"
-                  href="{{ (jira_config.browser_base_url or jira_config.base_url) }}/browse/{{ ticket.jira_issue_key }}"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >{{ ticket.jira_issue_key }}</a>
-              {% else %}
-                <span class="badge">{{ ticket.jira_issue_key }}</span>
-                {% endif %}
-              {% else %}
-                <span class="badge">LOCAL</span>
-                {% endif %}
-                <form method="post" action="/tickets/{{ ticket.id }}/complete">
-                  <button
-                    class="compact-control completion-control"
-                    type="submit"
-                    aria-label="Mark {{ ticket.summary }} as done"
-                    title="Mark as done"
-                  >
-                    <span aria-hidden="true">✓</span>
-                    <span class="sr-only">Done</span>
-                  </button>
-                </form>
-              </div>
-            </div>
-          </article>
-        {% else %}<div class="empty">Nothing due. Add the next useful thing.</div>{% endfor %}
-        </section>
-        <section class="panel section-spaced">
-          <h2>All tickets</h2>
-          {% for ticket in tickets %}
-          <article class="ticket{% if ticket.local_completed %} completed{% endif %}">
-            <div class="ticket-header">
-              <div class="ticket-heading">
-                <h3>{{ ticket.summary }}</h3>
-                <div class="ticket-meta">
-                  {% if ticket.category %}
-                  <span>{{ ticket.category.name }}</span>
-                  {% endif %}
-                  {% if ticket.planned_date %}
-                  <span class="compact-meta" aria-label="Planned date: {{ ticket.planned_date }}" title="Planned date">
-                    <span aria-hidden="true">◷</span>
-                    <time datetime="{{ ticket.planned_date }}">{{ ticket.planned_date }}</time>
-                  </span>
-                {% else %}
-                  <span class="compact-meta" aria-label="Planned date: unscheduled">◷ Unscheduled</span>
-                  {% endif %}
-                  {% if ticket.local_completed %}<span>Done</span>{% endif %}
-                  {% if ticket.jira_status_name %}
-                  <span>Jira: {{ ticket.jira_status_name }}</span>
-                  {% endif %}
-                </div>
-              </div>
-              <div class="ticket-actions" aria-label="Ticket actions">
-                {% if ticket.jira_issue_key %}
-                {% if jira_config %}
-                <a
-                  class="badge"
-                  href="{{ (jira_config.browser_base_url or jira_config.base_url) }}/browse/{{ ticket.jira_issue_key }}"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >{{ ticket.jira_issue_key }}</a>
-              {% else %}
-                <span class="badge">{{ ticket.jira_issue_key }}</span>
-                {% endif %}
-              {% else %}
-                <span class="badge">LOCAL</span>
-                {% endif %}
-                <form method="post" action="/tickets/{{ ticket.id }}/complete">
-                  <button
-                    class="compact-control completion-control"
-                    type="submit"
-                    aria-label="{% if ticket.local_completed %}Mark {{ ticket.summary }} as active{% else %}Mark {{ ticket.summary }} as done{% endif %}"
-                    title="{% if ticket.local_completed %}Mark as active{% else %}Mark as done{% endif %}"
-                  >
-                    <span aria-hidden="true">{% if ticket.local_completed %}↺{% else %}✓{% endif %}</span>
-                    <span class="sr-only">
-                      {% if ticket.local_completed %}Mark as active{% else %}Mark as done{% endif %}
-                    </span>
-                  </button>
-                </form>
-                {% if ticket.jira_issue_key %}
-                <form method="post" action="/tickets/{{ ticket.id }}/sync-from-jira">
-                  <button
-                    class="compact-control"
-                    type="submit"
-                    aria-label="Sync {{ ticket.summary }} and its subtasks from Jira"
-                    title="Sync from Jira with subtasks"
-                  >
-                    <span aria-hidden="true">↻</span>
-                    <span class="sr-only">Sync from Jira</span>
-                  </button>
-                </form>
-              {% else %}
-                <form method="post" action="/tickets/{{ ticket.id }}/sync">
-                  <button
-                    class="compact-control"
-                    type="submit"
-                    aria-label="Sync {{ ticket.summary }} and its subtasks to Jira"
-                    title="Sync to Jira with subtasks"
-                  >
-                    <span aria-hidden="true">↻</span>
-                    <span class="sr-only">Sync to Jira</span>
-                  </button>
-                </form>
-                {% endif %}
-              </div>
-            </div>
-            <details class="ticket-details">
-              <summary>Edit ticket and subtasks</summary>
-              <div class="details-content">
-                <form class="edit-form" method="post" action="/tickets/{{ ticket.id }}">
-                  <div class="form-field-row edit-fields">
-                    <label>
-                      <span class="field-label">Summary</span><input name="summary" value="{{ ticket.summary }}" required>
-                    </label>
-                    <label>
-                      <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}">
-                    </label>
-                  </div>
-                  <label>
-                    <span class="field-label">Description</span><textarea name="description">{{ ticket.description }}</textarea>
-                  </label>
-                  <div class="meta">Category: {{ ticket.category.name if ticket.category else 'Uncategorized' }}</div>
-                  <button type="submit">{% if ticket.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
-                </form>
-                <div class="subtasks" data-subtasks>
-                  <div class="subtasks-heading">
-                    <h4>Subtasks</h4>
-                    <span class="meta">{{ ticket.subtasks|length }}</span>
-                  </div>
-                  {% for subtask in ticket.subtasks %}
-                  <div class="subtask" data-subtask-id="{{ subtask.id }}">
-                    <details class="subtask-details">
-                      <summary>
-                        <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">
-                          <strong>{{ subtask.summary }}</strong>
-                          <div class="subtask-meta">
-                            {% if subtask.planned_date %}<time datetime="{{ subtask.planned_date }}">{{ subtask.planned_date }}</time>{% else %}Unscheduled{% endif %}
-                            {% if subtask.local_completed %}· Done{% endif %}
-                          </div>
-                        </div>
-                      </summary>
-                      <form class="edit-form subtask-edit-form" method="post" action="/subtasks/{{ subtask.id }}">
-                        <div class="form-field-row edit-fields">
-                          <label>
-                            <span class="field-label">Summary</span><input name="summary" value="{{ subtask.summary }}" required>
-                          </label>
-                          <label>
-                            <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ subtask.planned_date or '' }}">
-                          </label>
-                        </div>
-                        <label>
-                          <span class="field-label">Description</span><textarea name="description">{{ subtask.description }}</textarea>
-                        </label>
-                        <button type="submit">{% if subtask.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
-                      </form>
-                    </details>
-                    <div class="subtask-actions" aria-label="Actions for {{ subtask.summary }}">
-                      <form method="post" action="/subtasks/{{ subtask.id }}/complete">
-                        <button
-                          class="compact-control completion-control"
-                          type="submit"
-                          aria-label="{% if subtask.local_completed %}Mark {{ subtask.summary }} as active{% else %}Mark {{ subtask.summary }} as done{% endif %}"
-                          title="{% if subtask.local_completed %}Mark as active{% else %}Mark as done{% endif %}"
-                        >
-                          <span aria-hidden="true">{% if subtask.local_completed %}↺{% else %}✓{% endif %}</span>
-                          <span class="sr-only">{% if subtask.local_completed %}Mark as active{% else %}Mark as done{% endif %}</span>
-                        </button>
-                      </form>
-                      <form
-                        class="move-subtask-form"
-                        data-move-subtask
-                        method="post"
-                        action="/subtasks/{{ subtask.id }}/move-up"
-                      >
-                        <button
-                          class="compact-control"
-                          type="submit"
-                          data-move-direction="up"
-                          {% if loop.first %}disabled{% endif %}
-                          aria-label="Move up {{ subtask.summary }}"
-                          title="Move up"
-                        >
-                          <span aria-hidden="true">↑</span><span class="sr-only">Move up</span>
-                        </button>
-                      </form>
-                      <form
-                        class="move-subtask-form"
-                        data-move-subtask
-                        method="post"
-                        action="/subtasks/{{ subtask.id }}/move-down"
-                      >
-                        <button
-                          class="compact-control"
-                          type="submit"
-                          data-move-direction="down"
-                          {% if loop.last %}disabled{% endif %}
-                          aria-label="Move down {{ subtask.summary }}"
-                          title="Move down"
-                        >
-                          <span aria-hidden="true">↓</span><span class="sr-only">Move down</span>
-                        </button>
-                      </form>
-                      <form
-                        method="post"
-                        action="/subtasks/{{ subtask.id }}/delete"
-                        onsubmit="return confirm('Delete this subtask?');"
-                      >
-                        <button
-                          class="compact-control danger"
-                          type="submit"
-                          aria-label="Delete {{ subtask.summary }}"
-                          title="Delete subtask"
-                        >
-                          <span aria-hidden="true">×</span><span class="sr-only">Delete</span>
-                        </button>
-                      </form>
-                    </div>
-                  </div>
-                {% else %}<p class="muted">No subtasks yet.</p>{% endfor %}
-                  <form class="subtask-form" method="post" action="/tickets/{{ ticket.id }}/subtasks">
-                    <label>
-                      <span class="field-label">New subtask</span><input name="summary" placeholder="What is the next step?" required>
-                    </label>
-                    <label>
-                      <span class="field-label">Details (optional)</span><textarea name="description" placeholder="Details (optional)"></textarea>
-                    </label>
-                    <label>
-                      <span class="field-label">Planned date</span><input type="date" name="planned_date">
-                    </label>
-                    <button type="submit">Add subtask</button>
-                  </form>
-                </div>
-              </div>
-            </details>
-          </article>
-        {% else %}<div class="empty">No tickets yet.</div>{% endfor %}
-        </section>
+        {% include "ticket_lists.html" %}
       </main>
       <aside>
         <section class="panel">
           <h2>New ticket</h2>
-          <form method="post" action="/tickets">
+          <form method="post" action="/tickets" data-ajax-form>
             <div class="form-field-row create-fields">
               <label>
                 <span class="field-label">Summary</span><input name="summary" placeholder="What needs doing?" required>
@@ -525,9 +267,18 @@
         if (!window.fetch) return;
 
         const status = document.getElementById("move-status");
+        const actionStatus = document.getElementById("action-status");
 
         function announce(message) {
           if (status) status.textContent = message;
+        }
+
+        function announceAction(message, kind = "success") {
+          if (!actionStatus) return;
+          actionStatus.hidden = false;
+          actionStatus.className = `panel notice ${kind}`;
+          actionStatus.setAttribute("role", kind === "error" ? "alert" : "status");
+          actionStatus.textContent = message;
         }
 
         function updateMoveControls(container) {
@@ -554,31 +305,80 @@
           updateMoveControls(container);
         }
 
-        document.querySelectorAll("[data-move-subtask]").forEach((form) => {
-          form.addEventListener("submit", async (event) => {
-            event.preventDefault();
-            const container = form.closest("[data-subtasks]");
-            const buttons = container?.querySelectorAll("[data-move-direction]");
-            buttons?.forEach((button) => (button.disabled = true));
-            try {
-              const response = await fetch(form.action, {
-                method: "POST",
-                headers: { Accept: "application/json" },
-              });
-              const result = await response.json();
-              if (!response.ok || !result.ok) {
-                throw new Error(result.message || "Unable to move subtask.");
-              }
-              if (container && Array.isArray(result.order)) {
-                applyOrder(container, result.order);
-              }
-              announce(result.message);
-            } catch (error) {
-              announce(error instanceof Error ? error.message : "Unable to move subtask.");
-            } finally {
-              if (container) updateMoveControls(container);
-            }
+        function restoreTicketState(ticketId, ticketDetailsOpen, subtaskId, subtaskDetailsOpen) {
+          const ticket = document.getElementById(`ticket-${ticketId}`);
+          if (!ticket) return null;
+          const ticketDetails = ticket.querySelector(".ticket-details");
+          if (ticketDetails && ticketDetailsOpen) ticketDetails.open = true;
+          if (subtaskId && subtaskDetailsOpen) {
+            const subtask = [...ticket.querySelectorAll("[data-subtask-id]")].find(
+              (candidate) => candidate.dataset.subtaskId === String(subtaskId),
+            );
+            const details = subtask?.querySelector(".subtask-details");
+            if (details) details.open = true;
+          }
+          return ticket;
+        }
+
+        async function submitAjaxForm(form) {
+          const ticket = form.closest("[data-ticket-id]");
+          const subtask = form.closest("[data-subtask-id]");
+          const ticketId = ticket?.dataset.ticketId;
+          const subtaskId = subtask?.dataset.subtaskId;
+          const ticketDetailsOpen = ticket?.querySelector(".ticket-details")?.open ?? false;
+          const subtaskDetailsOpen = subtask?.querySelector(".subtask-details")?.open ?? false;
+          const response = await fetch(form.action, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            body: new FormData(form),
           });
+          const result = await response.json();
+          if (!response.ok || !result.ok) {
+            throw new Error(result.message || "Unable to save changes.");
+          }
+          const target = typeof result.target === "string" ? result.target : "";
+          const targetElement = document.getElementById(target);
+          if (!targetElement || !result.html) throw new Error("The saved view could not be updated.");
+          targetElement.outerHTML = result.html;
+          restoreTicketState(ticketId, ticketDetailsOpen, subtaskId, subtaskDetailsOpen);
+          if (form.action.endsWith("/tickets")) form.reset();
+          announceAction(result.message);
+        }
+
+        async function submitMove(form) {
+          const container = form.closest("[data-subtasks]");
+          const buttons = container?.querySelectorAll("[data-move-direction]");
+          buttons?.forEach((button) => (button.disabled = true));
+          try {
+            const response = await fetch(form.action, {
+              method: "POST",
+              headers: { Accept: "application/json" },
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              throw new Error(result.message || "Unable to move subtask.");
+            }
+            if (container && Array.isArray(result.order)) applyOrder(container, result.order);
+            announce(result.message);
+          } catch (error) {
+            announce(error instanceof Error ? error.message : "Unable to move subtask.");
+          } finally {
+            if (container) updateMoveControls(container);
+          }
+        }
+
+        document.addEventListener("submit", (event) => {
+          const form = event.target.closest("form");
+          if (!form) return;
+          if (form.matches("[data-move-subtask]")) {
+            event.preventDefault();
+            submitMove(form);
+          } else if (form.matches("[data-ajax-form]") || form.action.endsWith("/tickets")) {
+            event.preventDefault();
+            submitAjaxForm(form).catch((error) => {
+              announceAction(error instanceof Error ? error.message : "Unable to save changes.", "error");
+            });
+          }
         });
       })();
     </script>

@@ -115,6 +115,135 @@ def test_subtask_move_returns_json_order_for_enhanced_requests() -> None:
         assert [subtask.id for subtask in parent.subtasks] == [second_id, first_id]
 
 
+def test_ticket_and_subtask_forms_have_no_refresh_hooks() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="AJAX hooks", position=0)
+        subtask = Ticket(summary="AJAX subtask hooks", position=0, parent=ticket)
+        db.add_all([ticket, subtask])
+        db.commit()
+        ticket_id = ticket.id
+        subtask_id = subtask.id
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert page.text.count("data-ajax-form") >= 3
+    assert 'data-response-target="ticket-lists"' in page.text
+    assert f'data-response-target="ticket-{ticket_id}"' in page.text
+    assert f'action="/tickets/{ticket_id}"' in page.text
+    assert f'action="/tickets/{ticket_id}/subtasks"' in page.text
+    assert f'action="/subtasks/{subtask_id}"' in page.text
+    assert 'headers: { Accept: "application/json" }' in page.text
+    assert "body: new FormData(form)" in page.text
+    assert "targetElement.outerHTML = result.html" in page.text
+
+
+def test_ticket_and_subtask_mutations_return_fragments_and_persist() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Original parent", position=0)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    enhanced_headers = {"Accept": "application/json"}
+    create_response = client.post(
+        "/tickets",
+        data={
+            "summary": "<script>unsafe</script> parent",
+            "description": "Parent details",
+            "planned_date": "2026-08-24",
+        },
+        headers=enhanced_headers,
+    )
+
+    assert create_response.status_code == 200
+    create_result = create_response.json()
+    assert create_result["ok"] is True
+    assert create_result["target"] == "ticket-lists"
+    assert "&lt;script&gt;unsafe&lt;/script&gt; parent" in create_result["html"]
+    with SessionLocal() as db:
+        created = db.scalar(
+            select(Ticket).where(Ticket.summary == "<script>unsafe</script> parent")
+        )
+        assert created is not None
+        assert created.planned_date == date(2026, 8, 24)
+
+    update_response = client.post(
+        f"/tickets/{ticket_id}",
+        data={
+            "summary": "Updated parent",
+            "description": "Updated parent details",
+            "planned_date": "2026-08-25",
+        },
+        headers=enhanced_headers,
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["target"] == "ticket-lists"
+    assert "Updated parent" in update_response.json()["html"]
+
+    create_subtask_response = client.post(
+        f"/tickets/{ticket_id}/subtasks",
+        data={
+            "summary": "New child",
+            "description": "Child details",
+            "planned_date": "2026-08-26",
+        },
+        headers=enhanced_headers,
+    )
+    assert create_subtask_response.status_code == 200
+    create_subtask_result = create_subtask_response.json()
+    assert create_subtask_result["target"] == f"ticket-{ticket_id}"
+    assert "New child" in create_subtask_result["html"]
+    with SessionLocal() as db:
+        subtask = db.scalar(select(Ticket).where(Ticket.summary == "New child"))
+        assert subtask is not None
+        subtask_id = subtask.id
+
+    update_subtask_response = client.post(
+        f"/subtasks/{subtask_id}",
+        data={
+            "summary": "Updated child",
+            "description": "Updated child details",
+            "planned_date": "2026-08-27",
+        },
+        headers=enhanced_headers,
+    )
+    assert update_subtask_response.status_code == 200
+    assert update_subtask_response.json()["target"] == f"ticket-{ticket_id}"
+    assert "Updated child" in update_subtask_response.json()["html"]
+    with SessionLocal() as db:
+        updated_parent = db.get(Ticket, ticket_id)
+        updated_subtask = db.get(Ticket, subtask_id)
+        assert updated_parent is not None
+        assert updated_subtask is not None
+        assert updated_parent.summary == "Updated parent"
+        assert updated_parent.description == "Updated parent details"
+        assert updated_parent.planned_date == date(2026, 8, 25)
+        assert updated_subtask.summary == "Updated child"
+        assert updated_subtask.description == "Updated child details"
+        assert updated_subtask.planned_date == date(2026, 8, 27)
+        assert updated_subtask.parent_id == ticket_id
+
+
+def test_enhanced_mutations_return_validation_errors_without_persisting() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Validation AJAX parent", position=1)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    response = client.post(
+        f"/tickets/{ticket_id}/subtasks",
+        data={"summary": " ", "planned_date": "not-a-date"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "message": "Subtask summary is required."}
+    with SessionLocal() as db:
+        assert db.scalar(select(Ticket).where(Ticket.parent_id == ticket_id)) is None
+
+
 def test_create_category_and_ticket() -> None:
     assert (
         client.post("/categories", data={"name": "Planning"}, follow_redirects=False).status_code
@@ -139,9 +268,9 @@ def test_ticket_forms_group_summary_date_and_category_responsively() -> None:
 
     page = client.get("/")
 
-    create_form = page.text.split('<form method="post" action="/tickets">', 1)[1].split(
-        "</form>", 1
-    )[0]
+    create_form = page.text.split('<form method="post" action="/tickets" data-ajax-form>', 1)[
+        1
+    ].split("</form>", 1)[0]
     create_row = create_form.split('<div class="form-field-row create-fields">', 1)[1].split(
         "</div>", 1
     )[0]
