@@ -8,7 +8,7 @@
 - [x] You should be able to edit a subtask like you can its' parent.
 - [x] Changing subtask order should not require page refresh.
 - [x] Adding and editing tickets and subtasks should not require page refresh.
-- [ ] The UI width should be wider.
+- [x] The UI width should be wider.
 - [ ] instead of clicking up and down, you can draw a subtask up or down
 - [ ] You can draw a ticket up or down in priority
 - [ ] There should be a category filter

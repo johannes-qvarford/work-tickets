@@ -38,6 +38,15 @@ def test_homepage_is_available() -> None:
     assert "Work tickets" in response.text
 
 
+def test_homepage_uses_wider_responsive_layout() -> None:
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert "body { max-width: 1400px;" in page.text
+    assert "grid-template-columns:minmax(0, 1.7fr) minmax(360px, 1fr);" in page.text
+    assert ".grid { grid-template-columns:1fr; }" in page.text
+
+
 def test_ticket_controls_use_compact_accessible_actions() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="Compact controls", planned_date=date.today(), position=0)

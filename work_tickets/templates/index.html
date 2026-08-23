@@ -20,7 +20,7 @@
     }
 
     * { box-sizing: border-box; }
-    body { max-width: 1100px; margin: 0 auto; padding: 36px 24px 48px; }
+    body { max-width: 1400px; margin: 0 auto; padding: 36px 24px 48px; }
     header { display:flex; justify-content:space-between; align-items:end; gap:24px; margin-bottom:28px; }
     h1 { margin:0; font-size:2.4rem; letter-spacing:-.05em; }
     h2 { margin:0; font-size:1.25rem; }
@@ -29,7 +29,7 @@
     p { line-height:1.5; }
     .muted, .meta { color:var(--muted); }
     .muted { margin-top:8px; }
-    .grid { display:grid; grid-template-columns:1.5fr 1fr; gap:20px; align-items:start; }
+    .grid { display:grid; grid-template-columns:minmax(0, 1.7fr) minmax(360px, 1fr); gap:24px; align-items:start; }
     .panel, .ticket {
       background:var(--surface);
       border:1px solid var(--border);
