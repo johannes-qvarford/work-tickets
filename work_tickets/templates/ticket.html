@@ -2,6 +2,8 @@
   id="ticket-{{ ticket.id }}"
   class="ticket{% if ticket.local_completed %} completed{% endif %}"
   data-ticket-id="{{ ticket.id }}"
+  data-filterable-ticket
+  data-category-id="{{ ticket.category_id or '' }}"
   data-top-level-ticket
   draggable="true"
 >

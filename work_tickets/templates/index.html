@@ -91,6 +91,10 @@
     .notice.error { border-color:#a84f5f; }
     .notice.success { border-color:#3c9567; }
     .empty { padding:18px 0; color:var(--muted); }
+    .category-filter-panel { margin-bottom:20px; }
+    .category-filter-controls { display:flex; align-items:end; flex-wrap:wrap; gap:12px 18px; }
+    .category-filter-controls label { flex:1 1 14rem; max-width:26rem; }
+    .category-filter-status { flex:1 1 14rem; margin:0; }
     .ticket-details { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
     .ticket-details > summary { color:#cbd5e2; cursor:pointer; font-size:.88rem; font-weight:700; }
     .details-content { display:grid; gap:14px; margin-top:12px; }
@@ -155,6 +159,20 @@
     <div id="move-status" class="sr-only" role="status" aria-live="polite"></div>
     <div class="grid">
       <main>
+        <section class="panel category-filter-panel" aria-labelledby="category-filter-heading">
+          <h2 id="category-filter-heading">Filter tickets</h2>
+          <div class="category-filter-controls">
+            <label>
+              <span class="field-label">Category</span>
+              <select id="category-filter" aria-controls="ticket-lists">
+                <option value="">All categories</option>
+                {% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}
+              </select>
+            </label>
+            <p id="category-filter-status" class="muted category-filter-status" role="status" aria-live="polite">
+            </p>
+          </div>
+        </section>
         {% include "ticket_lists.html" %}
       </main>
       <aside>
@@ -275,6 +293,8 @@
 
         const status = document.getElementById("move-status");
         const actionStatus = document.getElementById("action-status");
+        const categoryFilter = document.getElementById("category-filter");
+        const categoryFilterStatus = document.getElementById("category-filter-status");
 
         function announce(message) {
           if (status) status.textContent = message;
@@ -286,6 +306,38 @@
           actionStatus.className = `panel notice ${kind}`;
           actionStatus.setAttribute("role", kind === "error" ? "alert" : "status");
           actionStatus.textContent = message;
+        }
+
+        function applyCategoryFilter() {
+          const selectedCategory = categoryFilter?.value ?? "";
+          const sections = [...document.querySelectorAll("#ticket-lists [data-ticket-section]")];
+          let totalTickets = 0;
+          let visibleTickets = 0;
+
+          sections.forEach((section) => {
+            const tickets = [...section.querySelectorAll("[data-filterable-ticket]")];
+            let sectionVisibleTickets = 0;
+            tickets.forEach((ticket) => {
+              const visible = !selectedCategory || ticket.dataset.categoryId === selectedCategory;
+              ticket.hidden = !visible;
+              if (visible) sectionVisibleTickets += 1;
+              if (section.dataset.ticketSection === "all") {
+                totalTickets += 1;
+                if (visible) visibleTickets += 1;
+              }
+            });
+            const emptyMessage = section.querySelector("[data-filter-empty]");
+            if (emptyMessage) {
+              emptyMessage.hidden = tickets.length === 0 || sectionVisibleTickets > 0;
+            }
+          });
+
+          if (categoryFilterStatus) {
+            const categoryName = categoryFilter?.selectedOptions[0]?.textContent ?? "this category";
+            categoryFilterStatus.textContent = selectedCategory
+              ? `Showing ${visibleTickets} of ${totalTickets} tickets in ${categoryName}.`
+              : `Showing all ${totalTickets} tickets.`;
+          }
         }
 
         function updateMoveControls(container) {
@@ -366,6 +418,7 @@
           const targetElement = document.getElementById(target);
           if (!targetElement || !result.html) throw new Error("The saved view could not be updated.");
           targetElement.outerHTML = result.html;
+          applyCategoryFilter();
           restoreTicketState(ticketId, ticketDetailsOpen, subtaskId, subtaskDetailsOpen);
           if (form.action.endsWith("/tickets")) form.reset();
           announceAction(result.message);
@@ -426,6 +479,7 @@
               throw new Error("The reordered view could not be updated.");
             }
             targetElement.outerHTML = result.html;
+            applyCategoryFilter();
             restoreTicketDetails(openDetails);
             announce(result.message);
             announceAction(result.message);
@@ -595,6 +649,9 @@
             });
           }
         });
+
+        categoryFilter?.addEventListener("change", applyCategoryFilter);
+        applyCategoryFilter();
       })();
     </script>
   </body>

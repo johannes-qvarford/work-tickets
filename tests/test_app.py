@@ -47,6 +47,41 @@ def test_homepage_uses_wider_responsive_layout() -> None:
     assert ".grid { grid-template-columns:1fr; }" in page.text
 
 
+def test_category_filter_renders_category_metadata_for_both_ticket_sections() -> None:
+    with SessionLocal() as db:
+        category = Category(name="Filter category")
+        categorized = Ticket(
+            summary="Filter categorized ticket",
+            planned_date=date.today(),
+            position=0,
+            category=category,
+        )
+        uncategorized = Ticket(summary="Filter uncategorized ticket", position=1)
+        db.add_all([category, categorized, uncategorized])
+        db.commit()
+        category_id = category.id
+        categorized_id = categorized.id
+        uncategorized_id = uncategorized.id
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert 'id="category-filter"' in page.text
+    assert 'aria-controls="ticket-lists"' in page.text
+    assert f'<option value="{category_id}">Filter category</option>' in page.text
+    assert page.text.count(f'data-category-id="{category_id}"') == 2
+    assert page.text.count('data-category-id=""') == 1
+    assert page.text.count("data-filterable-ticket\n") == 3
+    assert 'data-ticket-section="today"' in page.text
+    assert 'data-ticket-section="all"' in page.text
+    assert "data-filter-empty hidden" in page.text
+    assert 'categoryFilter?.addEventListener("change", applyCategoryFilter)' in page.text
+    assert "Showing ${visibleTickets} of ${totalTickets} tickets" in page.text
+    assert page.text.index(f'data-ticket-id="{categorized_id}"') < page.text.index(
+        f'data-ticket-id="{uncategorized_id}"'
+    )
+
+
 def test_ticket_controls_use_compact_accessible_actions() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="Compact controls", planned_date=date.today(), position=0)

@@ -1,9 +1,14 @@
 <div id="ticket-lists">
-  <section class="panel">
+  <section class="panel" data-ticket-section="today">
     <h2>Today</h2>
     <p class="muted">Due today and overdue, in priority order.</p>
     {% for ticket in today_tickets %}
-    <article class="ticket{% if ticket.local_completed %} completed{% endif %}" data-ticket-id="{{ ticket.id }}">
+    <article
+      class="ticket{% if ticket.local_completed %} completed{% endif %}"
+      data-ticket-id="{{ ticket.id }}"
+      data-filterable-ticket
+      data-category-id="{{ ticket.category_id or '' }}"
+    >
       <div class="ticket-header">
         <div class="ticket-heading">
           <h3>{{ ticket.summary }}</h3>
@@ -33,8 +38,9 @@
       </div>
     </article>
   {% else %}<div class="empty">Nothing due. Add the next useful thing.</div>{% endfor %}
+    <div class="empty" data-filter-empty hidden>No tickets in this category are due.</div>
   </section>
-  <section class="panel section-spaced">
+  <section class="panel section-spaced" data-ticket-section="all">
     <h2>All tickets</h2>
     <p class="muted">Drag tickets to reorder; use arrows with a keyboard.</p>
     <div class="ticket-list" data-tickets>
@@ -43,6 +49,7 @@
       {% set is_last_ticket = loop.last %}
       {% include "ticket.html" %}
       {% else %}<div class="empty">No tickets yet.</div>{% endfor %}
+      <div class="empty" data-filter-empty hidden>No tickets in this category.</div>
     </div>
   </section>
 </div>
