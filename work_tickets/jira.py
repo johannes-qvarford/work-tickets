@@ -124,6 +124,14 @@ class JiraClient:
         )
         return self.get_issue(key)
 
+    def delete_issue(self, key: str) -> None:
+        """Delete an issue from Jira."""
+        self._request(
+            "DELETE",
+            f"/rest/api/3/issue/{quote(key, safe='')}",
+            expect_json=False,
+        )
+
     def get_issue(self, key: str) -> JiraIssue:
         response = self._request_dict(
             "GET",
@@ -239,7 +247,14 @@ class JiraClient:
             return "\n".join(children)
         return "".join(children)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        expect_json: bool = True,
+        **kwargs: Any,
+    ) -> dict[str, Any] | list[Any]:
         try:
             response = self._client.request(method, path, **kwargs)
             response.raise_for_status()
@@ -265,6 +280,9 @@ class JiraClient:
             raise JiraError(f"Jira returned HTTP {exc.response.status_code}{detail}.") from exc
         except httpx.RequestError as exc:
             raise JiraError(f"Could not reach Jira: {exc}") from exc
+
+        if not expect_json:
+            return {}
 
         try:
             payload = response.json()

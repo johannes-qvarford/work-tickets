@@ -260,9 +260,33 @@ def delete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> RedirectRe
         return _redirect_with_message("error", "Top-level tickets cannot be deleted here.")
 
     summary = subtask.summary
+    jira_error = _delete_linked_jira_issue(subtask, db)
     db.delete(subtask)
     db.commit()
+    if jira_error is not None:
+        return _redirect_with_message(
+            "error", f"Subtask {summary} deleted locally, but {jira_error}"
+        )
     return _redirect_with_message("success", f"Subtask {summary} deleted.")
+
+
+@app.post("/tickets/{ticket_id}/delete")
+def delete_ticket(ticket_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return _redirect_with_message("error", "Ticket was not found.")
+    if ticket.parent_id is not None:
+        return _redirect_with_message("error", "Subtasks cannot be deleted here.")
+
+    summary = ticket.summary
+    jira_error = _delete_linked_jira_issue(ticket, db)
+    db.delete(ticket)
+    db.commit()
+    if jira_error is not None:
+        return _redirect_with_message(
+            "error", f"Ticket {summary} deleted locally, but {jira_error}"
+        )
+    return _redirect_with_message("success", f"Ticket {summary} deleted.")
 
 
 @app.post("/subtasks/{subtask_id}/move-up")
@@ -722,6 +746,28 @@ def delete_category(category_id: int, db: Session = Depends(get_db)) -> Redirect
     db.delete(category)
     db.commit()
     return _redirect_with_message("success", f"Category {category.name} deleted.")
+
+
+def _delete_linked_jira_issue(ticket: Ticket, db: Session) -> str | None:
+    """Try to remove a linked Jira issue and return a user-facing failure, if any."""
+    if not ticket.jira_issue_key:
+        return None
+
+    issue_key = ticket.jira_issue_key
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        return f"linked Jira issue {issue_key} could not be deleted: Jira is not configured."
+
+    jira = None
+    try:
+        jira = JiraClient(config)
+        jira.delete_issue(issue_key)
+    except JiraError as exc:
+        return f"linked Jira issue {issue_key} could not be deleted: {exc}"
+    finally:
+        if jira is not None:
+            jira.close()
+    return None
 
 
 def _sync_ticket(ticket: Ticket, db: Session) -> None:

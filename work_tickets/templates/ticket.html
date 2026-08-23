@@ -120,6 +120,20 @@
         </button>
       </form>
       {% endif %}
+      <form
+        method="post"
+        action="/tickets/{{ ticket.id }}/delete"
+        onsubmit="return confirm('Delete this ticket and all local subtasks?');"
+      >
+        <button
+          class="compact-control danger"
+          type="submit"
+          aria-label="Delete {{ ticket.summary }}"
+          title="Delete ticket"
+        >
+          <span aria-hidden="true">×</span><span class="sr-only">Delete</span>
+        </button>
+      </form>
     </div>
   </div>
   <details class="ticket-details">

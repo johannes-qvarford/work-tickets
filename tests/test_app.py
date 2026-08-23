@@ -97,6 +97,7 @@ def test_ticket_controls_use_compact_accessible_actions() -> None:
     assert page.status_code == 200
     assert f'action="/tickets/{ticket_id}/complete"' in page.text
     assert f'action="/tickets/{ticket_id}/sync"' in page.text
+    assert f'action="/tickets/{ticket_id}/delete"' in page.text
     assert f'action="/subtasks/{subtask_id}/complete"' in page.text
     assert f'action="/subtasks/{subtask_id}/move-up"' in page.text
     assert f'action="/subtasks/{subtask_id}/move-down"' in page.text
@@ -106,6 +107,7 @@ def test_ticket_controls_use_compact_accessible_actions() -> None:
     assert 'aria-label="Mark Compact subtask as done"' in page.text
     assert 'aria-label="Move up Compact subtask"' in page.text
     assert 'aria-label="Delete Compact subtask"' in page.text
+    assert 'aria-label="Delete Compact controls"' in page.text
 
 
 def test_subtask_move_controls_have_no_refresh_hooks() -> None:
@@ -2153,6 +2155,157 @@ def test_delete_subtask_rejects_missing_ids_and_top_level_tickets() -> None:
     with SessionLocal() as db:
         assert db.get(Ticket, parent_id) is not None
         assert db.get(Ticket, subtask_id) is not None
+
+
+def test_delete_top_level_ticket_cascades_locally_and_deletes_linked_jira_issue(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            pass
+
+        def delete_issue(self, key: str) -> None:
+            calls.append(key)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        parent = Ticket(summary="Delete linked parent", position=215, jira_issue_key="WORK-90")
+        child = Ticket(
+            summary="Delete local child",
+            position=0,
+            parent=parent,
+            jira_issue_key="WORK-91",
+        )
+        db.add_all([parent, child])
+        db.commit()
+        parent_id = parent.id
+        child_id = child.id
+
+    response = client.post(f"/tickets/{parent_id}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "Ticket%20Delete%20linked%20parent%20deleted" in response.headers["location"]
+    assert calls == ["WORK-90"]
+    with SessionLocal() as db:
+        assert db.get(Ticket, parent_id) is None
+        assert db.get(Ticket, child_id) is None
+
+
+def test_delete_ticket_keeps_local_cascade_when_jira_delete_fails(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            pass
+
+        def delete_issue(self, key: str) -> None:
+            raise JiraError("Jira returned HTTP 403: Forbidden.")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        parent = Ticket(
+            summary="Delete despite Jira failure", position=216, jira_issue_key="WORK-92"
+        )
+        child = Ticket(summary="Cascaded child", position=0, parent=parent)
+        db.add_all([parent, child])
+        db.commit()
+        parent_id = parent.id
+        child_id = child.id
+
+    response = client.post(f"/tickets/{parent_id}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert "error=" in location
+    assert "Delete%20despite%20Jira%20failure" in location
+    assert "linked%20Jira%20issue%20WORK-92%20could%20not%20be%20deleted" in location
+    assert "Jira%20returned%20HTTP%20403%3A%20Forbidden" in location
+    with SessionLocal() as db:
+        assert db.get(Ticket, parent_id) is None
+        assert db.get(Ticket, child_id) is None
+
+
+def test_delete_linked_subtask_reports_jira_failure_but_removes_local_data(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            pass
+
+        def delete_issue(self, key: str) -> None:
+            raise JiraError("Jira returned HTTP 404.")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        parent = Ticket(summary="Subtask delete parent", position=217)
+        subtask = Ticket(
+            summary="Delete despite remote missing",
+            position=0,
+            parent=parent,
+            jira_issue_key="WORK-93",
+        )
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    response = client.post(f"/subtasks/{subtask_id}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert (
+        "Subtask%20Delete%20despite%20remote%20missing%20deleted%20locally"
+        in response.headers["location"]
+    )
+    assert (
+        "linked%20Jira%20issue%20WORK-93%20could%20not%20be%20deleted"
+        in response.headers["location"]
+    )
+    with SessionLocal() as db:
+        assert db.get(Ticket, subtask_id) is None
+        assert db.get(Ticket, parent_id) is not None
 
 
 def test_move_subtasks_reorders_only_siblings_and_normalizes_positions() -> None:
