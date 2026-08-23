@@ -258,6 +258,35 @@ def test_sync_ticket_persists_jira_key_and_status(monkeypatch) -> None:
         assert synced.synced_at is not None
 
 
+def test_synced_ticket_label_links_to_jira_issue() -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://jira.example.test"
+        ticket = Ticket(summary="Linked ticket", position=103, jira_issue_key="WORK-42")
+        db.add(ticket)
+        db.commit()
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert (
+        '<a class="badge" href="https://jira.example.test/browse/WORK-42" '
+        'target="_blank" rel="noopener noreferrer">WORK-42</a>'
+    ) in page.text
+
+
 def test_sync_without_configuration_shows_error() -> None:
     with SessionLocal() as db:
         db.query(JiraConfig).delete()
