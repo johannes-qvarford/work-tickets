@@ -674,17 +674,27 @@ def _sync_ticket(ticket: Ticket, db: Session) -> None:
         synced_at = datetime.utcnow()
         _save_jira_issue(ticket, issue, synced_at)
         # Commit each remote success so a later failure does not lose already
-        # established Jira links or statuses in the local database.
+        # established Jira links or statuses in the local database. If a later
+        # child fails, the parent and any earlier children remain linked and a
+        # retry will reconcile the remaining local children.
         db.commit()
-        for subtask in ticket.subtasks:
-            if subtask.jira_issue_key:
-                subtask_issue = jira.update_issue(
-                    subtask.jira_issue_key, subtask.summary, subtask.description
-                )
-            else:
-                subtask_issue = jira.create_subtask(issue.key, subtask.summary, subtask.description)
-            _save_jira_issue(subtask, subtask_issue, synced_at)
-            db.commit()
+        for subtask in list(ticket.subtasks):
+            try:
+                if subtask.jira_issue_key:
+                    subtask_issue = jira.update_issue(
+                        subtask.jira_issue_key, subtask.summary, subtask.description
+                    )
+                else:
+                    subtask_issue = jira.create_subtask(
+                        issue.key, subtask.summary, subtask.description
+                    )
+                _save_jira_issue(subtask, subtask_issue, synced_at)
+                db.commit()
+            except JiraError as exc:
+                raise JiraError(
+                    f"Parent {issue.key} synced, but subtask '{subtask.summary}' failed: {exc} "
+                    "Retry the parent sync to continue."
+                ) from exc
     finally:
         jira.close()
 
@@ -726,26 +736,48 @@ def _sync_ticket_from_jira(ticket: Ticket, db: Session) -> None:
 
     if not synced.issue.summary:
         raise JiraError("Jira returned an issue without a summary.")
+    remote_subtasks_by_key: dict[str, JiraIssue] = {}
+    for issue in synced.subtasks:
+        if issue.key == synced.issue.key:
+            raise JiraError(f"Jira returned the parent issue {issue.key} as its own subtask.")
+        if issue.key in remote_subtasks_by_key:
+            raise JiraError(f"Jira returned duplicate subtask key {issue.key}.")
+        if not issue.summary:
+            raise JiraError(f"Jira returned subtask {issue.key} without a summary.")
+        remote_subtasks_by_key[issue.key] = issue
 
     # Only Jira-owned fields are changed here. Category, date, completion, and position
     # are deliberately local workflow fields and must survive an inbound sync.
     synced_at = datetime.utcnow()
     _save_jira_issue(ticket, synced.issue, synced_at, clear_missing_fields=True)
 
-    local_subtasks_by_key = {
-        subtask.jira_issue_key: subtask for subtask in ticket.subtasks if subtask.jira_issue_key
-    }
-    next_position = max((subtask.position for subtask in ticket.subtasks), default=-1) + 1
-    for issue in synced.subtasks:
-        if not issue.summary:
-            raise JiraError(f"Jira returned subtask {issue.key} without a summary.")
-        subtask = local_subtasks_by_key.get(issue.key)
-        if subtask is None:
+    local_subtasks = list(ticket.subtasks)
+    local_subtasks_by_key: dict[str, Ticket] = {}
+    for subtask in local_subtasks:
+        if not subtask.jira_issue_key:
+            continue
+        if subtask.jira_issue_key in local_subtasks_by_key:
+            raise JiraError(f"Local subtasks have duplicate Jira key {subtask.jira_issue_key}.")
+        local_subtasks_by_key[subtask.jira_issue_key] = subtask
+
+    # A linked local child that Jira no longer reports is stale and is removed.
+    # Local-only children without a Jira key are intentionally retained: they
+    # have not been claimed by Jira and will be created by the next outbound sync.
+    for subtask in local_subtasks:
+        if subtask.jira_issue_key and subtask.jira_issue_key not in remote_subtasks_by_key:
+            db.delete(subtask)
+
+    next_position = max((subtask.position for subtask in local_subtasks), default=-1) + 1
+    for issue in remote_subtasks_by_key.values():
+        matching_subtask = local_subtasks_by_key.get(issue.key)
+        if matching_subtask is None:
             # Position is local priority, so remote Jira ordering must not reorder
             # existing local subtasks. Newly discovered subtasks are appended.
             subtask = Ticket(parent=ticket, position=next_position)
             next_position += 1
             db.add(subtask)
+        else:
+            subtask = matching_subtask
         _save_jira_issue(subtask, issue, synced_at, clear_missing_fields=True)
     db.flush()
     db.commit()

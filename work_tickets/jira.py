@@ -141,18 +141,20 @@ class JiraClient:
         )
         issue = self._issue_from_payload(key, response)
         fields = response.get("fields")
-        raw_subtasks = fields.get("subtasks") if isinstance(fields, dict) else None
+        if not isinstance(fields, dict) or not isinstance(fields.get("subtasks"), list):
+            raise JiraError(f"Jira returned issue {key} without a usable subtask list.")
+        raw_subtasks = fields["subtasks"]
         subtasks: list[JiraIssue] = []
-        if isinstance(raw_subtasks, list):
-            for raw_subtask in raw_subtasks:
-                if not isinstance(raw_subtask, dict):
-                    continue
-                subtask_key = raw_subtask.get("key")
-                if isinstance(subtask_key, str) and subtask_key:
-                    # The parent response commonly contains only a compact subtask
-                    # representation. Fetch each issue so inbound sync also gets its
-                    # description and the current status reliably.
-                    subtasks.append(self.get_issue(subtask_key))
+        for raw_subtask in raw_subtasks:
+            if not isinstance(raw_subtask, dict):
+                raise JiraError(f"Jira returned an invalid subtask entry for issue {key}.")
+            subtask_key = raw_subtask.get("key")
+            if not isinstance(subtask_key, str) or not subtask_key:
+                raise JiraError(f"Jira returned a subtask without a key for issue {key}.")
+            # The parent response commonly contains only a compact subtask
+            # representation. Fetch each issue so inbound sync also gets its
+            # description and the current status reliably.
+            subtasks.append(self.get_issue(subtask_key))
         return JiraIssueWithSubtasks(issue=issue, subtasks=tuple(subtasks))
 
     def _issue_from_payload(self, key: str, response: dict[str, Any]) -> JiraIssue:
