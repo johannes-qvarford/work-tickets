@@ -77,6 +77,37 @@ def test_create_category_and_ticket() -> None:
     assert "Prepare agenda" in client.get("/").text
 
 
+def test_ticket_forms_group_summary_date_and_category_responsively() -> None:
+    with SessionLocal() as db:
+        category = Category(name="Form layout category")
+        ticket = Ticket(summary="Form layout ticket", position=0, category=category)
+        db.add_all([category, ticket])
+        db.commit()
+        ticket_id = ticket.id
+
+    page = client.get("/")
+
+    create_form = page.text.split('<form method="post" action="/tickets">', 1)[1].split(
+        "</form>", 1
+    )[0]
+    create_row = create_form.split('<div class="form-field-row create-fields">', 1)[1].split(
+        "</div>", 1
+    )[0]
+    assert create_form.count('class="form-field-row create-fields"') == 1
+    assert create_row.index('name="summary"') < create_row.index('name="planned_date"')
+    assert create_row.index('name="planned_date"') < create_row.index('name="category_id"')
+    assert 'name="description"' not in create_row
+
+    edit_form = page.text.split(f'action="/tickets/{ticket_id}"', 1)[1].split("</form>", 1)[0]
+    edit_row = edit_form.split('<div class="form-field-row edit-fields">', 1)[1].split("</div>", 1)[
+        0
+    ]
+    assert edit_form.count('class="form-field-row edit-fields"') == 1
+    assert edit_row.index('name="summary"') < edit_row.index('name="planned_date"')
+    assert 'name="description"' not in edit_row
+    assert "Category: Form layout category" in edit_form
+
+
 def test_edit_cannot_change_a_ticket_category() -> None:
     with SessionLocal() as db:
         original = Category(name="Original edit category")

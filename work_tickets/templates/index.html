@@ -95,6 +95,9 @@
     .ticket-details > summary { color:#cbd5e2; cursor:pointer; font-size:.88rem; font-weight:700; }
     .details-content { display:grid; gap:14px; margin-top:12px; }
     .edit-form { padding:12px; border:1px solid var(--border); border-radius:10px; background:#171c25; }
+    .form-field-row { display:grid; gap:10px; align-items:start; }
+    .create-fields { grid-template-columns:minmax(0, 2fr) minmax(9rem, 1fr) minmax(9rem, 1fr); }
+    .edit-fields { grid-template-columns:minmax(0, 2fr) minmax(10rem, 1fr); }
     .field-label { display:block; margin-bottom:5px; color:var(--muted); font-size:.82rem; }
     .subtasks { padding-top:13px; border-top:1px solid var(--border); }
     .subtasks-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px; }
@@ -121,6 +124,7 @@
       .panel { padding:16px; }
     }
     @media (max-width:480px) {
+      .create-fields, .edit-fields { grid-template-columns:1fr; }
       .ticket-header { display:block; }
       .ticket-actions { justify-content:flex-start; margin-top:11px; }
       .subtask { align-items:flex-start; }
@@ -273,14 +277,16 @@
               <summary>Edit ticket and subtasks</summary>
               <div class="details-content">
                 <form class="edit-form" method="post" action="/tickets/{{ ticket.id }}">
-                  <label>
-                    <span class="field-label">Summary</span><input name="summary" value="{{ ticket.summary }}" required>
-                  </label>
+                  <div class="form-field-row edit-fields">
+                    <label>
+                      <span class="field-label">Summary</span><input name="summary" value="{{ ticket.summary }}" required>
+                    </label>
+                    <label>
+                      <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}">
+                    </label>
+                  </div>
                   <label>
                     <span class="field-label">Description</span><textarea name="description">{{ ticket.description }}</textarea>
-                  </label>
-                  <label>
-                    <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}">
                   </label>
                   <div class="meta">Category: {{ ticket.category.name if ticket.category else 'Uncategorized' }}</div>
                   <button type="submit">{% if ticket.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
@@ -373,16 +379,20 @@
         <section class="panel">
           <h2>New ticket</h2>
           <form method="post" action="/tickets">
-            <label>
-              <span class="field-label">Summary</span><input name="summary" placeholder="What needs doing?" required>
-            </label>
+            <div class="form-field-row create-fields">
+              <label>
+                <span class="field-label">Summary</span><input name="summary" placeholder="What needs doing?" required>
+              </label>
+              <label>
+                <span class="field-label">Planned date</span><input type="date" name="planned_date">
+              </label>
+              <label>
+                <span class="field-label">Category</span><select name="category_id"><option value="">No category</option>{% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}</select>
+              </label>
+            </div>
             <label>
               <span class="field-label">Description</span><textarea name="description" placeholder="Details (optional)"></textarea>
             </label>
-            <label>
-              <span class="field-label">Planned date</span><input type="date" name="planned_date">
-            </label>
-            <label><span class="field-label">Category</span><select name="category_id"><option value="">No category</option>{% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}</select></label>
             <button type="submit">Add ticket</button>
           </form>
         </section>
