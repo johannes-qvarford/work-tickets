@@ -106,10 +106,11 @@
       <div class="subtasks" data-subtasks>
         <div class="subtasks-heading">
           <h4>Subtasks</h4>
-          <span class="meta">{{ ticket.subtasks|length }}</span>
+          <span class="meta">{{ ticket.subtasks|length }} · Drag rows to reorder; use arrows with a keyboard</span>
         </div>
         {% for subtask in ticket.subtasks %}
-        <div class="subtask" data-subtask-id="{{ subtask.id }}">
+        <div class="subtask" data-subtask-id="{{ subtask.id }}" draggable="true">
+          <span class="subtask-drag-handle" aria-hidden="true" title="Drag to reorder">⠿</span>
           <details class="subtask-details">
             <summary>
               <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">

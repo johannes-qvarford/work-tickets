@@ -208,6 +208,20 @@ def move_subtask_down(subtask_id: int, request: Request, db: Session = Depends(g
     return _move_subtask(subtask_id, 1, request, db)
 
 
+@app.post("/subtasks/{subtask_id}/move-to")
+def move_subtask_to(
+    subtask_id: int,
+    request: Request,
+    target_index: Annotated[str, Form()] = "",
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        target_index_value = int(target_index)
+    except ValueError:
+        return _move_response(request, "error", "Subtask target position is invalid.", 422)
+    return _move_subtask_to_index(subtask_id, target_index_value, request, db)
+
+
 def _move_subtask(subtask_id: int, offset: int, request: Request, db: Session) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
@@ -226,13 +240,10 @@ def _move_subtask(subtask_id: int, offset: int, request: Request, db: Session) -
         index for index, sibling in enumerate(siblings) if sibling.id == subtask.id
     )
 
-    # Normalize first so old or manually edited data cannot leave duplicate or sparse
-    # positions after a move. The explicit id tie-breaker makes the order deterministic.
-    for index, sibling in enumerate(siblings):
-        sibling.position = index
-
     target_index = current_index + offset
+    direction = "up" if offset < 0 else "down"
     if target_index < 0 or target_index >= len(siblings):
+        _normalize_positions(siblings)
         db.commit()
         boundary = "top" if offset < 0 else "bottom"
         return _move_response(
@@ -244,21 +255,63 @@ def _move_subtask(subtask_id: int, offset: int, request: Request, db: Session) -
             [sibling.id for sibling in siblings],
         )
 
-    siblings[current_index].position, siblings[target_index].position = (
-        siblings[target_index].position,
-        siblings[current_index].position,
+    response = _move_subtask_to_index(
+        subtask_id,
+        target_index,
+        request,
+        db,
+        message=f"Subtask {subtask.summary} moved {direction}.",
     )
+    return response
+
+
+def _move_subtask_to_index(
+    subtask_id: int,
+    target_index: int,
+    request: Request,
+    db: Session,
+    *,
+    message: str | None = None,
+) -> Response:
+    subtask = db.get(Ticket, subtask_id)
+    if subtask is None:
+        return _move_response(request, "error", "Subtask was not found.", 404)
+    if subtask.parent_id is None:
+        return _move_response(request, "error", "Top-level tickets cannot be reordered here.", 400)
+
+    siblings = list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.parent_id == subtask.parent_id)
+            .order_by(Ticket.position, Ticket.created_at, Ticket.id)
+        )
+    )
+    if target_index < 0 or target_index >= len(siblings):
+        return _move_response(request, "error", "Subtask target position is invalid.", 422)
+
+    current_index = next(
+        index for index, sibling in enumerate(siblings) if sibling.id == subtask.id
+    )
+    siblings.pop(current_index)
+    siblings.insert(target_index, subtask)
+    _normalize_positions(siblings)
     db.commit()
-    direction = "up" if offset < 0 else "down"
-    ordered_ids = [sibling.id for sibling in sorted(siblings, key=lambda sibling: sibling.position)]
+    ordered_ids = [sibling.id for sibling in siblings]
     return _move_response(
         request,
         "success",
-        f"Subtask {subtask.summary} moved {direction}.",
+        message or f"Subtask {subtask.summary} reordered.",
         200,
         subtask.parent_id,
         ordered_ids,
     )
+
+
+def _normalize_positions(siblings: list[Ticket]) -> None:
+    # Normalize so old or manually edited data cannot leave duplicate or sparse
+    # positions. The explicit id tie-breaker in the query makes the order deterministic.
+    for index, sibling in enumerate(siblings):
+        sibling.position = index
 
 
 @app.post("/tickets/{ticket_id}")

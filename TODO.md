@@ -9,7 +9,7 @@
 - [x] Changing subtask order should not require page refresh.
 - [x] Adding and editing tickets and subtasks should not require page refresh.
 - [x] The UI width should be wider.
-- [ ] instead of clicking up and down, you can draw a subtask up or down
+- [x] instead of clicking up and down, you can draw a subtask up or down
 - [ ] You can draw a ticket up or down in priority
 - [ ] There should be a category filter
 - [ ] "Jira returned HTTP 400." when syncing ticket to Jira with local ticket that has subtasks. The main ticket gets synced but not the subtask.

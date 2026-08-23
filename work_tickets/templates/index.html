@@ -101,8 +101,11 @@
     .field-label { display:block; margin-bottom:5px; color:var(--muted); font-size:.82rem; }
     .subtasks { padding-top:13px; border-top:1px solid var(--border); }
     .subtasks-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px; }
-    .subtask { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:9px 0; border-bottom:1px solid var(--border); }
+    .subtask { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 0; border-bottom:1px solid var(--border); cursor:grab; }
+    .subtask.dragging { opacity:.45; }
+    .subtask.drag-over { border-top:2px solid var(--accent); }
     .subtask:last-of-type { border-bottom:0; }
+    .subtask-drag-handle { color:var(--muted); font-size:1.15rem; line-height:1; user-select:none; }
     .subtask-details { min-width:0; flex:1; }
     .subtask-details > summary { cursor:pointer; list-style-position:outside; }
     .subtask-info { min-width:0; flex:1; }
@@ -291,6 +294,12 @@
           });
         }
 
+        function clearDragState(container) {
+          container?.querySelectorAll(".dragging, .drag-over").forEach((subtask) => {
+            subtask.classList.remove("dragging", "drag-over");
+          });
+        }
+
         function applyOrder(container, order) {
           const byId = new Map(
             [...container.querySelectorAll(".subtask")].map((subtask) => [
@@ -298,9 +307,12 @@
               subtask,
             ])
           );
+          const subtaskForm = container.querySelector(".subtask-form");
           order.forEach((subtaskId) => {
             const subtask = byId.get(String(subtaskId));
-            if (subtask) container.appendChild(subtask);
+            if (!subtask) return;
+            if (subtaskForm) container.insertBefore(subtask, subtaskForm);
+            else container.appendChild(subtask);
           });
           updateMoveControls(container);
         }
@@ -366,6 +378,74 @@
             if (container) updateMoveControls(container);
           }
         }
+
+        async function submitDrag(container, subtask, targetIndex) {
+          const buttons = container.querySelectorAll("[data-move-direction]");
+          buttons.forEach((button) => (button.disabled = true));
+          try {
+            const response = await fetch(`/subtasks/${subtask.dataset.subtaskId}/move-to`, {
+              method: "POST",
+              headers: { Accept: "application/json" },
+              body: new URLSearchParams({ target_index: String(targetIndex) }),
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              throw new Error(result.message || "Unable to reorder subtask.");
+            }
+            if (Array.isArray(result.order)) applyOrder(container, result.order);
+            announce(result.message);
+          } catch (error) {
+            announce(error instanceof Error ? error.message : "Unable to reorder subtask.");
+          } finally {
+            clearDragState(container);
+            updateMoveControls(container);
+          }
+        }
+
+        document.addEventListener("dragstart", (event) => {
+          const subtask = event.target.closest?.(".subtask");
+          if (!subtask) return;
+          const container = subtask.closest("[data-subtasks]");
+          if (!container || !event.dataTransfer) return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", subtask.dataset.subtaskId);
+          subtask.classList.add("dragging");
+        });
+
+        document.addEventListener("dragover", (event) => {
+          const target = event.target.closest?.(".subtask");
+          const dragging = document.querySelector(".subtask.dragging");
+          if (!target || !dragging || target === dragging) return;
+          const container = target.closest("[data-subtasks]");
+          if (!container || container !== dragging.closest("[data-subtasks]")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          container.querySelectorAll(".drag-over").forEach((subtask) => {
+            subtask.classList.remove("drag-over");
+          });
+          target.classList.add("drag-over");
+        });
+
+        document.addEventListener("drop", (event) => {
+          const target = event.target.closest?.(".subtask");
+          const dragging = document.querySelector(".subtask.dragging");
+          if (!target || !dragging || target === dragging) return;
+          const container = target.closest("[data-subtasks]");
+          if (!container || container !== dragging.closest("[data-subtasks]")) return;
+          event.preventDefault();
+          const rows = [...container.querySelectorAll(".subtask")];
+          const targetRowIndex = rows.indexOf(target);
+          const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+          let targetIndex = targetRowIndex + (afterTarget ? 1 : 0);
+          if (rows.indexOf(dragging) < targetIndex) targetIndex -= 1;
+          clearDragState(container);
+          submitDrag(container, dragging, targetIndex);
+        });
+
+        document.addEventListener("dragend", (event) => {
+          const subtask = event.target.closest?.(".subtask");
+          clearDragState(subtask?.closest("[data-subtasks]"));
+        });
 
         document.addEventListener("submit", (event) => {
           const form = event.target.closest("form");

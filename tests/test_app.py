@@ -124,6 +124,91 @@ def test_subtask_move_returns_json_order_for_enhanced_requests() -> None:
         assert [subtask.id for subtask in parent.subtasks] == [second_id, first_id]
 
 
+def test_subtask_drag_hooks_keep_keyboard_move_fallback() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Drag parent", position=0)
+        first = Ticket(summary="Drag first", position=0, parent=parent)
+        second = Ticket(summary="Drag second", position=1, parent=parent)
+        db.add_all([parent, first, second])
+        db.commit()
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert 'class="subtask" data-subtask-id=' in page.text
+    assert 'draggable="true"' in page.text
+    assert 'title="Drag to reorder"' in page.text
+    assert "Drag rows to reorder; use arrows with a keyboard" in page.text
+    assert 'data-move-direction="up"' in page.text
+    assert 'data-move-direction="down"' in page.text
+    assert "/move-to" in page.text
+    assert "new URLSearchParams({ target_index: String(targetIndex) })" in page.text
+    assert "container.insertBefore(subtask, subtaskForm)" in page.text
+
+
+def test_subtask_drag_move_returns_json_order_and_persists_positions() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Drag ordering parent", position=0)
+        first = Ticket(summary="Drag first", position=0, parent=parent)
+        middle = Ticket(summary="Drag middle", position=1, parent=parent)
+        last = Ticket(summary="Drag last", position=2, parent=parent)
+        db.add_all([parent, first, middle, last])
+        db.commit()
+        middle_id = middle.id
+        first_id = first.id
+        last_id = last.id
+        parent_id = parent.id
+
+    response = client.post(
+        f"/subtasks/{middle_id}/move-to",
+        data={"target_index": "2"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "message": "Subtask Drag middle reordered.",
+        "parent_id": parent_id,
+        "order": [first_id, last_id, middle_id],
+    }
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [(subtask.id, subtask.position) for subtask in parent.subtasks] == [
+            (first_id, 0),
+            (last_id, 1),
+            (middle_id, 2),
+        ]
+
+
+def test_subtask_drag_move_rejects_invalid_position_without_reordering() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Invalid drag parent", position=0)
+        first = Ticket(summary="Invalid drag first", position=0, parent=parent)
+        second = Ticket(summary="Invalid drag second", position=1, parent=parent)
+        db.add_all([parent, first, second])
+        db.commit()
+        second_id = second.id
+        parent_id = parent.id
+
+    response = client.post(
+        f"/subtasks/{second_id}/move-to",
+        data={"target_index": "-1"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "Subtask target position is invalid.",
+    }
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [subtask.id for subtask in parent.subtasks] == [first.id, second.id]
+
+
 def test_ticket_and_subtask_forms_have_no_refresh_hooks() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="AJAX hooks", position=0)
