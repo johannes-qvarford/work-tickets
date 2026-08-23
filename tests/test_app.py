@@ -250,3 +250,32 @@ def test_sync_from_jira_requires_a_linked_ticket() -> None:
     response = client.post(f"/tickets/{ticket_id}/sync-from-jira", follow_redirects=False)
     assert response.status_code == 303
     assert "Ticket%20has%20not%20been%20synced" in response.headers["location"]
+
+
+def test_delete_category_uncategorizes_tickets() -> None:
+    with SessionLocal() as db:
+        category = Category(name="Category to remove")
+        db.add(category)
+        db.flush()
+        ticket = Ticket(summary="Keep this ticket", position=102, category_id=category.id)
+        db.add(ticket)
+        db.commit()
+        category_id = category.id
+        ticket_id = ticket.id
+
+    response = client.post(f"/categories/{category_id}/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "Category%20Category%20to%20remove%20deleted" in response.headers["location"]
+    with SessionLocal() as db:
+        assert db.get(Category, category_id) is None
+        remaining_ticket = db.get(Ticket, ticket_id)
+        assert remaining_ticket is not None
+        assert remaining_ticket.category_id is None
+
+
+def test_delete_missing_category_shows_error() -> None:
+    response = client.post("/categories/999999/delete", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "Category%20was%20not%20found" in response.headers["location"]

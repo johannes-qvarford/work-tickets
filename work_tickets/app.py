@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from .jira import JiraClient, JiraError
@@ -195,6 +195,20 @@ def create_category(
         db.add(Category(name=name.strip()))
         db.commit()
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/categories/{category_id}/delete")
+def delete_category(category_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    category = db.get(Category, category_id)
+    if category is None:
+        return _redirect_with_message("error", "Category was not found.")
+
+    # Categories are local labels. Removing one must not remove any tickets that
+    # use it; those tickets become uncategorized instead.
+    db.execute(update(Ticket).where(Ticket.category_id == category_id).values(category_id=None))
+    db.delete(category)
+    db.commit()
+    return _redirect_with_message("success", f"Category {category.name} deleted.")
 
 
 def _sync_ticket(ticket: Ticket, db: Session) -> None:
