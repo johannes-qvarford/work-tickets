@@ -1,0 +1,8 @@
+- Be able to sync to Jira
+- Be able to sync from Jira
+- Be able to remove categories
+- Be able to create a subtask in the "Edit ticket" section.
+- Be able to delete a subtask in the "Edit ticket" section.
+- Be able to order subtasks in the "Edit ticket" section.
+- Be able to mark ticket as done
+- Be able to mark subtask as done

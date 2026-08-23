@@ -17,6 +17,20 @@ class Category(Base):
     tickets: Mapped[list[Ticket]] = relationship(back_populates="category")
 
 
+class JiraConfig(Base):
+    __tablename__ = "jira_config"
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    base_url: Mapped[str] = mapped_column(String(300))
+    email: Mapped[str] = mapped_column(String(320))
+    api_token: Mapped[str] = mapped_column(String(300))
+    project_key: Mapped[str] = mapped_column(String(40))
+    issue_type: Mapped[str] = mapped_column(String(80), default="Task")
+    completed_statuses: Mapped[str] = mapped_column(String(500), default="Done")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class Ticket(Base):
     __tablename__ = "tickets"
     id: Mapped[int] = mapped_column(primary_key=True)
