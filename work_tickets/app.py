@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
@@ -12,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
-from .jira import JiraClient, JiraError
+from .jira import JiraClient, JiraError, JiraIssue
 from .models import Category, JiraConfig, SessionLocal, Ticket, init_db
 
 app = FastAPI(title="Work Tickets")
@@ -213,6 +213,11 @@ def sync_ticket(ticket_id: int, db: Session = Depends(get_db)) -> RedirectRespon
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
         return _redirect_with_message("error", "Ticket was not found.")
+    if ticket.parent_id is not None:
+        return _redirect_with_message(
+            "error",
+            "Only top-level tickets can sync to Jira; sync the parent to include all subtasks.",
+        )
     try:
         _sync_ticket(ticket, db)
     except JiraError as exc:
@@ -226,6 +231,11 @@ def sync_ticket_from_jira(ticket_id: int, db: Session = Depends(get_db)) -> Redi
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
         return _redirect_with_message("error", "Ticket was not found.")
+    if ticket.parent_id is not None:
+        return _redirect_with_message(
+            "error",
+            "Only top-level tickets can sync from Jira; sync the parent to include all subtasks.",
+        )
     try:
         _sync_ticket_from_jira(ticket, db)
     except JiraError as exc:
@@ -343,6 +353,10 @@ def delete_category(category_id: int, db: Session = Depends(get_db)) -> Redirect
 
 
 def _sync_ticket(ticket: Ticket, db: Session) -> None:
+    if ticket.parent_id is not None:
+        raise JiraError(
+            "Only top-level tickets can sync to Jira; sync the parent to include all subtasks."
+        )
     config = db.get(JiraConfig, 1)
     if config is None:
         raise JiraError("Jira is not configured. Configure Jira before syncing.")
@@ -352,17 +366,29 @@ def _sync_ticket(ticket: Ticket, db: Session) -> None:
             issue = jira.update_issue(ticket.jira_issue_key, ticket.summary, ticket.description)
         else:
             issue = jira.create_issue(ticket.summary, ticket.description)
+        synced_at = datetime.utcnow()
+        _save_jira_issue(ticket, issue, synced_at)
+        # Commit each remote success so a later failure does not lose already
+        # established Jira links or statuses in the local database.
+        db.commit()
+        for subtask in ticket.subtasks:
+            if subtask.jira_issue_key:
+                subtask_issue = jira.update_issue(
+                    subtask.jira_issue_key, subtask.summary, subtask.description
+                )
+            else:
+                subtask_issue = jira.create_subtask(issue.key, subtask.summary, subtask.description)
+            _save_jira_issue(subtask, subtask_issue, synced_at)
+            db.commit()
     finally:
         jira.close()
-    ticket.jira_issue_key = issue.key
-    ticket.jira_status_name = issue.status_name
-    from datetime import datetime
-
-    ticket.synced_at = datetime.utcnow()
-    db.commit()
 
 
 def _sync_ticket_from_jira(ticket: Ticket, db: Session) -> None:
+    if ticket.parent_id is not None:
+        raise JiraError(
+            "Only top-level tickets can sync from Jira; sync the parent to include all subtasks."
+        )
     if not ticket.jira_issue_key:
         raise JiraError("Ticket has not been synced to Jira yet.")
     config = db.get(JiraConfig, 1)
@@ -371,22 +397,53 @@ def _sync_ticket_from_jira(ticket: Ticket, db: Session) -> None:
 
     jira = JiraClient(config)
     try:
-        issue = jira.get_issue(ticket.jira_issue_key)
+        synced = jira.get_issue_with_subtasks(ticket.jira_issue_key)
     finally:
         jira.close()
 
-    if not issue.summary:
+    if not synced.issue.summary:
         raise JiraError("Jira returned an issue without a summary.")
 
     # Only Jira-owned fields are changed here. Category, date, completion, and position
     # are deliberately local workflow fields and must survive an inbound sync.
-    ticket.summary = issue.summary
-    ticket.description = issue.description or ""
-    ticket.jira_status_name = issue.status_name
-    from datetime import datetime
+    synced_at = datetime.utcnow()
+    _save_jira_issue(ticket, synced.issue, synced_at, clear_missing_fields=True)
 
-    ticket.synced_at = datetime.utcnow()
+    local_subtasks_by_key = {
+        subtask.jira_issue_key: subtask for subtask in ticket.subtasks if subtask.jira_issue_key
+    }
+    next_position = max((subtask.position for subtask in ticket.subtasks), default=-1) + 1
+    for issue in synced.subtasks:
+        if not issue.summary:
+            raise JiraError(f"Jira returned subtask {issue.key} without a summary.")
+        subtask = local_subtasks_by_key.get(issue.key)
+        if subtask is None:
+            # Position is local priority, so remote Jira ordering must not reorder
+            # existing local subtasks. Newly discovered subtasks are appended.
+            subtask = Ticket(parent=ticket, position=next_position)
+            next_position += 1
+            db.add(subtask)
+        _save_jira_issue(subtask, issue, synced_at, clear_missing_fields=True)
+    db.flush()
     db.commit()
+
+
+def _save_jira_issue(
+    ticket: Ticket,
+    issue: JiraIssue,
+    synced_at: datetime,
+    *,
+    clear_missing_fields: bool = False,
+) -> None:
+    ticket.jira_issue_key = issue.key
+    if issue.summary is not None:
+        ticket.summary = issue.summary
+    elif clear_missing_fields:
+        raise JiraError(f"Jira returned issue {issue.key} without a summary.")
+    if issue.description is not None or clear_missing_fields:
+        ticket.description = issue.description or ""
+    ticket.jira_status_name = issue.status_name
+    ticket.synced_at = synced_at
 
 
 def _redirect_with_message(kind: str, message: str) -> RedirectResponse:

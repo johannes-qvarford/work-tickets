@@ -17,7 +17,7 @@ os.environ["WORK_TICKETS_DATABASE_URL"] = f"sqlite:///{_test_db_path}"
 atexit.register(_test_db_path.unlink, missing_ok=True)
 
 from work_tickets.app import app  # noqa: E402
-from work_tickets.jira import JiraClient, JiraIssue  # noqa: E402
+from work_tickets.jira import JiraClient, JiraIssue, JiraIssueWithSubtasks  # noqa: E402
 from work_tickets.models import (  # noqa: E402
     Base,
     Category,
@@ -57,7 +57,7 @@ def test_ticket_controls_use_compact_accessible_actions() -> None:
     assert f'action="/subtasks/{subtask_id}/move-down"' in page.text
     assert f'action="/subtasks/{subtask_id}/delete"' in page.text
     assert 'class="compact-control completion-control"' in page.text
-    assert 'aria-label="Sync Compact controls to Jira"' in page.text
+    assert 'aria-label="Sync Compact controls and its subtasks to Jira"' in page.text
     assert 'aria-label="Mark Compact subtask as done"' in page.text
     assert 'aria-label="Move up Compact subtask"' in page.text
     assert 'aria-label="Delete Compact subtask"' in page.text
@@ -349,6 +349,253 @@ def test_sync_ticket_persists_jira_key_and_status(monkeypatch) -> None:
         assert synced.synced_at is not None
 
 
+def test_sync_parent_creates_and_updates_all_subtasks(monkeypatch) -> None:
+    calls: list[tuple[str, str, str]] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            pass
+
+        def create_issue(self, summary: str, description: str) -> JiraIssue:
+            calls.append(("create", summary, description))
+            return JiraIssue(key="WORK-30", summary=summary, status_name="Open")
+
+        def create_subtask(self, parent_key: str, summary: str, description: str) -> JiraIssue:
+            assert parent_key == "WORK-30"
+            calls.append(("create-subtask", summary, description))
+            return JiraIssue(key=f"WORK-{31 + len(calls)}", summary=summary, status_name="To Do")
+
+        def update_issue(self, key: str, summary: str, description: str) -> JiraIssue:
+            calls.append(("update", key, summary))
+            return JiraIssue(key=key, summary=summary, status_name="In Progress")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        parent = Ticket(summary="Parent", description="Parent details", position=300)
+        existing = Ticket(
+            summary="Existing subtask",
+            description="Existing details",
+            position=0,
+            parent=parent,
+            jira_issue_key="WORK-32",
+        )
+        new = Ticket(summary="New subtask", description="New details", position=1, parent=parent)
+        db.add_all([parent, existing, new])
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://jira.example.test"
+            config.project_key = "WORK"
+        db.commit()
+        parent_id = parent.id
+        existing_id = existing.id
+        new_id = new.id
+
+    response = client.post(f"/tickets/{parent_id}/sync", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert calls == [
+        ("create", "Parent", "Parent details"),
+        ("update", "WORK-32", "Existing subtask"),
+        ("create-subtask", "New subtask", "New details"),
+    ]
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        existing = db.get(Ticket, existing_id)
+        new = db.get(Ticket, new_id)
+        assert parent is not None and parent.jira_issue_key == "WORK-30"
+        assert existing is not None and existing.jira_issue_key == "WORK-32"
+        assert new is not None and new.jira_issue_key == "WORK-34"
+        assert existing.jira_status_name == "In Progress"
+        assert new.jira_status_name == "To Do"
+
+
+def test_direct_subtask_sync_is_rejected_without_touching_jira(monkeypatch) -> None:
+    class UnexpectedJiraClient:
+        def __init__(self, config) -> None:
+            raise AssertionError("direct subtask sync must not construct a Jira client")
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", UnexpectedJiraClient)
+    with SessionLocal() as db:
+        parent = Ticket(summary="Sync parent", position=301)
+        subtask = Ticket(summary="Sync child", position=0, parent=parent)
+        db.add_all([parent, subtask])
+        db.commit()
+        subtask_id = subtask.id
+
+    for suffix, expected in (
+        ("sync", "Only%20top-level%20tickets%20can%20sync%20to%20Jira"),
+        ("sync-from-jira", "Only%20top-level%20tickets%20can%20sync%20from%20Jira"),
+    ):
+        response = client.post(f"/tickets/{subtask_id}/{suffix}", follow_redirects=False)
+        assert response.status_code == 303
+        assert expected in response.headers["location"]
+
+    page = client.get("/")
+    assert f'action="/tickets/{subtask_id}/sync"' not in page.text
+    assert f'action="/tickets/{subtask_id}/sync-from-jira"' not in page.text
+
+
+def test_sync_from_jira_updates_parent_and_existing_or_new_subtasks(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            pass
+
+        def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
+            assert key == "WORK-40"
+            return JiraIssueWithSubtasks(
+                issue=JiraIssue(
+                    key=key,
+                    summary="Remote parent",
+                    description="Remote parent details",
+                    status_name="In Progress",
+                ),
+                subtasks=(
+                    JiraIssue(
+                        key="WORK-41",
+                        summary="Remote existing child",
+                        description="Remote child details",
+                        status_name="Done",
+                    ),
+                    JiraIssue(
+                        key="WORK-42",
+                        summary="Remote new child",
+                        description="New child details",
+                        status_name="To Do",
+                    ),
+                ),
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        category = Category(name="Inbound subtask category")
+        parent = Ticket(
+            summary="Local parent",
+            description="Local details",
+            planned_date=date(2026, 9, 2),
+            position=302,
+            local_completed=True,
+            jira_issue_key="WORK-40",
+            category=category,
+        )
+        existing = Ticket(
+            summary="Local child",
+            position=7,
+            parent=parent,
+            jira_issue_key="WORK-41",
+            local_completed=True,
+        )
+        db.add_all([category, parent, existing])
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://jira.example.test"
+            config.project_key = "WORK"
+        db.commit()
+        parent_id = parent.id
+        existing_id = existing.id
+
+    response = client.post(f"/tickets/{parent_id}/sync-from-jira", follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        existing = db.get(Ticket, existing_id)
+        assert parent is not None and parent.summary == "Remote parent"
+        assert parent.category_id == category.id
+        assert parent.planned_date == date(2026, 9, 2)
+        assert parent.local_completed is True
+        assert existing is not None and existing.summary == "Remote existing child"
+        assert existing.description == "Remote child details"
+        assert existing.jira_status_name == "Done"
+        assert existing.position == 7
+        new = db.scalar(select(Ticket).where(Ticket.jira_issue_key == "WORK-42"))
+        assert new is not None
+        assert new.parent_id == parent_id
+        assert new.summary == "Remote new child"
+        assert new.position == 8
+
+
+def test_jira_client_creates_subtask_and_fetches_parent_subtasks() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"key": "WORK-51"})
+        if request.url.path.endswith("/WORK-50"):
+            return httpx.Response(
+                200,
+                json={
+                    "key": "WORK-50",
+                    "fields": {
+                        "summary": "Parent",
+                        "status": {"name": "Open"},
+                        "subtasks": [{"key": "WORK-51"}],
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "key": "WORK-51",
+                "fields": {
+                    "summary": "Child",
+                    "description": "Child details",
+                    "status": {"name": "Done"},
+                },
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    created = jira.create_subtask("WORK-50", "Child", "Child details")
+    synced = jira.get_issue_with_subtasks("WORK-50")
+    jira.close()
+
+    assert created.key == "WORK-51"
+    assert synced.issue.summary == "Parent"
+    assert synced.subtasks == (
+        JiraIssue(key="WORK-51", summary="Child", description="Child details", status_name="Done"),
+    )
+    assert requests[0].method == "POST"
+    post_payload = requests[0].read().decode()
+    assert '"issuetype":{"name":"Sub-task"}' in post_payload
+    assert '"parent":{"key":"WORK-50"}' in post_payload
+
+
 def test_synced_ticket_label_links_to_jira_issue() -> None:
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
@@ -521,14 +768,17 @@ def test_sync_from_jira_updates_owned_fields_and_preserves_local_fields(monkeypa
         def __init__(self, config) -> None:
             assert config.project_key == "WORK"
 
-        def get_issue(self, key: str) -> JiraIssue:
+        def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
             assert key == "WORK-10"
-            return JiraIssue(
-                key=key,
-                summary="Changed in Jira",
-                description="Remote description",
-                issue_type_name="Bug",
-                status_name="Done",
+            return JiraIssueWithSubtasks(
+                issue=JiraIssue(
+                    key=key,
+                    summary="Changed in Jira",
+                    description="Remote description",
+                    issue_type_name="Bug",
+                    status_name="Done",
+                ),
+                subtasks=(),
             )
 
         def close(self) -> None:

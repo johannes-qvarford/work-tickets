@@ -28,6 +28,12 @@ class JiraIssue:
     status_name: str | None = None
 
 
+@dataclass(frozen=True)
+class JiraIssueWithSubtasks:
+    issue: JiraIssue
+    subtasks: tuple[JiraIssue, ...]
+
+
 class JiraClient:
     """Small Jira Cloud REST client with no dependency on Jira credentials at import time."""
 
@@ -75,6 +81,21 @@ class JiraClient:
             raise JiraError("Jira created the issue but did not return an issue key.")
         return self.get_issue(key)
 
+    def create_subtask(self, parent_key: str, summary: str, description: str) -> JiraIssue:
+        """Create a Jira subtask beneath an already-created parent issue."""
+        fields = self._issue_fields(summary, description)
+        fields["issuetype"] = {"name": "Sub-task"}
+        fields["parent"] = {"key": parent_key}
+        response = self._request_dict(
+            "POST",
+            "/rest/api/3/issue",
+            json={"fields": fields},
+        )
+        key = response.get("key")
+        if not isinstance(key, str) or not key:
+            raise JiraError("Jira created the subtask but did not return an issue key.")
+        return self.get_issue(key)
+
     def update_issue(self, key: str, summary: str, description: str) -> JiraIssue:
         self._request_dict(
             "PUT",
@@ -89,6 +110,32 @@ class JiraClient:
             f"/rest/api/3/issue/{quote(key, safe='')}",
             params={"fields": "summary,description,issuetype,status"},
         )
+        return self._issue_from_payload(key, response)
+
+    def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
+        """Fetch an issue and the subtasks Jira currently links beneath it."""
+        response = self._request_dict(
+            "GET",
+            f"/rest/api/3/issue/{quote(key, safe='')}",
+            params={"fields": "summary,description,issuetype,status,subtasks"},
+        )
+        issue = self._issue_from_payload(key, response)
+        fields = response.get("fields")
+        raw_subtasks = fields.get("subtasks") if isinstance(fields, dict) else None
+        subtasks: list[JiraIssue] = []
+        if isinstance(raw_subtasks, list):
+            for raw_subtask in raw_subtasks:
+                if not isinstance(raw_subtask, dict):
+                    continue
+                subtask_key = raw_subtask.get("key")
+                if isinstance(subtask_key, str) and subtask_key:
+                    # The parent response commonly contains only a compact subtask
+                    # representation. Fetch each issue so inbound sync also gets its
+                    # description and the current status reliably.
+                    subtasks.append(self.get_issue(subtask_key))
+        return JiraIssueWithSubtasks(issue=issue, subtasks=tuple(subtasks))
+
+    def _issue_from_payload(self, key: str, response: dict[str, Any]) -> JiraIssue:
         fields = response.get("fields")
         summary: str | None = None
         description: str | None = None
