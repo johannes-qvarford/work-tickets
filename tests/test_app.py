@@ -1212,6 +1212,72 @@ def test_sync_from_jira_reconciles_children_without_touching_local_fields(monkey
         assert created.local_completed is False
 
 
+def test_sync_from_jira_deletes_linked_children_when_remote_has_none_and_keeps_local_only(
+    monkeypatch,
+) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            pass
+
+        def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
+            return JiraIssueWithSubtasks(
+                issue=JiraIssue(key=key, summary="Remote parent", description="Remote details"),
+                subtasks=(),
+            )
+
+        def delete_issue(self, key: str) -> None:
+            raise AssertionError("Inbound sync must not delete anything from Jira")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        parent = Ticket(summary="Local parent", jira_issue_key="WORK-85", position=307)
+        linked_child = Ticket(
+            summary="Removed from Jira",
+            parent=parent,
+            position=10,
+            jira_issue_key="WORK-86",
+        )
+        local_only_child = Ticket(
+            summary="Keep for outbound sync",
+            parent=parent,
+            position=20,
+        )
+        db.add_all([parent, linked_child, local_only_child])
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://jira.example.test"
+            config.project_key = "WORK"
+        db.commit()
+        parent_id = parent.id
+        linked_child_id = linked_child.id
+        local_only_child_id = local_only_child.id
+
+    response = client.post(f"/tickets/{parent_id}/sync-from-jira", follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        assert db.get(Ticket, linked_child_id) is None
+        retained = db.get(Ticket, local_only_child_id)
+        assert retained is not None
+        assert retained.parent_id == parent_id
+        assert retained.jira_issue_key is None
+        assert retained.position == 20
+
+
 def test_sync_from_jira_rejects_duplicate_remote_children_without_mutating_local_data(
     monkeypatch,
 ) -> None:
