@@ -4,7 +4,13 @@
 - [x] Make ticket data compact: keep Done, Date, Sync, and subtask actions small and on existing rows.
 - [x] Format the HTML template with a Jinja-safe Python-backed formatter managed by uv.
 - [x] When syncing to Jira, sync all subtasks. Also, only allow syncing from/to Jira on the parent which also syncs all subtasks.
-- [ ] Planned date and category should fit next to summary when creating ticket, while date should fit next to summary when editing a ticket.
+- [x] Planned date and category should fit next to summary when creating ticket, while date should fit next to summary when editing a ticket.
 - [x] You should be able to edit a subtask like you can its' parent.
 - [x] Changing subtask order should not require page refresh.
 - [x] Adding and editing tickets and subtasks should not require page refresh.
+- [ ] The UI width should be wider.
+- [ ] instead of clicking up and down, you can draw a subtask up or down
+- [ ] You can draw a ticket up or down in priority
+- [ ] There should be a category filter
+- [ ] "Jira returned HTTP 400." when syncing ticket to Jira with local ticket that has subtasks. The main ticket gets synced but not the subtask.
+- [ ] Just make sure that to/from Jira syncing works, that parent and child is created if needed and that when syncing from jira, that missing children are created and extra children are removed
