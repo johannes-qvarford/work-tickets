@@ -22,7 +22,10 @@ class JiraValidation:
 @dataclass(frozen=True)
 class JiraIssue:
     key: str
-    status_name: str | None
+    summary: str | None = None
+    description: str | None = None
+    issue_type_name: str | None = None
+    status_name: str | None = None
 
 
 class JiraClient:
@@ -86,15 +89,30 @@ class JiraClient:
         response = self._request_dict(
             "GET",
             f"/rest/api/3/issue/{quote(key, safe='')}",
-            params={"fields": "status"},
+            params={"fields": "summary,description,issuetype,status"},
         )
         fields = response.get("fields")
+        summary: str | None = None
+        description: str | None = None
+        issue_type_name: str | None = None
         status_name: str | None = None
         if isinstance(fields, dict):
+            if isinstance(fields.get("summary"), str):
+                summary = fields["summary"]
+            description = self._description_text(fields.get("description"))
+            issue_type = fields.get("issuetype")
+            if isinstance(issue_type, dict) and isinstance(issue_type.get("name"), str):
+                issue_type_name = issue_type["name"]
             status = fields.get("status")
             if isinstance(status, dict) and isinstance(status.get("name"), str):
                 status_name = status["name"]
-        return JiraIssue(key=key, status_name=status_name)
+        return JiraIssue(
+            key=key,
+            summary=summary,
+            description=description,
+            issue_type_name=issue_type_name,
+            status_name=status_name,
+        )
 
     def _issue_fields(self, summary: str, description: str) -> dict[str, Any]:
         return {
@@ -119,6 +137,40 @@ class JiraClient:
                 for line in paragraphs
             ],
         }
+
+    @classmethod
+    def _description_text(cls, description: Any) -> str | None:
+        """Convert Jira Cloud's ADF description into the local plain-text form."""
+        if description is None:
+            return None
+        if isinstance(description, str):
+            return description
+        if not isinstance(description, dict):
+            return None
+
+        description_type = description.get("type")
+        if description_type == "text":
+            text = description.get("text")
+            return text if isinstance(text, str) else ""
+        if description_type == "hardBreak":
+            return "\n"
+
+        content = description.get("content")
+        if not isinstance(content, list):
+            return ""
+        children = [cls._description_text(item) or "" for item in content]
+        if description_type in {
+            "blockquote",
+            "bulletList",
+            "codeBlock",
+            "doc",
+            "heading",
+            "listItem",
+            "orderedList",
+            "paragraph",
+        }:
+            return "\n".join(children)
+        return "".join(children)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any] | list[Any]:
         try:

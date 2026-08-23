@@ -1,9 +1,11 @@
+from datetime import date
+
 import httpx
 from fastapi.testclient import TestClient
 
 from work_tickets.app import app
 from work_tickets.jira import JiraClient, JiraIssue
-from work_tickets.models import Base, JiraConfig, SessionLocal, Ticket, engine
+from work_tickets.models import Base, Category, JiraConfig, SessionLocal, Ticket, engine
 
 Base.metadata.drop_all(engine)
 Base.metadata.create_all(engine)
@@ -65,6 +67,58 @@ def test_jira_client_creates_issue_and_refreshes_status() -> None:
     assert requests[0].read().decode().find('"project":{"key":"WORK"') >= 0
 
 
+def test_jira_client_fetches_remote_fields_and_converts_adf_description() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "key": "WORK-9",
+                "fields": {
+                    "summary": "Remote summary",
+                    "description": {
+                        "type": "doc",
+                        "version": 1,
+                        "content": [
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "First paragraph"}],
+                            },
+                            {
+                                "type": "paragraph",
+                                "content": [{"type": "text", "text": "Second paragraph"}],
+                            },
+                        ],
+                    },
+                    "issuetype": {"name": "Bug"},
+                    "status": {"name": "In Progress"},
+                },
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    issue = jira.get_issue("WORK-9")
+    jira.close()
+
+    assert issue == JiraIssue(
+        key="WORK-9",
+        summary="Remote summary",
+        description="First paragraph\nSecond paragraph",
+        issue_type_name="Bug",
+        status_name="In Progress",
+    )
+    assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
+
+
 def test_sync_ticket_persists_jira_key_and_status(monkeypatch) -> None:
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -116,3 +170,83 @@ def test_sync_without_configuration_shows_error() -> None:
     response = client.post(f"/tickets/{ticket_id}/sync", follow_redirects=False)
     assert response.status_code == 303
     assert "Jira%20is%20not%20configured" in response.headers["location"]
+
+
+def test_sync_from_jira_updates_owned_fields_and_preserves_local_fields(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.project_key == "WORK"
+
+        def get_issue(self, key: str) -> JiraIssue:
+            assert key == "WORK-10"
+            return JiraIssue(
+                key=key,
+                summary="Changed in Jira",
+                description="Remote description",
+                issue_type_name="Bug",
+                status_name="Done",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.project_key = "WORK"
+        category = Category(name="Inbound local category")
+        db.add(category)
+        db.flush()
+        ticket = Ticket(
+            summary="Old local summary",
+            description="Old local description",
+            planned_date=date(2026, 9, 1),
+            position=42,
+            local_completed=True,
+            jira_issue_key="WORK-10",
+            jira_status_name="Open",
+            category_id=category.id,
+        )
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    response = client.post(f"/tickets/{ticket_id}/sync-from-jira", follow_redirects=False)
+    assert response.status_code == 303
+    assert "synced%20from%20Jira" in response.headers["location"]
+    with SessionLocal() as db:
+        synced = db.get(Ticket, ticket_id)
+        assert synced is not None
+        assert synced.summary == "Changed in Jira"
+        assert synced.description == "Remote description"
+        assert synced.jira_status_name == "Done"
+        assert synced.jira_issue_key == "WORK-10"
+        assert synced.category_id == category.id
+        assert synced.planned_date == date(2026, 9, 1)
+        assert synced.local_completed is True
+        assert synced.position == 42
+        assert synced.synced_at is not None
+
+
+def test_sync_from_jira_requires_a_linked_ticket() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Local only", position=101)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    response = client.post(f"/tickets/{ticket_id}/sync-from-jira", follow_redirects=False)
+    assert response.status_code == 303
+    assert "Ticket%20has%20not%20been%20synced" in response.headers["location"]

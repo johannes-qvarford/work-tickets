@@ -117,6 +117,19 @@ def sync_ticket(ticket_id: int, db: Session = Depends(get_db)) -> RedirectRespon
     return _redirect_with_message("success", f"{ticket.summary} synced to Jira.")
 
 
+@app.post("/tickets/{ticket_id}/sync-from-jira")
+def sync_ticket_from_jira(ticket_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return _redirect_with_message("error", "Ticket was not found.")
+    try:
+        _sync_ticket_from_jira(ticket, db)
+    except JiraError as exc:
+        db.rollback()
+        return _redirect_with_message("error", str(exc))
+    return _redirect_with_message("success", f"{ticket.summary} synced from Jira.")
+
+
 @app.post("/jira/config")
 def save_jira_config(
     base_url: Annotated[str, Form()],
@@ -197,6 +210,33 @@ def _sync_ticket(ticket: Ticket, db: Session) -> None:
     finally:
         jira.close()
     ticket.jira_issue_key = issue.key
+    ticket.jira_status_name = issue.status_name
+    from datetime import datetime
+
+    ticket.synced_at = datetime.utcnow()
+    db.commit()
+
+
+def _sync_ticket_from_jira(ticket: Ticket, db: Session) -> None:
+    if not ticket.jira_issue_key:
+        raise JiraError("Ticket has not been synced to Jira yet.")
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before syncing.")
+
+    jira = JiraClient(config)
+    try:
+        issue = jira.get_issue(ticket.jira_issue_key)
+    finally:
+        jira.close()
+
+    if not issue.summary:
+        raise JiraError("Jira returned an issue without a summary.")
+
+    # Only Jira-owned fields are changed here. Category, date, completion, and position
+    # are deliberately local workflow fields and must survive an inbound sync.
+    ticket.summary = issue.summary
+    ticket.description = issue.description or ""
     ticket.jira_status_name = issue.status_name
     from datetime import datetime
 
