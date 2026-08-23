@@ -1682,6 +1682,7 @@ def test_init_db_migrates_existing_jira_config_to_browser_base_url(tmp_path, mon
     from work_tickets.models import init_db
 
     init_db()
+    init_db()
 
     columns = {column["name"] for column in inspect(legacy_engine).get_columns("jira_config")}
     with legacy_engine.connect() as connection:

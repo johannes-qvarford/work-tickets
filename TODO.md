@@ -17,6 +17,6 @@
 - [x] Drawing tickets up and down doesn't work to change their priority. Nothing seems to be happen. Interact with the web browser if you want to verify that the code works.
 - [x] Import from Ticket name (like Scrum-XYZ) or browser url like {browser base}/browse/SCRUM-XYZ.
 - [x] Be able to delete tickets - if the linked Jira ticket could not be deleted, then print an error message about it, but delete the local ticket data still.
-- [ ] SQL Migrations - make them idempotent and create an initial migration that creates the current schema.
+- [x] SQL Migrations - make them idempotent and create an initial migration that creates the current schema.
 - [ ] When syncing from Jira, extra subtasks that don't exist for the Jira ticket should be deleted locally.
 - [ ] Refactor Jira Client(s) so that we can handle either Jira Cloud and Jira Server urls and conventions depending on the base url format - we may need to support v2 API and not just v3.

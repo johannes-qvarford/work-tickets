@@ -11,10 +11,10 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
-    inspect,
-    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+
+from .db_migrations import apply_migrations
 
 
 class Base(DeclarativeBase):
@@ -77,18 +77,4 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
-    jira_columns = {column["name"] for column in inspect(engine).get_columns("jira_config")}
-    if "browser_base_url" not in jira_columns:
-        with engine.begin() as connection:
-            connection.execute(
-                text(
-                    "ALTER TABLE jira_config "
-                    "ADD COLUMN browser_base_url VARCHAR(300) NOT NULL DEFAULT ''"
-                )
-            )
-            connection.execute(
-                text(
-                    "UPDATE jira_config SET browser_base_url = base_url WHERE browser_base_url = ''"
-                )
-            )
+    apply_migrations(engine)
