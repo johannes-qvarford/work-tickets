@@ -191,6 +191,33 @@ def test_jira_client_fetches_remote_fields_and_converts_adf_description() -> Non
     assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
 
 
+def test_jira_validation_does_not_require_myself_scope() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/project/WORK"):
+            return httpx.Response(200, json={"name": "Work project"})
+        return httpx.Response(200, json=[{"name": "Story"}])
+
+    config = JiraConfig(
+        base_url="https://api.atlassian.com/ex/jira/cloud-id",
+        email="person@example.test",
+        api_token="scoped-token",
+        project_key="WORK",
+        issue_type="Story",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    validation = jira.validate()
+    jira.close()
+
+    assert validation.project_name == "Work project"
+    assert [request.url.path for request in requests] == [
+        "/ex/jira/cloud-id/rest/api/3/project/WORK",
+        "/ex/jira/cloud-id/rest/api/3/issuetype",
+    ]
+
+
 def test_sync_ticket_persists_jira_key_and_status(monkeypatch) -> None:
     class FakeJiraClient:
         def __init__(self, config) -> None:

@@ -46,8 +46,7 @@ class JiraClient:
         self._client.close()
 
     def validate(self) -> JiraValidation:
-        """Check authentication, project access, and the configured issue type."""
-        myself = self._request_dict("GET", "/rest/api/3/myself")
+        """Check project access and the configured issue type."""
         project = self._request_dict(
             "GET", f"/rest/api/3/project/{quote(self._project_key, safe='')}"
         )
@@ -59,10 +58,9 @@ class JiraClient:
         }
         if self._issue_type not in available_types:
             raise JiraError(f"Jira issue type '{self._issue_type}' was not found for this account.")
-        user_name = myself.get("displayName") or myself.get("emailAddress") or "account"
         project_name = str(project.get("name") or self._project_key)
         return JiraValidation(
-            project_name=f"{project_name} (connected as {user_name})",
+            project_name=project_name,
             issue_type=self._issue_type,
         )
 
@@ -190,6 +188,9 @@ class JiraClient:
                     errors = body.get("errorMessages")
                     if isinstance(errors, list) and errors and not detail:
                         detail = f": {', '.join(str(error) for error in errors)}"
+                    message = body.get("message")
+                    if isinstance(message, str) and message and not detail:
+                        detail = f": {message}"
             except ValueError:
                 pass
             raise JiraError(f"Jira returned HTTP {exc.response.status_code}{detail}.") from exc
