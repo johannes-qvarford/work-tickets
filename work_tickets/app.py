@@ -34,7 +34,13 @@ def get_db() -> Generator[Session, None, None]:
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
-    tickets = list(db.scalars(select(Ticket).order_by(Ticket.position, Ticket.created_at)))
+    tickets = list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.parent_id.is_(None))
+            .order_by(Ticket.position, Ticket.created_at)
+        )
+    )
     categories = list(db.scalars(select(Category).order_by(Category.name)))
     today = date.today()
     today_tickets = [
@@ -74,6 +80,42 @@ def create_ticket(
     ticket.planned_date = date.fromisoformat(planned_date) if planned_date else None
     ticket.category_id = int(category_id) if category_id else None
     db.add(ticket)
+    db.commit()
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/tickets/{ticket_id}/subtasks")
+def create_subtask(
+    ticket_id: int,
+    summary: Annotated[str, Form()] = "",
+    description: Annotated[str, Form()] = "",
+    planned_date: Annotated[str, Form()] = "",
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    parent = db.get(Ticket, ticket_id)
+    if parent is None:
+        return _redirect_with_message("error", "Parent ticket was not found.")
+    if parent.parent_id is not None:
+        return _redirect_with_message("error", "Subtasks can only be added to top-level tickets.")
+
+    summary_value = summary.strip()
+    if not summary_value:
+        return _redirect_with_message("error", "Subtask summary is required.")
+
+    try:
+        planned_date_value = date.fromisoformat(planned_date) if planned_date else None
+    except ValueError:
+        return _redirect_with_message("error", "Subtask planned date is invalid.")
+
+    max_position = db.scalar(select(func.max(Ticket.position)).where(Ticket.parent_id == parent.id))
+    subtask = Ticket(
+        parent_id=parent.id,
+        summary=summary_value,
+        description=description,
+        planned_date=planned_date_value,
+        position=(max_position if max_position is not None else -1) + 1,
+    )
+    db.add(subtask)
     db.commit()
     return RedirectResponse("/", status_code=303)
 

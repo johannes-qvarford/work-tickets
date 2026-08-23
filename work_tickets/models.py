@@ -51,7 +51,9 @@ class Ticket(Base):
     category: Mapped[Category | None] = relationship(back_populates="tickets")
     parent: Mapped[Ticket | None] = relationship(remote_side=[id], back_populates="subtasks")
     subtasks: Mapped[list[Ticket]] = relationship(
-        back_populates="parent", cascade="all, delete-orphan"
+        back_populates="parent",
+        cascade="all, delete-orphan",
+        order_by=lambda: (Ticket.position, Ticket.created_at),
     )
 
 

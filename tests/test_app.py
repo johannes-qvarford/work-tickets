@@ -2,6 +2,7 @@ from datetime import date
 
 import httpx
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from work_tickets.app import app
 from work_tickets.jira import JiraClient, JiraIssue
@@ -279,3 +280,103 @@ def test_delete_missing_category_shows_error() -> None:
 
     assert response.status_code == 303
     assert "Category%20was%20not%20found" in response.headers["location"]
+
+
+def test_create_subtasks_in_edit_section_persists_fields_and_orders_them() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Parent ticket", position=200)
+        db.add(parent)
+        db.commit()
+        parent_id = parent.id
+
+    first_response = client.post(
+        f"/tickets/{parent_id}/subtasks",
+        data={
+            "summary": "First subtask",
+            "description": "First details",
+            "planned_date": "2026-08-24",
+        },
+        follow_redirects=False,
+    )
+    second_response = client.post(
+        f"/tickets/{parent_id}/subtasks",
+        data={"summary": "Second subtask"},
+        follow_redirects=False,
+    )
+
+    assert first_response.status_code == 303
+    assert second_response.status_code == 303
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [(subtask.summary, subtask.position) for subtask in parent.subtasks] == [
+            ("First subtask", 0),
+            ("Second subtask", 1),
+        ]
+        assert parent.subtasks[0].parent_id == parent_id
+        assert parent.subtasks[0].description == "First details"
+        assert parent.subtasks[0].planned_date == date(2026, 8, 24)
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "Subtasks" in page.text
+    assert "First subtask" in page.text
+    assert "Second subtask" in page.text
+
+
+def test_create_subtask_validates_summary_and_planned_date() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Validation parent", position=201)
+        db.add(parent)
+        db.commit()
+        parent_id = parent.id
+
+    missing_summary = client.post(
+        f"/tickets/{parent_id}/subtasks",
+        data={"summary": "   "},
+        follow_redirects=False,
+    )
+    invalid_date = client.post(
+        f"/tickets/{parent_id}/subtasks",
+        data={"summary": "Bad date", "planned_date": "not-a-date"},
+        follow_redirects=False,
+    )
+
+    assert missing_summary.status_code == 303
+    assert "Subtask%20summary%20is%20required" in missing_summary.headers["location"]
+    assert invalid_date.status_code == 303
+    assert "Subtask%20planned%20date%20is%20invalid" in invalid_date.headers["location"]
+    with SessionLocal() as db:
+        assert db.scalar(select(Ticket).where(Ticket.parent_id == parent_id)) is None
+
+
+def test_create_subtask_rejects_missing_and_nested_parents() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Top-level parent", position=202)
+        nested_parent = Ticket(summary="Nested parent", position=0, parent=parent)
+        db.add_all([parent, nested_parent])
+        db.commit()
+        parent_id = parent.id
+        nested_parent_id = nested_parent.id
+
+    missing_parent = client.post(
+        "/tickets/999999/subtasks",
+        data={"summary": "Orphan subtask"},
+        follow_redirects=False,
+    )
+    nested = client.post(
+        f"/tickets/{nested_parent_id}/subtasks",
+        data={"summary": "Too deeply nested"},
+        follow_redirects=False,
+    )
+
+    assert missing_parent.status_code == 303
+    assert "Parent%20ticket%20was%20not%20found" in missing_parent.headers["location"]
+    assert nested.status_code == 303
+    assert (
+        "Subtasks%20can%20only%20be%20added%20to%20top-level%20tickets"
+        in nested.headers["location"]
+    )
+    with SessionLocal() as db:
+        assert db.scalar(select(Ticket).where(Ticket.parent_id == nested_parent_id)) is None
+        assert db.get(Ticket, parent_id) is not None
