@@ -243,7 +243,7 @@ def save_jira_config(
     project_key: Annotated[str, Form()] = "",
     issue_type: Annotated[str, Form()] = "Task",
     completed_statuses: Annotated[str, Form()] = "Done",
-    validate: Annotated[str, Form()] = "",
+    validate_connection: Annotated[str, Form(alias="validate")] = "",
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     existing = db.get(JiraConfig, 1)
@@ -267,7 +267,7 @@ def save_jira_config(
 
     candidate = JiraConfig(id=1, **values)
     try:
-        if validate:
+        if validate_connection:
             jira = JiraClient(candidate)
             try:
                 jira.validate()
@@ -282,7 +282,11 @@ def save_jira_config(
     except JiraError as exc:
         db.rollback()
         return _redirect_with_message("error", f"Jira setup failed: {exc}")
-    message = "Jira connection validated and saved." if validate else "Jira configuration saved."
+    message = (
+        "Jira connection validated and saved."
+        if validate_connection
+        else "Jira configuration saved."
+    )
     return _redirect_with_message("success", message)
 
 

@@ -1,8 +1,5 @@
-- Be able to sync to Jira
-- Be able to sync from Jira
-- Be able to remove categories
-- Be able to create a subtask in the "Edit ticket" section.
-- Be able to delete a subtask in the "Edit ticket" section.
-- Be able to order subtasks in the "Edit ticket" section.
-- Be able to mark ticket as done
-- Be able to mark subtask as done
+- [x] Eliminate the Pydantic warning that the generated Jira config form field name `validate` shadows a `BaseModel` attribute.
+- The clickable Jira URL should be different. In this case it should be https://johannesqvarford.atlassian.net/browse/SCRUM-5 for SCRUM-5. So maybe we need a second url to configure for "https://johannesqvarford.atlassian.net"
+- You should not be able to change the category of a ticket once created.
+- The ticket data should be more compact. "Done", "Date" and "Sync" should take less vertical and horizontal space - maybe just a small button each on an existing row. Same with subtask buttons.
+- The Html has some really long and hard-to-read lines - format them better. Is there a python-backed html formatter that we can use with uv e.g. ?

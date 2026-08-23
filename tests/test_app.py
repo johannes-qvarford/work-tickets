@@ -408,6 +408,35 @@ def test_saving_jira_config_persists_separate_browser_base_url() -> None:
         assert config.browser_base_url == "https://johannesqvarford.atlassian.net"
 
 
+def test_saving_jira_config_keeps_validate_form_field_compatible(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.project_key == "WORK"
+
+        def validate(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    response = client.post(
+        "/jira/config",
+        data={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "work",
+            "issue_type": "Task",
+            "validate": "1",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "Jira%20connection%20validated%20and%20saved" in response.headers["location"]
+
+
 def test_init_db_migrates_existing_jira_config_to_browser_base_url(tmp_path, monkeypatch) -> None:
     legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     with legacy_engine.begin() as connection:
