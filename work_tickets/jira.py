@@ -84,7 +84,10 @@ class JiraClient:
     def create_subtask(self, parent_key: str, summary: str, description: str) -> JiraIssue:
         """Create a Jira subtask beneath an already-created parent issue."""
         fields = self._issue_fields(summary, description)
-        fields["issuetype"] = {"name": "Sub-task"}
+        # Jira requires the ID of a subtask issue type that is available in the
+        # configured project. The display name is not stable (for example,
+        # projects may use "Subtask" instead of "Sub-task").
+        fields["issuetype"] = {"id": self._get_subtask_issue_type_id()}
         fields["parent"] = {"key": parent_key}
         response = self._request_dict(
             "POST",
@@ -95,6 +98,23 @@ class JiraClient:
         if not isinstance(key, str) or not key:
             raise JiraError("Jira created the subtask but did not return an issue key.")
         return self.get_issue(key)
+
+    def _get_subtask_issue_type_id(self) -> str:
+        metadata = self._request_dict(
+            "GET",
+            f"/rest/api/3/issue/createmeta/{quote(self._project_key, safe='')}/issuetypes",
+            params={"maxResults": 100},
+        )
+        issue_types = metadata.get("issueTypes")
+        if not isinstance(issue_types, list):
+            raise JiraError("Jira returned unexpected issue type metadata for subtasks.")
+        for issue_type in issue_types:
+            if not isinstance(issue_type, dict) or issue_type.get("subtask") is not True:
+                continue
+            issue_type_id = issue_type.get("id")
+            if isinstance(issue_type_id, str) and issue_type_id:
+                return issue_type_id
+        raise JiraError(f"Jira has no usable subtask issue type for project {self._project_key}.")
 
     def update_issue(self, key: str, summary: str, description: str) -> JiraIssue:
         self._request_dict(

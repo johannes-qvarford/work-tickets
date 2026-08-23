@@ -12,5 +12,5 @@
 - [x] instead of clicking up and down, you can draw a subtask up or down
 - [x] You can draw a ticket up or down in priority
 - [x] There should be a category filter
-- [ ] "Jira returned HTTP 400." when syncing ticket to Jira with local ticket that has subtasks. The main ticket gets synced but not the subtask.
+- [x] "Jira returned HTTP 400." when syncing ticket to Jira with local ticket that has subtasks. The main ticket gets synced but not the subtask.
 - [ ] Just make sure that to/from Jira syncing works, that parent and child is created if needed and that when syncing from jira, that missing children are created and extra children are removed

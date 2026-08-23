@@ -1,4 +1,5 @@
 import atexit
+import json
 import os
 import tempfile
 from datetime import date
@@ -883,6 +884,91 @@ def test_sync_parent_creates_and_updates_all_subtasks(monkeypatch) -> None:
         assert new.jira_status_name == "To Do"
 
 
+def test_sync_parent_creates_local_subtask_with_project_subtask_type(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path.endswith("/createmeta/WORK/issuetypes"):
+            return httpx.Response(
+                200,
+                json={
+                    "issueTypes": [
+                        {"id": "10004", "name": "Subtask", "subtask": True},
+                    ]
+                },
+            )
+        if request.method == "POST":
+            payload = json.loads(request.content)
+            fields = payload["fields"]
+            if fields.get("parent") is not None:
+                if fields["issuetype"] != {"id": "10004"}:
+                    error_message = "Issue type is not available in this project."
+                    return httpx.Response(
+                        400,
+                        json={"errors": {"issuetype": error_message}},
+                    )
+                assert fields["parent"] == {"key": "WORK-100"}
+                return httpx.Response(201, json={"key": "WORK-101"})
+            return httpx.Response(201, json={"key": "WORK-100"})
+        key = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(
+            200,
+            json={
+                "key": key,
+                "fields": {
+                    "summary": "Remote parent" if key == "WORK-100" else "Remote child",
+                    "description": {"type": "doc", "version": 1, "content": []},
+                    "status": {"name": "To Do"},
+                },
+            },
+        )
+
+    class MockJiraClient(JiraClient):
+        def __init__(self, config) -> None:
+            super().__init__(config, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", MockJiraClient)
+    with SessionLocal() as db:
+        parent = Ticket(summary="Local parent", description="Parent details", position=303)
+        child = Ticket(
+            summary="Local child", description="Child details", position=0, parent=parent
+        )
+        db.add_all([parent, child])
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="WORK",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://jira.example.test"
+            config.project_key = "WORK"
+        db.commit()
+        parent_id = parent.id
+        child_id = child.id
+
+    response = client.post(f"/tickets/{parent_id}/sync", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert "synced%20to%20Jira" in response.headers["location"]
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        child = db.get(Ticket, child_id)
+        assert parent is not None and parent.jira_issue_key == "WORK-100"
+        assert child is not None and child.jira_issue_key == "WORK-101"
+    assert any(
+        request.method == "GET" and request.url.path.endswith("/createmeta/WORK/issuetypes")
+        for request in requests
+    )
+
+
 def test_direct_subtask_sync_is_rejected_without_touching_jira(monkeypatch) -> None:
     class UnexpectedJiraClient:
         def __init__(self, config) -> None:
@@ -1007,7 +1093,15 @@ def test_jira_client_creates_subtask_and_fetches_parent_subtasks() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if request.method == "GET" and request.url.path.endswith("/createmeta/WORK/issuetypes"):
+            return httpx.Response(
+                200,
+                json={"issueTypes": [{"id": "10004", "name": "Subtask", "subtask": True}]},
+            )
         if request.method == "POST":
+            payload = json.loads(request.content)
+            if payload["fields"].get("parent") is not None:
+                assert payload["fields"]["issuetype"] == {"id": "10004"}
             return httpx.Response(201, json={"key": "WORK-51"})
         if request.url.path.endswith("/WORK-50"):
             return httpx.Response(
@@ -1050,9 +1144,10 @@ def test_jira_client_creates_subtask_and_fetches_parent_subtasks() -> None:
     assert synced.subtasks == (
         JiraIssue(key="WORK-51", summary="Child", description="Child details", status_name="Done"),
     )
-    assert requests[0].method == "POST"
-    post_payload = requests[0].read().decode()
-    assert '"issuetype":{"name":"Sub-task"}' in post_payload
+    assert requests[0].method == "GET"
+    assert requests[1].method == "POST"
+    post_payload = requests[1].read().decode()
+    assert '"issuetype":{"id":"10004"}' in post_payload
     assert '"parent":{"key":"WORK-50"}' in post_payload
 
 
