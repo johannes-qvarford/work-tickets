@@ -33,10 +33,62 @@ def test_create_category_and_ticket() -> None:
     assert "Prepare agenda" in client.get("/").text
 
 
-def test_toggle_completion() -> None:
-    response = client.post("/tickets/1/complete", follow_redirects=False)
+def test_toggle_top_level_completion_persists_and_excludes_ticket_from_today() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Complete locally", planned_date=date.today(), position=2)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    response = client.post(f"/tickets/{ticket_id}/complete", follow_redirects=False)
     assert response.status_code == 303
-    assert "Done" in client.get("/").text
+    assert "Ticket%20Complete%20locally%20marked%20done" in response.headers["location"]
+    with SessionLocal() as db:
+        completed = db.get(Ticket, ticket_id)
+        assert completed is not None
+        assert completed.local_completed is True
+
+    page = client.get("/")
+    today_section = page.text.split("<h2>Today</h2>", 1)[1].split("</section>", 1)[0]
+    assert "Complete locally" not in today_section
+    assert f'action="/tickets/{ticket_id}/complete"' in page.text
+    assert "Mark as active" in page.text
+
+    response = client.post(f"/tickets/{ticket_id}/complete", follow_redirects=False)
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        active = db.get(Ticket, ticket_id)
+        assert active is not None
+        assert active.local_completed is False
+    page = client.get("/")
+    today_section = page.text.split("<h2>Today</h2>", 1)[1].split("</section>", 1)[0]
+    assert "Complete locally" in today_section
+
+
+def test_completion_rejects_missing_and_subtask_targets() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Completion parent", position=3)
+        subtask = Ticket(summary="Cannot complete alone", position=0, parent=parent)
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    missing = client.post("/tickets/999999/complete", follow_redirects=False)
+    subtask_response = client.post(f"/tickets/{subtask_id}/complete", follow_redirects=False)
+
+    assert missing.status_code == 303
+    assert "Ticket%20was%20not%20found" in missing.headers["location"]
+    assert subtask_response.status_code == 303
+    assert (
+        "Only%20top-level%20tickets%20can%20be%20completed%20here"
+        in subtask_response.headers["location"]
+    )
+    with SessionLocal() as db:
+        parent = db.get(Ticket, parent_id)
+        subtask = db.get(Ticket, subtask_id)
+        assert parent is not None and parent.local_completed is False
+        assert subtask is not None and subtask.local_completed is False
 
 
 def test_jira_client_creates_issue_and_refreshes_status() -> None:

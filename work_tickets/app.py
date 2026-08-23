@@ -287,10 +287,15 @@ def save_jira_config(
 @app.post("/tickets/{ticket_id}/complete")
 def complete_ticket(ticket_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
     ticket = db.get(Ticket, ticket_id)
-    if ticket is not None:
-        ticket.local_completed = not ticket.local_completed
-        db.commit()
-    return RedirectResponse("/", status_code=303)
+    if ticket is None:
+        return _redirect_with_message("error", "Ticket was not found.")
+    if ticket.parent_id is not None:
+        return _redirect_with_message("error", "Only top-level tickets can be completed here.")
+
+    ticket.local_completed = not ticket.local_completed
+    db.commit()
+    state = "done" if ticket.local_completed else "active"
+    return _redirect_with_message("success", f"Ticket {ticket.summary} marked {state}.")
 
 
 @app.post("/categories")
