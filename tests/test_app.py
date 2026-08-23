@@ -262,6 +262,13 @@ def test_top_level_ticket_reorder_controls_are_only_in_all_tickets() -> None:
     assert page.text.count('class="ticket"') >= 2
     assert f'action="/tickets/{first_id}/move-up"' in page.text
     assert f'action="/tickets/{second_id}/move-down"' in page.text
+    assert 'class="ticket-drag-handle"' in page.text
+    assert 'title="Drag to reorder"' in page.text
+    ticket_start = page.text.index(f'<article\n  id="ticket-{first_id}"')
+    ticket_opening_tag = page.text[ticket_start : page.text.index(">", ticket_start) + 1]
+    assert 'draggable="true"' not in ticket_opening_tag
+    assert 'class="ticket-drag-handle"' in page.text[ticket_start:]
+    assert 'title="Drag to reorder"\n        draggable="true"' in page.text[ticket_start:]
     today_section = page.text.split("<h2>Today</h2>", 1)[1].split("</section>", 1)[0]
     assert "data-top-level-ticket" not in today_section
     assert "Drag tickets to reorder; use arrows with a keyboard" in page.text

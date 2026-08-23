@@ -14,3 +14,8 @@
 - [x] There should be a category filter
 - [x] "Jira returned HTTP 400." when syncing ticket to Jira with local ticket that has subtasks. The main ticket gets synced but not the subtask.
 - [x] Just make sure that to/from Jira syncing works, that parent and child is created if needed and that when syncing from jira, that missing children are created and extra children are removed
+- [x] Drawing tickets up and down doesn't work to change their priority. Nothing seems to be happen. Interact with the web browser if you want to verify that the code works.
+- [ ] Import from Ticket name (like Scrum-XYZ) or browser url like {browser base}/browse/SCRUM-XYZ.
+- [ ] Be able to delete tickets - if the linked Jira ticket could not be deleted, then print an error message about it, but delete the local ticket data still.
+- [ ] SQL Migrations - make them idempotent and create an initial migration that creates the current schema.
+- [ ] When syncing from Jira, extra subtasks that don't exist for the Jira ticket should be deleted locally.

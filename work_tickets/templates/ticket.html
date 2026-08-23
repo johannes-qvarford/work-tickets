@@ -5,7 +5,6 @@
   data-filterable-ticket
   data-category-id="{{ ticket.category_id or '' }}"
   data-top-level-ticket
-  draggable="true"
 >
   <div class="ticket-header">
     <div class="ticket-heading">
@@ -29,7 +28,12 @@
       </div>
     </div>
     <div class="ticket-actions" aria-label="Ticket actions">
-      <span class="ticket-drag-handle" aria-hidden="true" title="Drag to reorder">⠿</span>
+      <span
+        class="ticket-drag-handle"
+        aria-hidden="true"
+        title="Drag to reorder"
+        draggable="true"
+      >⠿</span>
       {% if ticket.jira_issue_key %}
       {% if jira_config %}
       <a
