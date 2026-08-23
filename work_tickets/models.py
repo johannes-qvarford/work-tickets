@@ -3,7 +3,17 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import (
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    inspect,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 
@@ -22,6 +32,7 @@ class JiraConfig(Base):
     __tablename__ = "jira_config"
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     base_url: Mapped[str] = mapped_column(String(300))
+    browser_base_url: Mapped[str] = mapped_column(String(300), default="", server_default="")
     email: Mapped[str] = mapped_column(String(320))
     api_token: Mapped[str] = mapped_column(String(300))
     project_key: Mapped[str] = mapped_column(String(40))
@@ -67,3 +78,17 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    jira_columns = {column["name"] for column in inspect(engine).get_columns("jira_config")}
+    if "browser_base_url" not in jira_columns:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE jira_config "
+                    "ADD COLUMN browser_base_url VARCHAR(300) NOT NULL DEFAULT ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE jira_config SET browser_base_url = base_url WHERE browser_base_url = ''"
+                )
+            )

@@ -240,6 +240,7 @@ def sync_ticket_from_jira(ticket_id: int, db: Session = Depends(get_db)) -> Redi
 def save_jira_config(
     base_url: Annotated[str, Form()],
     email: Annotated[str, Form()],
+    browser_base_url: Annotated[str, Form()] = "",
     api_token: Annotated[str, Form()] = "",
     project_key: Annotated[str, Form()] = "",
     issue_type: Annotated[str, Form()] = "Task",
@@ -249,8 +250,10 @@ def save_jira_config(
 ) -> RedirectResponse:
     existing = db.get(JiraConfig, 1)
     token = api_token.strip() or (existing.api_token if existing is not None else "")
+    normalized_base_url = base_url.strip().rstrip("/")
     values = {
-        "base_url": base_url.strip().rstrip("/"),
+        "base_url": normalized_base_url,
+        "browser_base_url": browser_base_url.strip().rstrip("/") or normalized_base_url,
         "email": email.strip(),
         "api_token": token,
         "project_key": project_key.strip().upper(),
@@ -260,8 +263,9 @@ def save_jira_config(
     required_keys = ("base_url", "email", "api_token", "project_key", "issue_type")
     if not all(values[key] for key in required_keys):
         return _redirect_with_message("error", "All Jira connection fields are required.")
-    if not values["base_url"].startswith(("https://", "http://")):
-        return _redirect_with_message("error", "Jira URL must start with http:// or https://.")
+    for url_key, label in (("base_url", "Jira API URL"), ("browser_base_url", "Jira browser URL")):
+        if not values[url_key].startswith(("https://", "http://")):
+            return _redirect_with_message("error", f"{label} must start with http:// or https://.")
 
     candidate = JiraConfig(id=1, **values)
     try:

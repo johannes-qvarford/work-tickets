@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import create_engine, inspect, select, text
 
 # Tests must never drop or populate the database used by a running development
 # server. Select an isolated database before importing the application modules.
@@ -266,6 +266,7 @@ def test_synced_ticket_label_links_to_jira_issue() -> None:
                 JiraConfig(
                     id=1,
                     base_url="https://jira.example.test",
+                    browser_base_url="https://jira.example.test",
                     email="person@example.test",
                     api_token="test-token",
                     project_key="WORK",
@@ -274,6 +275,7 @@ def test_synced_ticket_label_links_to_jira_issue() -> None:
             )
         else:
             config.base_url = "https://jira.example.test"
+            config.browser_base_url = "https://jira.example.test"
         ticket = Ticket(summary="Linked ticket", position=103, jira_issue_key="WORK-42")
         db.add(ticket)
         db.commit()
@@ -285,6 +287,100 @@ def test_synced_ticket_label_links_to_jira_issue() -> None:
         '<a class="badge" href="https://jira.example.test/browse/WORK-42" '
         'target="_blank" rel="noopener noreferrer">WORK-42</a>'
     ) in page.text
+
+
+def test_synced_ticket_label_uses_configured_browser_base_url() -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://api.atlassian.com/ex/jira/cloud-id",
+                    browser_base_url="https://johannesqvarford.atlassian.net",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="SCRUM",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://api.atlassian.com/ex/jira/cloud-id"
+            config.browser_base_url = "https://johannesqvarford.atlassian.net"
+            config.project_key = "SCRUM"
+        ticket = Ticket(summary="Browser linked ticket", position=104, jira_issue_key="SCRUM-5")
+        db.add(ticket)
+        db.commit()
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert 'href="https://johannesqvarford.atlassian.net/browse/SCRUM-5"' in page.text
+    assert page.text.count('href="https://johannesqvarford.atlassian.net/browse/SCRUM-5"') == 1
+    assert 'href="https://api.atlassian.com/ex/jira/cloud-id/browse/SCRUM-5"' not in page.text
+
+
+def test_saving_jira_config_persists_separate_browser_base_url() -> None:
+    response = client.post(
+        "/jira/config",
+        data={
+            "base_url": "https://api.atlassian.com/ex/jira/cloud-id/",
+            "browser_base_url": "https://johannesqvarford.atlassian.net/",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "scrum",
+            "issue_type": "Task",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.base_url == "https://api.atlassian.com/ex/jira/cloud-id"
+        assert config.browser_base_url == "https://johannesqvarford.atlassian.net"
+
+
+def test_init_db_migrates_existing_jira_config_to_browser_base_url(tmp_path, monkeypatch) -> None:
+    legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    with legacy_engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE jira_config ("
+                "id INTEGER NOT NULL PRIMARY KEY, "
+                "base_url VARCHAR(300) NOT NULL, "
+                "email VARCHAR(320) NOT NULL, "
+                "api_token VARCHAR(300) NOT NULL, "
+                "project_key VARCHAR(40) NOT NULL, "
+                "issue_type VARCHAR(80) NOT NULL, "
+                "completed_statuses VARCHAR(500) NOT NULL, "
+                "updated_at DATETIME NOT NULL"
+                ")"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO jira_config "
+                "(id, base_url, email, api_token, project_key, issue_type, "
+                "completed_statuses, updated_at) VALUES "
+                "(1, 'https://jira.example.test', 'person@example.test', 'test-token', "
+                "'WORK', 'Task', 'Done', '2026-08-23 00:00:00')"
+            )
+        )
+
+    monkeypatch.setattr("work_tickets.models.engine", legacy_engine)
+    from work_tickets.models import init_db
+
+    init_db()
+
+    columns = {column["name"] for column in inspect(legacy_engine).get_columns("jira_config")}
+    with legacy_engine.connect() as connection:
+        browser_base_url = connection.scalar(
+            text("SELECT browser_base_url FROM jira_config WHERE id = 1")
+        )
+    assert "browser_base_url" in columns
+    assert browser_base_url == "https://jira.example.test"
 
 
 def test_sync_without_configuration_shows_error() -> None:
