@@ -178,11 +178,17 @@ class JiraClient:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             detail = ""
+            login_reason = exc.response.headers.get("X-Seraph-LoginReason")
+            if login_reason == "AUTHENTICATION_DENIED":
+                detail = (
+                    ": Jira denied authentication (CAPTCHA may be active; sign in to Jira "
+                    "in a browser first)"
+                )
             try:
                 body = exc.response.json()
                 if isinstance(body, dict):
                     errors = body.get("errorMessages")
-                    if isinstance(errors, list) and errors:
+                    if isinstance(errors, list) and errors and not detail:
                         detail = f": {', '.join(str(error) for error in errors)}"
             except ValueError:
                 pass

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, create_engine
@@ -57,7 +58,10 @@ class Ticket(Base):
     )
 
 
-engine = create_engine("sqlite:///work-tickets.db", connect_args={"check_same_thread": False})
+engine = create_engine(
+    os.environ.get("WORK_TICKETS_DATABASE_URL", "sqlite:///work-tickets.db"),
+    connect_args={"check_same_thread": False},
+)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

@@ -1,12 +1,31 @@
+import atexit
+import os
+import tempfile
 from datetime import date
+from pathlib import Path
 
 import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from work_tickets.app import app
-from work_tickets.jira import JiraClient, JiraIssue
-from work_tickets.models import Base, Category, JiraConfig, SessionLocal, Ticket, engine
+# Tests must never drop or populate the database used by a running development
+# server. Select an isolated database before importing the application modules.
+_test_db_fd, _test_db_name = tempfile.mkstemp(prefix="work-tickets-test-", suffix=".db")
+os.close(_test_db_fd)
+_test_db_path = Path(_test_db_name)
+os.environ["WORK_TICKETS_DATABASE_URL"] = f"sqlite:///{_test_db_path}"
+atexit.register(_test_db_path.unlink, missing_ok=True)
+
+from work_tickets.app import app  # noqa: E402
+from work_tickets.jira import JiraClient, JiraIssue  # noqa: E402
+from work_tickets.models import (  # noqa: E402
+    Base,
+    Category,
+    JiraConfig,
+    SessionLocal,
+    Ticket,
+    engine,
+)
 
 Base.metadata.drop_all(engine)
 Base.metadata.create_all(engine)
