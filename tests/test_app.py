@@ -17,7 +17,7 @@ _test_db_path = Path(_test_db_name)
 os.environ["WORK_TICKETS_DATABASE_URL"] = f"sqlite:///{_test_db_path}"
 atexit.register(_test_db_path.unlink, missing_ok=True)
 
-from work_tickets.app import app  # noqa: E402
+from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
 from work_tickets.jira import JiraClient, JiraError, JiraIssue, JiraIssueWithSubtasks  # noqa: E402
 from work_tickets.models import (  # noqa: E402
     Base,
@@ -512,6 +512,137 @@ def test_create_category_and_ticket() -> None:
     )
     assert response.status_code == 303
     assert "Prepare agenda" in client.get("/").text
+
+
+def test_parse_jira_issue_reference_accepts_key_and_configured_browser_url() -> None:
+    browser_base_url = "https://jira.example.test"
+
+    assert parse_jira_issue_reference(" scrum-xyz ", browser_base_url) == "SCRUM-XYZ"
+    assert (
+        parse_jira_issue_reference(
+            "https://jira.example.test/browse/scrum-xyz?focusedCommentId=1",
+            browser_base_url,
+        )
+        == "SCRUM-XYZ"
+    )
+
+
+def test_parse_jira_issue_reference_rejects_other_hosts_and_paths() -> None:
+    browser_base_url = "https://jira.example.test"
+
+    for reference in (
+        "https://other.example.test/browse/WORK-1",
+        "https://jira.example.test/issues/WORK-1",
+        "not-an-issue-reference",
+    ):
+        try:
+            parse_jira_issue_reference(reference, browser_base_url)
+        except JiraError as exc:
+            assert str(exc) == "Enter a Jira issue key or a Jira browser URL ending in /browse/KEY."
+        else:
+            raise AssertionError(f"Expected invalid Jira reference: {reference}")
+
+
+def test_create_ticket_imports_jira_issue_and_subtasks_with_local_fields(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.browser_base_url == "https://jira.example.test"
+
+        def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
+            assert key == "SCRUM-505"
+            return JiraIssueWithSubtasks(
+                issue=JiraIssue(
+                    key=key,
+                    summary="Imported parent",
+                    description="Imported details",
+                    status_name="In Progress",
+                ),
+                subtasks=(
+                    JiraIssue(
+                        key="SCRUM-506",
+                        summary="Imported child",
+                        description="Child details",
+                        status_name="To Do",
+                    ),
+                ),
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://jira.example.test",
+                    browser_base_url="https://jira.example.test",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="SCRUM",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://jira.example.test"
+            config.browser_base_url = "https://jira.example.test"
+            config.project_key = "SCRUM"
+        category = Category(name="Import category")
+        db.add(category)
+        db.commit()
+        category_id = category.id
+
+    response = client.post(
+        "/tickets",
+        data={
+            "summary": "https://jira.example.test/browse/scrum-505",
+            "planned_date": "2026-08-30",
+            "category_id": str(category_id),
+            "description": "Ignored local description",
+        },
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["ok"] is True
+    assert result["target"] == "ticket-lists"
+    assert "Imported parent" in result["html"]
+    with SessionLocal() as db:
+        parent = db.scalar(select(Ticket).where(Ticket.jira_issue_key == "SCRUM-505"))
+        child = db.scalar(select(Ticket).where(Ticket.jira_issue_key == "SCRUM-506"))
+        assert parent is not None
+        assert child is not None
+        assert parent.summary == "Imported parent"
+        assert parent.description == "Imported details"
+        assert parent.planned_date == date(2026, 8, 30)
+        assert parent.category_id == category_id
+        assert parent.jira_status_name == "In Progress"
+        assert child.parent_id == parent.id
+        assert child.summary == "Imported child"
+        assert child.description == "Child details"
+        assert child.position == 0
+        assert child.jira_status_name == "To Do"
+
+
+def test_create_ticket_requires_jira_configuration_for_import() -> None:
+    with SessionLocal() as db:
+        db.query(JiraConfig).delete()
+        db.commit()
+
+    response = client.post(
+        "/tickets",
+        data={"jira_reference": "SCRUM-404"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "Jira is not configured. Configure Jira before importing.",
+    }
 
 
 def test_ticket_forms_group_summary_date_and_category_responsively() -> None:

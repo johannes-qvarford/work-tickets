@@ -181,7 +181,7 @@
           <form method="post" action="/tickets" data-ajax-form>
             <div class="form-field-row create-fields">
               <label>
-                <span class="field-label">Summary</span><input name="summary" placeholder="What needs doing?" required>
+                <span class="field-label">Summary or Jira reference</span><input name="summary" placeholder="What needs doing? Or SCRUM-5 / its browser URL">
               </label>
               <label>
                 <span class="field-label">Planned date</span><input type="date" name="planned_date">
@@ -190,6 +190,7 @@
                 <span class="field-label">Category</span><select name="category_id"><option value="">No category</option>{% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}</select>
               </label>
             </div>
+            <p class="muted category-help">Enter a Jira issue key or its configured browser URL in this field to import the Jira summary, description, status, and subtasks. The planned date and category above stay local.</p>
             <label>
               <span class="field-label">Description</span><textarea name="description" placeholder="Details (optional)"></textarea>
             </label>

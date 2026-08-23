@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Generator
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -17,6 +18,7 @@ from .models import Category, JiraConfig, SessionLocal, Ticket, init_db
 
 app = FastAPI(title="Work Tickets")
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+_JIRA_ISSUE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]*-[A-Za-z0-9]+")
 
 
 @app.on_event("startup")
@@ -90,17 +92,59 @@ def _render_ticket_lists(request: Request, db: Session) -> str:
     return _render_fragment(request, "ticket_lists.html", _ticket_list_context(db))
 
 
+def parse_jira_issue_reference(reference: str, browser_base_url: str) -> str:
+    """Extract a normalized Jira issue key from a key or configured browser URL."""
+    value = reference.strip()
+    if _JIRA_ISSUE_KEY.fullmatch(value):
+        return value.upper()
+
+    try:
+        parsed = urlsplit(value)
+        browser_base = urlsplit(browser_base_url.rstrip("/"))
+    except ValueError as exc:
+        raise JiraError(
+            "Enter a Jira issue key or a Jira browser URL ending in /browse/KEY."
+        ) from exc
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.scheme.lower() != browser_base.scheme.lower()
+        or parsed.netloc.lower() != browser_base.netloc.lower()
+    ):
+        raise JiraError("Enter a Jira issue key or a Jira browser URL ending in /browse/KEY.")
+
+    base_path = browser_base.path.rstrip("/")
+    browse_prefix = f"{base_path}/browse/" if base_path else "/browse/"
+    path = unquote(parsed.path)
+    if not path.lower().startswith(browse_prefix.lower()):
+        raise JiraError("Enter a Jira issue key or a Jira browser URL ending in /browse/KEY.")
+    key = path[len(browse_prefix) :].strip("/")
+    if not _JIRA_ISSUE_KEY.fullmatch(key):
+        raise JiraError("Enter a Jira issue key or a Jira browser URL ending in /browse/KEY.")
+    return key.upper()
+
+
+def _is_jira_issue_reference_candidate(value: str) -> bool:
+    return bool(
+        _JIRA_ISSUE_KEY.fullmatch(value) or value.lower().startswith(("http://", "https://"))
+    )
+
+
 @app.post("/tickets")
 def create_ticket(
     request: Request,
-    summary: Annotated[str, Form()],
+    summary: Annotated[str, Form()] = "",
     description: Annotated[str, Form()] = "",
     planned_date: Annotated[str, Form()] = "",
     category_id: Annotated[str, Form()] = "",
+    jira_reference: Annotated[str, Form()] = "",
     db: Session = Depends(get_db),
 ) -> Response:
     summary_value = summary.strip()
-    if not summary_value:
+    jira_reference_value = jira_reference.strip() or (
+        summary_value if _is_jira_issue_reference_candidate(summary_value) else ""
+    )
+    if not summary_value and not jira_reference_value:
         return _mutation_response(request, "error", "Ticket summary is required.", 422)
 
     try:
@@ -115,6 +159,29 @@ def create_ticket(
 
     if category_id_value is not None and db.get(Category, category_id_value) is None:
         return _mutation_response(request, "error", "Ticket category was not found.", 422)
+
+    if jira_reference_value:
+        try:
+            browser_base_url = _browser_base_url(db)
+            issue_key = parse_jira_issue_reference(jira_reference_value, browser_base_url)
+            if db.scalar(select(Ticket.id).where(Ticket.jira_issue_key == issue_key)) is not None:
+                raise JiraError(f"A local ticket is already linked to Jira issue {issue_key}.")
+            ticket = _import_ticket_from_jira(
+                issue_key,
+                planned_date_value,
+                category_id_value,
+                db,
+            )
+        except JiraError as exc:
+            db.rollback()
+            return _mutation_response(request, "error", str(exc), 422)
+        return _mutation_response(
+            request,
+            "success",
+            f"Ticket {ticket.summary} imported from Jira.",
+            200,
+            tickets_html=_render_ticket_lists(request, db),
+        )
 
     count = db.scalar(select(func.count()).select_from(Ticket)) or 0
     ticket = Ticket(
@@ -697,6 +764,76 @@ def _sync_ticket(ticket: Ticket, db: Session) -> None:
                 ) from exc
     finally:
         jira.close()
+
+
+def _browser_base_url(db: Session) -> str:
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before importing.")
+    return config.browser_base_url or config.base_url
+
+
+def _import_ticket_from_jira(
+    issue_key: str,
+    planned_date: date | None,
+    category_id: int | None,
+    db: Session,
+) -> Ticket:
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before importing.")
+
+    jira = JiraClient(config)
+    try:
+        synced = jira.get_issue_with_subtasks(issue_key)
+    finally:
+        jira.close()
+
+    if not synced.issue.summary:
+        raise JiraError(f"Jira returned issue {issue_key} without a summary.")
+    remote_subtask_keys: set[str] = set()
+    for subtask in synced.subtasks:
+        if subtask.key == synced.issue.key:
+            raise JiraError(f"Jira returned the parent issue {issue_key} as its own subtask.")
+        if subtask.key in remote_subtask_keys:
+            raise JiraError(f"Jira returned duplicate subtask key {subtask.key}.")
+        if not subtask.summary:
+            raise JiraError(f"Jira returned subtask {subtask.key} without a summary.")
+        remote_subtask_keys.add(subtask.key)
+    imported_issue_keys = {synced.issue.key, *remote_subtask_keys}
+    existing_issue_key = db.scalar(
+        select(Ticket.jira_issue_key).where(Ticket.jira_issue_key.in_(imported_issue_keys))
+    )
+    if existing_issue_key is not None:
+        raise JiraError(f"A local ticket is already linked to Jira issue {existing_issue_key}.")
+
+    synced_at = datetime.utcnow()
+    count = db.scalar(select(func.count()).select_from(Ticket)) or 0
+    ticket = Ticket(
+        summary=synced.issue.summary,
+        description=synced.issue.description or "",
+        planned_date=planned_date,
+        category_id=category_id,
+        position=count,
+        jira_issue_key=synced.issue.key,
+        jira_status_name=synced.issue.status_name,
+        synced_at=synced_at,
+    )
+    db.add(ticket)
+    for position, subtask in enumerate(synced.subtasks):
+        db.add(
+            Ticket(
+                parent=ticket,
+                summary=subtask.summary or "",
+                description=subtask.description or "",
+                position=position,
+                jira_issue_key=subtask.key,
+                jira_status_name=subtask.status_name,
+                synced_at=synced_at,
+            )
+        )
+    db.commit()
+    return ticket
 
 
 def _sync_subtask(subtask: Ticket, db: Session) -> None:
