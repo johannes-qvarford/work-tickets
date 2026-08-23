@@ -52,6 +52,72 @@ def test_create_category_and_ticket() -> None:
     assert "Prepare agenda" in client.get("/").text
 
 
+def test_edit_cannot_change_a_ticket_category() -> None:
+    with SessionLocal() as db:
+        original = Category(name="Original edit category")
+        replacement = Category(name="Replacement edit category")
+        db.add_all([original, replacement])
+        db.flush()
+        ticket = Ticket(summary="Categorized ticket", position=1, category=original)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+        original_id = original.id
+        replacement_id = replacement.id
+
+    page = client.get("/")
+    edit_form = page.text.split(f'action="/tickets/{ticket_id}"', 1)[1].split("</form>", 1)[0]
+    assert 'name="category_id"' not in edit_form
+    assert "Category: Original edit category" in edit_form
+
+    response = client.post(
+        f"/tickets/{ticket_id}",
+        data={
+            "summary": "Categorized ticket updated",
+            "description": "Updated details",
+            "category_id": str(replacement_id),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        updated = db.get(Ticket, ticket_id)
+        assert updated is not None
+        assert updated.category_id == original_id
+        assert updated.category_id != replacement_id
+
+
+def test_edit_keeps_an_uncategorized_ticket_uncategorized() -> None:
+    with SessionLocal() as db:
+        category = Category(name="Category for uncategorized edit")
+        ticket = Ticket(summary="Uncategorized ticket", position=2)
+        db.add_all([category, ticket])
+        db.commit()
+        ticket_id = ticket.id
+        category_id = category.id
+
+    page = client.get("/")
+    edit_form = page.text.split(f'action="/tickets/{ticket_id}"', 1)[1].split("</form>", 1)[0]
+    assert 'name="category_id"' not in edit_form
+    assert "Category: Uncategorized" in edit_form
+
+    response = client.post(
+        f"/tickets/{ticket_id}",
+        data={
+            "summary": "Uncategorized ticket updated",
+            "category_id": str(category_id),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        updated = db.get(Ticket, ticket_id)
+        assert updated is not None
+        assert updated.category_id is None
+
+
 def test_toggle_top_level_completion_persists_and_excludes_ticket_from_today() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="Complete locally", planned_date=date.today(), position=2)

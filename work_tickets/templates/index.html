@@ -67,10 +67,7 @@
                   <input name="summary" value="{{ ticket.summary }}" required>
                   <textarea name="description">{{ ticket.description }}</textarea>
                   <label class="muted">Planned date <input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}"></label>
-                  <select name="category_id">
-                    <option value="">No category</option>
-                    {% for category in categories %}<option value="{{ category.id }}" {% if ticket.category_id == category.id %}selected{% endif %}>{{ category.name }}</option>{% endfor %}
-                  </select>
+                  <div class="muted">Category: {{ ticket.category.name if ticket.category else 'Uncategorized' }}</div>
                   <button type="submit">{% if ticket.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
                 </form>
                 <form method="post" action="/tickets/{{ ticket.id }}/complete" style="margin-top:10px"><button class="secondary" type="submit">{% if ticket.local_completed %}Mark as active{% else %}Mark as done{% endif %}</button></form>

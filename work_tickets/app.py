@@ -190,7 +190,6 @@ def update_ticket(
     summary: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
     planned_date: Annotated[str, Form()] = "",
-    category_id: Annotated[str, Form()] = "",
     db: Session = Depends(get_db),
 ) -> RedirectResponse:
     ticket = db.get(Ticket, ticket_id)
@@ -198,7 +197,6 @@ def update_ticket(
         ticket.summary = summary.strip()
         ticket.description = description
         ticket.planned_date = date.fromisoformat(planned_date) if planned_date else None
-        ticket.category_id = int(category_id) if category_id else None
         if ticket.jira_issue_key:
             try:
                 _sync_ticket(ticket, db)
