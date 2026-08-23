@@ -2,6 +2,8 @@
   id="ticket-{{ ticket.id }}"
   class="ticket{% if ticket.local_completed %} completed{% endif %}"
   data-ticket-id="{{ ticket.id }}"
+  data-top-level-ticket
+  draggable="true"
 >
   <div class="ticket-header">
     <div class="ticket-heading">
@@ -25,6 +27,7 @@
       </div>
     </div>
     <div class="ticket-actions" aria-label="Ticket actions">
+      <span class="ticket-drag-handle" aria-hidden="true" title="Drag to reorder">⠿</span>
       {% if ticket.jira_issue_key %}
       {% if jira_config %}
       <a
@@ -50,6 +53,40 @@
           <span class="sr-only">
             {% if ticket.local_completed %}Mark as active{% else %}Mark as done{% endif %}
           </span>
+        </button>
+      </form>
+      <form
+        class="move-ticket-form"
+        data-move-ticket
+        method="post"
+        action="/tickets/{{ ticket.id }}/move-up"
+      >
+        <button
+          class="compact-control"
+          type="submit"
+          data-move-direction="up"
+          {% if is_first_ticket|default(false) %}disabled{% endif %}
+          aria-label="Move up {{ ticket.summary }}"
+          title="Move up"
+        >
+          <span aria-hidden="true">↑</span><span class="sr-only">Move up</span>
+        </button>
+      </form>
+      <form
+        class="move-ticket-form"
+        data-move-ticket
+        method="post"
+        action="/tickets/{{ ticket.id }}/move-down"
+      >
+        <button
+          class="compact-control"
+          type="submit"
+          data-move-direction="down"
+          {% if is_last_ticket|default(false) %}disabled{% endif %}
+          aria-label="Move down {{ ticket.summary }}"
+          title="Move down"
+        >
+          <span aria-hidden="true">↓</span><span class="sr-only">Move down</span>
         </button>
       </form>
       {% if ticket.jira_issue_key %}

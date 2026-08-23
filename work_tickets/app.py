@@ -307,6 +307,114 @@ def _move_subtask_to_index(
     )
 
 
+@app.post("/tickets/{ticket_id}/move-up")
+def move_ticket_up(ticket_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+    return _move_ticket(ticket_id, -1, request, db)
+
+
+@app.post("/tickets/{ticket_id}/move-down")
+def move_ticket_down(ticket_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+    return _move_ticket(ticket_id, 1, request, db)
+
+
+@app.post("/tickets/{ticket_id}/move-to")
+def move_ticket_to(
+    ticket_id: int,
+    request: Request,
+    target_index: Annotated[str, Form()] = "",
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        target_index_value = int(target_index)
+    except ValueError:
+        return _ticket_move_response(request, "error", "Ticket target position is invalid.", 422)
+    return _move_ticket_to_index(ticket_id, target_index_value, request, db)
+
+
+def _top_level_tickets(db: Session) -> list[Ticket]:
+    return list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.parent_id.is_(None))
+            .order_by(Ticket.position, Ticket.created_at, Ticket.id)
+        )
+    )
+
+
+def _move_ticket(ticket_id: int, offset: int, request: Request, db: Session) -> Response:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return _ticket_move_response(request, "error", "Ticket was not found.", 404)
+    if ticket.parent_id is not None:
+        return _ticket_move_response(
+            request, "error", "Subtasks cannot be reordered with top-level tickets.", 400
+        )
+
+    tickets = _top_level_tickets(db)
+    current_index = next(
+        index for index, candidate in enumerate(tickets) if candidate.id == ticket.id
+    )
+    target_index = current_index + offset
+    direction = "up" if offset < 0 else "down"
+    if target_index < 0 or target_index >= len(tickets):
+        _normalize_positions(tickets)
+        db.commit()
+        boundary = "top" if offset < 0 else "bottom"
+        return _ticket_move_response(
+            request,
+            "success",
+            f"Ticket {ticket.summary} is already at the {boundary}.",
+            200,
+            db=db,
+            order=[candidate.id for candidate in tickets],
+        )
+
+    return _move_ticket_to_index(
+        ticket_id,
+        target_index,
+        request,
+        db,
+        message=f"Ticket {ticket.summary} moved {direction}.",
+    )
+
+
+def _move_ticket_to_index(
+    ticket_id: int,
+    target_index: int,
+    request: Request,
+    db: Session,
+    *,
+    message: str | None = None,
+) -> Response:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return _ticket_move_response(request, "error", "Ticket was not found.", 404)
+    if ticket.parent_id is not None:
+        return _ticket_move_response(
+            request, "error", "Subtasks cannot be reordered with top-level tickets.", 400
+        )
+
+    tickets = _top_level_tickets(db)
+    if target_index < 0 or target_index >= len(tickets):
+        return _ticket_move_response(request, "error", "Ticket target position is invalid.", 422)
+
+    current_index = next(
+        index for index, candidate in enumerate(tickets) if candidate.id == ticket.id
+    )
+    tickets.pop(current_index)
+    tickets.insert(target_index, ticket)
+    _normalize_positions(tickets)
+    db.commit()
+    return _ticket_move_response(
+        request,
+        "success",
+        message or f"Ticket {ticket.summary} reordered.",
+        200,
+        db=db,
+        order=[candidate.id for candidate in tickets],
+    )
+
+
 def _normalize_positions(siblings: list[Ticket]) -> None:
     # Normalize so old or manually edited data cannot leave duplicate or sparse
     # positions. The explicit id tie-breaker in the query makes the order deterministic.
@@ -698,5 +806,24 @@ def _move_response(
         if parent_id is not None and order is not None:
             payload["parent_id"] = parent_id
             payload["order"] = order
+        return JSONResponse(payload, status_code=status_code)
+    return _redirect_with_message(kind, message)
+
+
+def _ticket_move_response(
+    request: Request,
+    kind: str,
+    message: str,
+    status_code: int,
+    *,
+    db: Session | None = None,
+    order: list[int] | None = None,
+) -> Response:
+    if "application/json" in request.headers.get("accept", "").lower():
+        payload: dict[str, object] = {"ok": kind == "success", "message": message}
+        if order is not None:
+            payload["order"] = order
+        if db is not None and kind == "success":
+            payload.update({"target": "ticket-lists", "html": _render_ticket_lists(request, db)})
         return JSONResponse(payload, status_code=status_code)
     return _redirect_with_message(kind, message)

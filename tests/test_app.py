@@ -209,6 +209,125 @@ def test_subtask_drag_move_rejects_invalid_position_without_reordering() -> None
         assert [subtask.id for subtask in parent.subtasks] == [first.id, second.id]
 
 
+def test_top_level_ticket_reorder_controls_are_only_in_all_tickets() -> None:
+    with SessionLocal() as db:
+        first = Ticket(summary="Priority first", position=0, planned_date=date.today())
+        second = Ticket(summary="Priority second", position=1, planned_date=date.today())
+        db.add_all([first, second])
+        db.commit()
+        first_id = first.id
+        second_id = second.id
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert page.text.count(f'id="ticket-{first_id}"') == 1
+    assert page.text.count(f'id="ticket-{second_id}"') == 1
+    assert page.text.count('class="ticket"') >= 2
+    assert f'action="/tickets/{first_id}/move-up"' in page.text
+    assert f'action="/tickets/{second_id}/move-down"' in page.text
+    today_section = page.text.split("<h2>Today</h2>", 1)[1].split("</section>", 1)[0]
+    assert "data-top-level-ticket" not in today_section
+    assert "Drag tickets to reorder; use arrows with a keyboard" in page.text
+
+
+def test_top_level_ticket_drag_move_returns_fragment_and_persists_priority() -> None:
+    with SessionLocal() as db:
+        first = Ticket(summary="Priority one", position=0)
+        middle = Ticket(summary="Priority two", position=1)
+        last = Ticket(summary="Priority three", position=2)
+        parent = Ticket(summary="Nested parent", position=3)
+        child = Ticket(summary="Nested child", position=0, parent=parent)
+        db.add_all([first, middle, last, parent, child])
+        db.commit()
+        first_id = first.id
+        middle_id = middle.id
+        last_id = last.id
+        parent_id = parent.id
+        child_id = child.id
+
+    with SessionLocal() as db:
+        initial_tickets = list(
+            db.scalars(
+                select(Ticket)
+                .where(Ticket.parent_id.is_(None))
+                .order_by(Ticket.position, Ticket.id)
+            )
+        )
+        initial_order = [ticket.id for ticket in initial_tickets]
+    current_index = initial_order.index(middle_id)
+    target_index = current_index + 1
+
+    response = client.post(
+        f"/tickets/{middle_id}/move-to",
+        data={"target_index": str(target_index)},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["ok"] is True
+    assert result["message"] == "Ticket Priority two reordered."
+    assert result["target"] == "ticket-lists"
+    expected_order = initial_order.copy()
+    expected_order.pop(current_index)
+    expected_order.insert(target_index, middle_id)
+    assert result["order"] == expected_order
+    assert "Priority three" in result["html"]
+    with SessionLocal() as db:
+        tickets = list(
+            db.scalars(
+                select(Ticket)
+                .where(Ticket.parent_id.is_(None))
+                .order_by(Ticket.position, Ticket.id)
+            )
+        )
+        relevant_tickets = [
+            ticket for ticket in tickets if ticket.id in {first_id, middle_id, last_id, parent_id}
+        ]
+        assert [ticket.id for ticket in relevant_tickets] == [
+            first_id,
+            last_id,
+            middle_id,
+            parent_id,
+        ]
+        assert [ticket.position for ticket in relevant_tickets] == sorted(
+            ticket.position for ticket in relevant_tickets
+        )
+        nested = db.get(Ticket, child_id)
+        assert nested is not None
+        assert nested.parent_id == parent_id
+        assert nested.position == 0
+
+
+def test_top_level_ticket_reorder_rejects_invalid_and_subtask_targets() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Move parent", position=0)
+        child = Ticket(summary="Move child", position=0, parent=parent)
+        db.add_all([parent, child])
+        db.commit()
+        parent_id = parent.id
+        child_id = child.id
+
+    invalid = client.post(
+        f"/tickets/{parent_id}/move-to",
+        data={"target_index": "-1"},
+        headers={"Accept": "application/json"},
+    )
+    child_response = client.post(
+        f"/tickets/{child_id}/move-down",
+        headers={"Accept": "application/json"},
+    )
+
+    assert invalid.status_code == 422
+    assert invalid.json() == {"ok": False, "message": "Ticket target position is invalid."}
+    assert child_response.status_code == 400
+    assert child_response.json() == {
+        "ok": False,
+        "message": "Subtasks cannot be reordered with top-level tickets.",
+    }
+
+
 def test_ticket_and_subtask_forms_have_no_refresh_hooks() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="AJAX hooks", position=0)

@@ -36,6 +36,13 @@
   </section>
   <section class="panel section-spaced">
     <h2>All tickets</h2>
-    {% for ticket in tickets %}{% include "ticket.html" %}{% else %}<div class="empty">No tickets yet.</div>{% endfor %}
+    <p class="muted">Drag tickets to reorder; use arrows with a keyboard.</p>
+    <div class="ticket-list" data-tickets>
+      {% for ticket in tickets %}
+      {% set is_first_ticket = loop.first %}
+      {% set is_last_ticket = loop.last %}
+      {% include "ticket.html" %}
+      {% else %}<div class="empty">No tickets yet.</div>{% endfor %}
+    </div>
   </section>
 </div>

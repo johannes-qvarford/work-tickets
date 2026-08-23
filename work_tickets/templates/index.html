@@ -115,6 +115,10 @@
     .subtask-actions { justify-content:flex-end; flex-shrink:0; }
     .subtask-actions .compact-control { width:30px; height:30px; font-size:.92rem; }
     .subtask-form { margin-top:12px; }
+    .ticket[data-top-level-ticket] { cursor:grab; }
+    .ticket[data-top-level-ticket].dragging { opacity:.45; }
+    .ticket[data-top-level-ticket].drag-over { border-top:2px solid var(--accent); }
+    .ticket-drag-handle { color:var(--muted); font-size:1.15rem; line-height:1; user-select:none; }
     .form-actions { justify-content:flex-start; }
     .form-actions button { width:auto; }
     .category-row { justify-content:space-between; padding:9px 0; border-bottom:1px solid var(--border); }
@@ -294,6 +298,16 @@
           });
         }
 
+        function updateTicketMoveControls(container) {
+          const tickets = [...container.querySelectorAll(".ticket[data-top-level-ticket]")];
+          tickets.forEach((ticket, index) => {
+            const up = ticket.querySelector('[data-move-direction="up"]');
+            const down = ticket.querySelector('[data-move-direction="down"]');
+            if (up) up.disabled = index === 0;
+            if (down) down.disabled = index === tickets.length - 1;
+          });
+        }
+
         function clearDragState(container) {
           container?.querySelectorAll(".dragging, .drag-over").forEach((subtask) => {
             subtask.classList.remove("dragging", "drag-over");
@@ -379,6 +393,49 @@
           }
         }
 
+        function openTicketDetails() {
+          return [...document.querySelectorAll("#ticket-lists [data-top-level-ticket]")]
+            .filter((ticket) => ticket.querySelector(".ticket-details")?.open)
+            .map((ticket) => ticket.dataset.ticketId);
+        }
+
+        function restoreTicketDetails(ticketIds) {
+          ticketIds.forEach((ticketId) => {
+            const details = document
+              .getElementById(`ticket-${ticketId}`)
+              ?.querySelector(".ticket-details");
+            if (details) details.open = true;
+          });
+        }
+
+        async function submitTicketMove(form) {
+          const openDetails = openTicketDetails();
+          const buttons = document.querySelectorAll("[data-move-ticket] [data-move-direction]");
+          buttons.forEach((button) => (button.disabled = true));
+          try {
+            const response = await fetch(form.action, {
+              method: "POST",
+              headers: { Accept: "application/json" },
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              throw new Error(result.message || "Unable to move ticket.");
+            }
+            const targetElement = document.getElementById(result.target);
+            if (!targetElement || !result.html) {
+              throw new Error("The reordered view could not be updated.");
+            }
+            targetElement.outerHTML = result.html;
+            restoreTicketDetails(openDetails);
+            announce(result.message);
+            announceAction(result.message);
+          } catch (error) {
+            announceAction(error instanceof Error ? error.message : "Unable to move ticket.", "error");
+          } finally {
+            buttons.forEach((button) => (button.disabled = false));
+          }
+        }
+
         async function submitDrag(container, subtask, targetIndex) {
           const buttons = container.querySelectorAll("[data-move-direction]");
           buttons.forEach((button) => (button.disabled = true));
@@ -402,6 +459,36 @@
           }
         }
 
+        async function submitTicketDrag(container, ticket, targetIndex) {
+          const openDetails = openTicketDetails();
+          const buttons = document.querySelectorAll("[data-move-ticket] [data-move-direction]");
+          buttons.forEach((button) => (button.disabled = true));
+          try {
+            const response = await fetch(`/tickets/${ticket.dataset.ticketId}/move-to`, {
+              method: "POST",
+              headers: { Accept: "application/json" },
+              body: new URLSearchParams({ target_index: String(targetIndex) }),
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              throw new Error(result.message || "Unable to reorder ticket.");
+            }
+            const targetElement = document.getElementById(result.target);
+            if (!targetElement || !result.html) {
+              throw new Error("The reordered view could not be updated.");
+            }
+            targetElement.outerHTML = result.html;
+            restoreTicketDetails(openDetails);
+            announce(result.message);
+            announceAction(result.message);
+          } catch (error) {
+            announceAction(error instanceof Error ? error.message : "Unable to reorder ticket.", "error");
+          } finally {
+            clearDragState(container);
+            buttons.forEach((button) => (button.disabled = false));
+          }
+        }
+
         document.addEventListener("dragstart", (event) => {
           const subtask = event.target.closest?.(".subtask");
           if (!subtask) return;
@@ -410,6 +497,16 @@
           event.dataTransfer.effectAllowed = "move";
           event.dataTransfer.setData("text/plain", subtask.dataset.subtaskId);
           subtask.classList.add("dragging");
+        });
+
+        document.addEventListener("dragstart", (event) => {
+          const ticket = event.target.closest?.(".ticket[data-top-level-ticket]");
+          if (!ticket || !event.target.closest?.(".ticket-drag-handle")) return;
+          const container = ticket.closest("[data-tickets]");
+          if (!container || !event.dataTransfer) return;
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", ticket.dataset.ticketId);
+          ticket.classList.add("dragging");
         });
 
         document.addEventListener("dragover", (event) => {
@@ -422,6 +519,20 @@
           event.dataTransfer.dropEffect = "move";
           container.querySelectorAll(".drag-over").forEach((subtask) => {
             subtask.classList.remove("drag-over");
+          });
+          target.classList.add("drag-over");
+        });
+
+        document.addEventListener("dragover", (event) => {
+          const target = event.target.closest?.(".ticket[data-top-level-ticket]");
+          const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
+          if (!target || !dragging || target === dragging) return;
+          const container = target.closest("[data-tickets]");
+          if (!container || container !== dragging.closest("[data-tickets]")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "move";
+          container.querySelectorAll(".drag-over").forEach((ticket) => {
+            ticket.classList.remove("drag-over");
           });
           target.classList.add("drag-over");
         });
@@ -442,9 +553,30 @@
           submitDrag(container, dragging, targetIndex);
         });
 
+        document.addEventListener("drop", (event) => {
+          const target = event.target.closest?.(".ticket[data-top-level-ticket]");
+          const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
+          if (!target || !dragging || target === dragging) return;
+          const container = target.closest("[data-tickets]");
+          if (!container || container !== dragging.closest("[data-tickets]")) return;
+          event.preventDefault();
+          const rows = [...container.querySelectorAll(".ticket[data-top-level-ticket]")];
+          const targetRowIndex = rows.indexOf(target);
+          const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+          let targetIndex = targetRowIndex + (afterTarget ? 1 : 0);
+          if (rows.indexOf(dragging) < targetIndex) targetIndex -= 1;
+          clearDragState(container);
+          submitTicketDrag(container, dragging, targetIndex);
+        });
+
         document.addEventListener("dragend", (event) => {
           const subtask = event.target.closest?.(".subtask");
           clearDragState(subtask?.closest("[data-subtasks]"));
+        });
+
+        document.addEventListener("dragend", (event) => {
+          const ticket = event.target.closest?.(".ticket[data-top-level-ticket]");
+          clearDragState(ticket?.closest("[data-tickets]"));
         });
 
         document.addEventListener("submit", (event) => {
@@ -453,6 +585,9 @@
           if (form.matches("[data-move-subtask]")) {
             event.preventDefault();
             submitMove(form);
+          } else if (form.matches("[data-move-ticket]")) {
+            event.preventDefault();
+            submitTicketMove(form);
           } else if (form.matches("[data-ajax-form]") || form.action.endsWith("/tickets")) {
             event.preventDefault();
             submitAjaxForm(form).catch((error) => {
