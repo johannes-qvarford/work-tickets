@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Work Tickets</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #10131a; color: #edf1f7; }
+    body { max-width: 1100px; margin: 0 auto; padding: 42px 24px; }
+    header { display:flex; justify-content:space-between; align-items:end; gap:24px; margin-bottom:32px; }
+    h1 { margin:0; font-size: 2.4rem; letter-spacing:-.05em; } h2 { margin-top:0; }
+    .muted { color:#9ba7b8; } .grid { display:grid; grid-template-columns: 1.5fr 1fr; gap:20px; }
+    .panel, .ticket { background:#191e28; border:1px solid #2c3544; border-radius:14px; padding:20px; }
+    .ticket { display:flex; justify-content:space-between; gap:16px; margin:10px 0; }
+    .ticket h3 { margin:0 0 8px; } .meta { color:#9ba7b8; font-size:.9rem; }
+    .badge { border-radius:99px; padding:4px 9px; background:#263b57; font-size:.78rem; white-space:nowrap; }
+    form { display:grid; gap:10px; } input, textarea, select, button { font:inherit; border-radius:8px; border:1px solid #384558; padding:10px; background:#11151d; color:inherit; }
+    textarea { min-height:80px; resize:vertical; } button { background:#7c5cff; border:0; cursor:pointer; font-weight:700; } button.secondary { background:#2b3545; }
+    .actions { display:flex; align-items:start; gap:8px; } .empty { padding:18px 0; color:#9ba7b8; }
+    @media (max-width: 760px) { .grid { grid-template-columns:1fr; } header { display:block; } }
+  </style>
+</head>
+<body>
+  <header><div><p class="muted">PERSONAL WORKFLOW</p><h1>Work tickets</h1></div><div class="muted">{{ today.strftime('%A, %B %-d') }}</div></header>
+  <div class="grid">
+    <main>
+      <section class="panel"><h2>Today</h2><p class="muted">Due today and overdue, in priority order.</p>
+        {% for ticket in today_tickets %}<article class="ticket"><div><h3>{{ ticket.summary }}</h3><div class="meta">{% if ticket.category %}{{ ticket.category.name }} · {% endif %}{{ ticket.planned_date }}</div></div><div class="actions"><span class="badge">{% if ticket.jira_issue_key %}{{ ticket.jira_issue_key }}{% else %}LOCAL{% endif %}</span><form method="post" action="/tickets/{{ ticket.id }}/complete"><button type="submit">Done</button></form></div></article>{% else %}<div class="empty">Nothing due. Add the next useful thing.</div>{% endfor %}
+      </section>
+      <section class="panel" style="margin-top:20px"><h2>All tickets</h2>
+        {% for ticket in tickets %}<article class="ticket"><div style="flex:1"><h3>{{ ticket.summary }}</h3><div class="meta">{% if ticket.category %}{{ ticket.category.name }} · {% endif %}{% if ticket.planned_date %}{{ ticket.planned_date }}{% else %}Unscheduled{% endif %}{% if ticket.local_completed %} · Done{% endif %}</div><details style="margin-top:12px"><summary class="muted">Edit ticket</summary><form method="post" action="/tickets/{{ ticket.id }}" style="margin-top:10px"><input name="summary" value="{{ ticket.summary }}" required><textarea name="description">{{ ticket.description }}</textarea><label class="muted">Planned date <input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}"></label><select name="category_id"><option value="">No category</option>{% for category in categories %}<option value="{{ category.id }}" {% if ticket.category_id == category.id %}selected{% endif %}>{{ category.name }}</option>{% endfor %}</select><button type="submit">Save changes</button></form></details></div><div class="actions"><span class="badge">{% if ticket.jira_issue_key %}{{ ticket.jira_issue_key }}{% else %}LOCAL{% endif %}</span></div></article>{% else %}<div class="empty">No tickets yet.</div>{% endfor %}
+      </section>
+    </main>
+    <aside>
+      <section class="panel"><h2>New ticket</h2><form method="post" action="/tickets"><input name="summary" placeholder="What needs doing?" required><textarea name="description" placeholder="Details (optional)"></textarea><label class="muted">Planned date <input type="date" name="planned_date"></label><select name="category_id"><option value="">No category</option>{% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}</select><button type="submit">Add ticket</button></form></section>
+      <section class="panel" style="margin-top:20px"><h2>Categories</h2><form method="post" action="/categories"><input name="name" placeholder="e.g. Client work" required><button type="submit">Add category</button></form><p class="muted">Categories stay local, even after a Jira sync.</p></section>
+      <section class="panel" style="margin-top:20px"><h2>Jira</h2><p class="muted">Not configured yet. A setup wizard will select the project, issue types, transitions, and completed statuses.</p></section>
+    </aside>
+  </div>
+</body>
+</html>
