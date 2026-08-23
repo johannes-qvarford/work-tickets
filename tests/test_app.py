@@ -38,6 +38,31 @@ def test_homepage_is_available() -> None:
     assert "Work tickets" in response.text
 
 
+def test_ticket_controls_use_compact_accessible_actions() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Compact controls", planned_date=date.today(), position=0)
+        subtask = Ticket(summary="Compact subtask", position=0, parent=ticket)
+        db.add_all([ticket, subtask])
+        db.commit()
+        ticket_id = ticket.id
+        subtask_id = subtask.id
+
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert f'action="/tickets/{ticket_id}/complete"' in page.text
+    assert f'action="/tickets/{ticket_id}/sync"' in page.text
+    assert f'action="/subtasks/{subtask_id}/complete"' in page.text
+    assert f'action="/subtasks/{subtask_id}/move-up"' in page.text
+    assert f'action="/subtasks/{subtask_id}/move-down"' in page.text
+    assert f'action="/subtasks/{subtask_id}/delete"' in page.text
+    assert 'class="compact-control completion-control"' in page.text
+    assert 'aria-label="Sync Compact controls to Jira"' in page.text
+    assert 'aria-label="Mark Compact subtask as done"' in page.text
+    assert 'aria-label="Move up Compact subtask"' in page.text
+    assert 'aria-label="Delete Compact subtask"' in page.text
+
+
 def test_create_category_and_ticket() -> None:
     assert (
         client.post("/categories", data={"name": "Planning"}, follow_redirects=False).status_code
@@ -778,8 +803,8 @@ def test_move_subtasks_reorders_only_siblings_and_normalizes_positions() -> None
     assert page.status_code == 200
     assert "Move up" in page.text
     assert "Move down" in page.text
-    assert "/subtasks/${match[1]}/move-up" in page.text
-    assert "/subtasks/${match[1]}/move-down" in page.text
+    assert f'action="/subtasks/{first_id}/move-up"' in page.text
+    assert f'action="/subtasks/{last_id}/move-down"' in page.text
 
     move_middle_up = client.post(f"/subtasks/{middle_id}/move-up", follow_redirects=False)
     assert move_middle_up.status_code == 303

@@ -1,5 +1,5 @@
 - [x] Eliminate the Pydantic warning that the generated Jira config form field name `validate` shadows a `BaseModel` attribute.
-- The clickable Jira URL should be different. In this case it should be https://johannesqvarford.atlassian.net/browse/SCRUM-5 for SCRUM-5. So maybe we need a second url to configure for "https://johannesqvarford.atlassian.net"
-- You should not be able to change the category of a ticket once created.
-- The ticket data should be more compact. "Done", "Date" and "Sync" should take less vertical and horizontal space - maybe just a small button each on an existing row. Same with subtask buttons.
+- [x] Use a separate Jira browser URL for clickable issue links, such as https://johannesqvarford.atlassian.net/browse/SCRUM-5.
+- [x] Prevent changing a ticket's category after creation.
+- [x] Make ticket data compact: keep Done, Date, Sync, and subtask actions small and on existing rows.
 - The Html has some really long and hard-to-read lines - format them better. Is there a python-backed html formatter that we can use with uv e.g. ?
