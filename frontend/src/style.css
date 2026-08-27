@@ -1,0 +1,47 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap");
+:root { font-family: "DM Sans", sans-serif; color: #e7edf7; background: #09111f; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: radial-gradient(circle at 0 0, #182d47 0, #09111f 42rem); }
+button, input, textarea { font: inherit; }
+.shell { max-width: 1440px; margin: auto; padding: 32px clamp(20px, 5vw, 72px) 72px; }
+.topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 42px; }
+.topbar h1, h2, h3 { font-family: "Space Grotesk", sans-serif; letter-spacing: -.04em; }
+h1 { margin: 8px 0 8px; font-size: clamp(2.2rem, 4vw, 3.6rem); }
+h2 { margin: 6px 0; font-size: clamp(1.5rem, 3vw, 2.25rem); }
+h3 { margin: 0; font-size: 1.15rem; }
+.topbar p, .hero p { color: #93a4ba; margin: 0; }
+.topbar nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.eyebrow { color: #6ee7c2; font-size: .72rem; font-weight: 700; letter-spacing: .18em; }
+.hero { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 24px; padding: 32px; border: 1px solid #253851; border-radius: 24px; background: linear-gradient(120deg, rgba(24, 47, 73, .9), rgba(18, 29, 48, .75)); box-shadow: 0 20px 60px rgba(0, 0, 0, .18); }
+.filter-card, .ticket-section, .narrow > .p-card { margin-bottom: 24px; border: 1px solid #253851; background: rgba(18, 29, 48, .82); }
+.filter-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; color: #9cadc2; }
+.filter-row .p-select { min-width: 220px; }
+.ticket-section { padding: 28px; border-radius: 16px; }
+.section-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+.muted { color: #93a4ba; }
+.ticket-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 14px; }
+.ticket-card { border: 1px solid #2a405d; background: #142238; transition: transform .2s, border-color .2s; }
+.ticket-card:hover { transform: translateY(-2px); border-color: #4d7197; }
+.ticket-card.completed { opacity: .68; }
+.ticket-card.completed strong { text-decoration: line-through; }
+.ticket-title { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.ticket-title strong { display: block; font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
+.ticket-marker { color: #6ee7c2; margin-right: 9px; }
+.ticket-meta { color: #8fa2b9; font-size: .82rem; margin: 9px 0 0 25px; }
+.button-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.ticket-title > .button-row { flex-shrink: 0; }
+.details-form { margin-top: 18px; }
+.form { display: grid; gap: 18px; }
+.form label, .inline-form label { display: grid; gap: 7px; color: #a9b8ca; font-size: .86rem; font-weight: 600; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.subtask-builder { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid #2a405d; }
+.draft-row, .subtask-row, .inline-form { display: flex; align-items: center; gap: 8px; }
+.draft-row > .p-inputtext:first-child, .subtask-row > .p-inputtext:first-child { flex: 1; }
+.category-list { margin-top: 24px; }
+.category-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #2a405d; }
+.category-item i { margin-right: 10px; color: #6ee7c2; }
+.narrow { max-width: 900px; margin: auto; }
+.empty-state { display: grid; justify-items: center; gap: 8px; padding: 46px 20px; color: #93a4ba; text-align: center; }
+.empty-state i { color: #6ee7c2; font-size: 2rem; }
+@media (max-width: 760px) { .topbar, .hero { display: block; } .topbar nav { justify-content: flex-start; margin-top: 22px; } .hero .p-button { margin-top: 20px; } .ticket-section { padding: 18px; } }
+@media (max-width: 520px) { .two-col, .draft-row { grid-template-columns: 1fr; display: grid; } .inline-form { align-items: stretch; flex-direction: column; } }

@@ -11,7 +11,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import JiraConfig, Ticket
+from .models import Category, JiraConfig, Ticket
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -39,6 +39,47 @@ def ticket_list_context(db: Session) -> dict[str, object]:
         "today_tickets": today_tickets,
         "jira_config": db.get(JiraConfig, 1),
         "today": today,
+    }
+
+
+def ticket_list_data(db: Session) -> dict[str, object]:
+    """Return the complete client state used by the Vue application."""
+    context = ticket_list_context(db)
+    tickets = context["tickets"]
+    assert isinstance(tickets, list)
+    categories = list(db.scalars(select(Category).order_by(Category.name)))
+
+    def serialize_ticket(ticket: Ticket) -> dict[str, object]:
+        return {
+            "id": ticket.id,
+            "parent_id": ticket.parent_id,
+            "summary": ticket.summary,
+            "description": ticket.description,
+            "planned_date": ticket.planned_date.isoformat() if ticket.planned_date else None,
+            "position": ticket.position,
+            "local_completed": ticket.local_completed,
+            "jira_issue_key": ticket.jira_issue_key,
+            "jira_status_name": ticket.jira_status_name,
+            "category_id": ticket.category_id,
+            "category_name": ticket.category.name if ticket.category else None,
+            "subtasks": [serialize_ticket(subtask) for subtask in ticket.subtasks],
+        }
+
+    return {
+        "tickets": [serialize_ticket(ticket) for ticket in tickets],
+        "categories": [{"id": category.id, "name": category.name} for category in categories],
+        "jira_config": (
+            {
+                "base_url": context["jira_config"].base_url,
+                "browser_base_url": context["jira_config"].browser_base_url,
+                "email": context["jira_config"].email,
+                "project_key": context["jira_config"].project_key,
+                "issue_type": context["jira_config"].issue_type,
+                "completed_statuses": context["jira_config"].completed_statuses,
+            }
+            if isinstance(context["jira_config"], JiraConfig)
+            else None
+        ),
     }
 
 
@@ -73,7 +114,10 @@ def mutation_response(
     ticket_html: str | None = None,
     ticket_target: str | None = None,
 ) -> Response:
-    if "application/json" in request.headers.get("accept", "").lower():
+    if (
+        request.url.path.startswith("/api/")
+        or "application/json" in request.headers.get("accept", "").lower()
+    ):
         payload: dict[str, object] = {"ok": kind == "success", "message": message}
         if tickets_html is not None:
             payload.update({"target": "ticket-lists", "html": tickets_html})
@@ -91,7 +135,10 @@ def move_response(
     parent_id: int | None = None,
     order: list[int] | None = None,
 ) -> Response:
-    if "application/json" in request.headers.get("accept", "").lower():
+    if (
+        request.url.path.startswith("/api/")
+        or "application/json" in request.headers.get("accept", "").lower()
+    ):
         payload: dict[str, object] = {"ok": kind == "success", "message": message}
         if parent_id is not None and order is not None:
             payload["parent_id"] = parent_id
@@ -109,7 +156,10 @@ def ticket_move_response(
     db: Session | None = None,
     order: list[int] | None = None,
 ) -> Response:
-    if "application/json" in request.headers.get("accept", "").lower():
+    if (
+        request.url.path.startswith("/api/")
+        or "application/json" in request.headers.get("accept", "").lower()
+    ):
         payload: dict[str, object] = {"ok": kind == "success", "message": message}
         if order is not None:
             payload["order"] = order
