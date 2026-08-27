@@ -21,5 +21,5 @@
 - [x] When syncing from Jira, extra subtasks that don't exist for the Jira ticket should be deleted locally.
 - [x] Refactor Jira Client(s) so that we can handle either Jira Cloud and Jira Server urls and conventions depending on the base url format - we may need to support v2 API and not just v3.
 - [x] Refactor app to be more modular.
-- [ ] Use migration library that writes performed migrations into the db itself instead of homegrown solution.
+- [x] Use migration library that writes performed migrations into the db itself instead of homegrown solution.
 - [ ] Convert app to an SPA using Vue and PrimeVue - one page for viewing tickets, one for creating a ticket + subtasks, one for editing categories, one for application-wide settings.
