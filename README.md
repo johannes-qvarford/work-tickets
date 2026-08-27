@@ -18,7 +18,23 @@ uv sync
 uv run uvicorn work_tickets.app:app --reload
 ```
 
-Then open <http://127.0.0.1:8000>.
+Then open <http://127.0.0.1:8000>. The root route serves the Vue/PrimeVue single-page
+application. It provides separate hash-routed pages for tickets, ticket creation,
+categories, and application settings. The previous Jinja interface remains available at
+`/legacy` while integrations are migrated.
+
+The frontend source is in `frontend/`. Install Node dependencies and build the packaged
+static assets after frontend changes:
+
+```sh
+npm install --prefix frontend
+npm run check --prefix frontend
+npm run build --prefix frontend
+```
+
+The build writes to `work_tickets/static/`, which is included in the Python wheel. The
+SPA talks to the FastAPI JSON endpoints under `/api`; existing form endpoints and Jira
+services remain available for compatibility.
 
 Checks:
 

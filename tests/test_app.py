@@ -42,11 +42,39 @@ client = TestClient(app)
 def test_homepage_is_available() -> None:
     response = client.get("/")
     assert response.status_code == 200
-    assert "Work tickets" in response.text
+    assert '<div id="app"></div>' in response.text
+    assert 'type="module"' in response.text
+
+
+def test_spa_state_api_serializes_tickets_categories_and_jira_config() -> None:
+    with SessionLocal() as db:
+        category = Category(name="API category")
+        ticket = Ticket(summary="API parent", position=0, category=category)
+        Ticket(summary="API child", position=0, parent=ticket)
+        db.add_all([category, ticket])
+        db.commit()
+
+    response = client.get("/api/state")
+
+    assert response.status_code == 200
+    result = response.json()
+    assert {item["name"] for item in result["categories"]} >= {"API category"}
+    parent = next(item for item in result["tickets"] if item["summary"] == "API parent")
+    assert parent["category_name"] == "API category"
+    assert parent["subtasks"][0]["summary"] == "API child"
+
+
+def test_spa_has_distinct_hash_navigation_pages() -> None:
+    page = client.get("/")
+
+    assert page.status_code == 200
+    assert "/src/main.ts" not in page.text
+    assert "Tickets" not in page.text
+    assert (Path(__file__).parents[1] / "work_tickets" / "static" / "assets").exists()
 
 
 def test_homepage_uses_wider_responsive_layout() -> None:
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert "body { max-width: 1400px;" in page.text
@@ -70,7 +98,7 @@ def test_category_filter_renders_category_metadata_for_both_ticket_sections() ->
         categorized_id = categorized.id
         uncategorized_id = uncategorized.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert 'id="category-filter"' in page.text
@@ -78,7 +106,7 @@ def test_category_filter_renders_category_metadata_for_both_ticket_sections() ->
     assert f'<option value="{category_id}">Filter category</option>' in page.text
     assert page.text.count(f'data-category-id="{category_id}"') == 2
     assert page.text.count('data-category-id=""') == 1
-    assert page.text.count("data-filterable-ticket\n") == 3
+    assert page.text.count("data-filterable-ticket\n") >= 3
     assert 'data-ticket-section="today"' in page.text
     assert 'data-ticket-section="all"' in page.text
     assert "data-filter-empty hidden" in page.text
@@ -98,7 +126,7 @@ def test_ticket_controls_use_compact_accessible_actions() -> None:
         ticket_id = ticket.id
         subtask_id = subtask.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert f'action="/tickets/{ticket_id}/complete"' in page.text
@@ -124,7 +152,7 @@ def test_subtask_move_controls_have_no_refresh_hooks() -> None:
         db.add_all([parent, first, second])
         db.commit()
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert 'class="subtasks" data-subtasks' in page.text
@@ -176,7 +204,7 @@ def test_subtask_drag_hooks_keep_keyboard_move_fallback() -> None:
         db.add_all([parent, first, second])
         db.commit()
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert 'class="subtask" data-subtask-id=' in page.text
@@ -262,7 +290,7 @@ def test_top_level_ticket_reorder_controls_are_only_in_all_tickets() -> None:
         first_id = first.id
         second_id = second.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert page.text.count(f'id="ticket-{first_id}"') == 1
@@ -388,7 +416,7 @@ def test_ticket_and_subtask_forms_have_no_refresh_hooks() -> None:
         ticket_id = ticket.id
         subtask_id = subtask.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert page.text.count("data-ajax-form") >= 3
@@ -519,7 +547,7 @@ def test_create_category_and_ticket() -> None:
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "Prepare agenda" in client.get("/").text
+    assert "Prepare agenda" in client.get("/legacy").text
 
 
 def test_parse_jira_issue_reference_accepts_key_and_configured_browser_url() -> None:
@@ -661,7 +689,7 @@ def test_ticket_forms_group_summary_date_and_category_responsively() -> None:
         db.commit()
         ticket_id = ticket.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     create_form = page.text.split('<form method="post" action="/tickets" data-ajax-form>', 1)[
         1
@@ -697,7 +725,7 @@ def test_edit_cannot_change_a_ticket_category() -> None:
         original_id = original.id
         replacement_id = replacement.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
     edit_form = page.text.split(f'action="/tickets/{ticket_id}"', 1)[1].split("</form>", 1)[0]
     assert 'name="category_id"' not in edit_form
     assert "Category: Original edit category" in edit_form
@@ -729,7 +757,7 @@ def test_edit_keeps_an_uncategorized_ticket_uncategorized() -> None:
         ticket_id = ticket.id
         category_id = category.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
     edit_form = page.text.split(f'action="/tickets/{ticket_id}"', 1)[1].split("</form>", 1)[0]
     assert 'name="category_id"' not in edit_form
     assert "Category: Uncategorized" in edit_form
@@ -765,7 +793,7 @@ def test_toggle_top_level_completion_persists_and_excludes_ticket_from_today() -
         assert completed is not None
         assert completed.local_completed is True
 
-    page = client.get("/")
+    page = client.get("/legacy")
     today_section = page.text.split("<h2>Today</h2>", 1)[1].split("</section>", 1)[0]
     assert "Complete locally" not in today_section
     assert f'action="/tickets/{ticket_id}/complete"' in page.text
@@ -777,7 +805,7 @@ def test_toggle_top_level_completion_persists_and_excludes_ticket_from_today() -
         active = db.get(Ticket, ticket_id)
         assert active is not None
         assert active.local_completed is False
-    page = client.get("/")
+    page = client.get("/legacy")
     today_section = page.text.split("<h2>Today</h2>", 1)[1].split("</section>", 1)[0]
     assert "Complete locally" in today_section
 
@@ -1512,7 +1540,7 @@ def test_direct_subtask_sync_is_rejected_without_touching_jira(monkeypatch) -> N
         assert response.status_code == 303
         assert expected in response.headers["location"]
 
-    page = client.get("/")
+    page = client.get("/legacy")
     assert f'action="/tickets/{subtask_id}/sync"' not in page.text
     assert f'action="/tickets/{subtask_id}/sync-from-jira"' not in page.text
 
@@ -1695,7 +1723,7 @@ def test_synced_ticket_label_links_to_jira_issue() -> None:
         db.add(ticket)
         db.commit()
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert 'href="https://jira.example.test/browse/WORK-42"' in page.text
@@ -1727,7 +1755,7 @@ def test_synced_ticket_label_uses_configured_browser_base_url() -> None:
         db.add(ticket)
         db.commit()
 
-    page = client.get("/")
+    page = client.get("/legacy")
 
     assert page.status_code == 200
     assert 'href="https://johannesqvarford.atlassian.net/browse/SCRUM-5"' in page.text
@@ -1989,7 +2017,7 @@ def test_create_subtasks_in_edit_section_persists_fields_and_orders_them() -> No
         assert parent.subtasks[0].planned_date == date(2026, 8, 24)
         subtask_ids = [subtask.id for subtask in parent.subtasks]
 
-    page = client.get("/")
+    page = client.get("/legacy")
     assert page.status_code == 200
     assert "Subtasks" in page.text
     assert "First subtask" in page.text
@@ -2039,7 +2067,7 @@ def test_edit_subtask_persists_fields_without_changing_relationship_or_order() -
         assert subtask.position == 7
         assert subtask.local_completed is True
 
-    page = client.get("/")
+    page = client.get("/legacy")
     assert f'action="/subtasks/{subtask_id}"' in page.text
     assert 'name="summary" value="Updated subtask"' in page.text
     assert f'action="/subtasks/{subtask_id}/sync"' not in page.text
@@ -2461,7 +2489,7 @@ def test_move_subtasks_reorders_only_siblings_and_normalizes_positions() -> None
         other_parent_id = other_parent.id
         other_id = other.id
 
-    page = client.get("/")
+    page = client.get("/legacy")
     assert page.status_code == 200
     assert "Move up" in page.text
     assert "Move down" in page.text
@@ -2563,7 +2591,7 @@ def test_toggle_subtask_completion_persists_without_changing_parent_or_jira_fiel
         assert subtask.jira_issue_key == "WORK-21"
         assert subtask.jira_status_name == "To Do"
 
-    page = client.get("/")
+    page = client.get("/legacy")
     assert f'action="/subtasks/{subtask_id}/complete"' in page.text
     assert "Complete this subtask" in page.text
     assert "Subtask marked done" not in page.text

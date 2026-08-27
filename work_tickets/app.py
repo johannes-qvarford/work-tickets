@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from datetime import date
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
@@ -14,6 +18,42 @@ from .models import Category, JiraConfig, SessionLocal, Ticket, init_db
 
 app = FastAPI(title="Work Tickets")
 parse_jira_issue_reference = jira_service.parse_jira_issue_reference
+app.mount(
+    "/assets",
+    StaticFiles(directory=Path(__file__).parent / "static" / "assets"),
+    name="assets",
+)
+
+
+class TicketPayload(BaseModel):
+    summary: str = ""
+    description: str = ""
+    planned_date: date | None = None
+    category_id: int | None = None
+    jira_reference: str = ""
+
+
+class SubtaskPayload(BaseModel):
+    summary: str = ""
+    description: str = ""
+    planned_date: date | None = None
+
+
+class CategoryPayload(BaseModel):
+    name: str
+
+
+class JiraConfigPayload(BaseModel):
+    base_url: str
+    browser_base_url: str = ""
+    email: str
+    api_token: str = ""
+    project_key: str = ""
+    issue_type: str = "Task"
+    completed_statuses: str = "Done"
+    validate_connection: bool = Field(default=False, alias="validate")
+
+    model_config = {"populate_by_name": True}
 
 
 @app.on_event("startup")
@@ -29,8 +69,8 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
+@app.get("/legacy", response_class=HTMLResponse)
+def legacy_index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
     categories = list(db.scalars(select(Category).order_by(Category.name)))
     return web.templates.TemplateResponse(
         request,
@@ -41,6 +81,257 @@ def index(request: Request, db: Annotated[Session, Depends(get_db)]) -> HTMLResp
             "error": request.query_params.get("error"),
             "success": request.query_params.get("success"),
         },
+    )
+
+
+def _api_state(db: Session) -> dict[str, object]:
+    return web.ticket_list_data(db)
+
+
+def _service_json_response(response: Response, db: Session) -> Response:
+    if response.status_code >= 400:
+        return response
+    message = "Saved."
+    if isinstance(response, JSONResponse):
+        try:
+            import json
+
+            content = bytes(response.body).decode()
+            message = str(json.loads(content).get("message", message))
+        except (UnicodeDecodeError, ValueError):
+            pass
+    return JSONResponse({"ok": True, "message": message, "state": _api_state(db)})
+
+
+@app.get("/api/state")
+def api_state(db: Session = Depends(get_db)) -> dict[str, object]:
+    return _api_state(db)
+
+
+@app.get("/", response_class=HTMLResponse)
+def index() -> FileResponse:
+    return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+
+@app.post("/api/tickets")
+def api_create_ticket(
+    payload: TicketPayload, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    response = tickets.create_ticket(
+        request,
+        payload.summary,
+        payload.description,
+        payload.planned_date.isoformat() if payload.planned_date else "",
+        str(payload.category_id) if payload.category_id is not None else "",
+        db,
+        payload.jira_reference,
+        jira_client_factory=JiraClient,
+    )
+    return _service_json_response(response, db)
+
+
+@app.post("/api/tickets/{ticket_id}/subtasks")
+def api_create_subtask(
+    ticket_id: int, payload: SubtaskPayload, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    response = tickets.create_subtask(
+        ticket_id,
+        request,
+        payload.summary,
+        payload.description,
+        payload.planned_date.isoformat() if payload.planned_date else "",
+        db,
+    )
+    return _service_json_response(response, db)
+
+
+@app.put("/api/tickets/{ticket_id}")
+def api_update_ticket(
+    ticket_id: int, payload: TicketPayload, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    response = tickets.update_ticket(
+        ticket_id,
+        request,
+        payload.summary,
+        payload.description,
+        payload.planned_date.isoformat() if payload.planned_date else "",
+        db,
+        jira_client_factory=JiraClient,
+    )
+    return _service_json_response(response, db)
+
+
+@app.put("/api/subtasks/{subtask_id}")
+def api_update_subtask(
+    subtask_id: int, payload: SubtaskPayload, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    response = tickets.update_subtask(
+        subtask_id,
+        request,
+        payload.summary,
+        payload.description,
+        payload.planned_date.isoformat() if payload.planned_date else "",
+        db,
+        jira_client_factory=JiraClient,
+    )
+    return _service_json_response(response, db)
+
+
+@app.post("/api/tickets/{ticket_id}/complete")
+def api_complete_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Response:
+    response = tickets.complete_ticket(ticket_id, db)
+    return JSONResponse({"ok": response.status_code < 400, "state": _api_state(db)})
+
+
+@app.post("/api/subtasks/{subtask_id}/complete")
+def api_complete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> Response:
+    response = tickets.complete_subtask(subtask_id, db)
+    return JSONResponse({"ok": response.status_code < 400, "state": _api_state(db)})
+
+
+@app.delete("/api/tickets/{ticket_id}")
+def api_delete_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Response:
+    response = tickets.delete_ticket(ticket_id, db, jira_client_factory=JiraClient)
+    return JSONResponse({"ok": response.status_code < 400, "state": _api_state(db)})
+
+
+@app.delete("/api/subtasks/{subtask_id}")
+def api_delete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> Response:
+    response = tickets.delete_subtask(subtask_id, db, jira_client_factory=JiraClient)
+    return JSONResponse({"ok": response.status_code < 400, "state": _api_state(db)})
+
+
+@app.post("/api/tickets/{ticket_id}/move")
+def api_move_ticket(
+    ticket_id: int, target_index: int, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    response = tickets.move_ticket_to_index(ticket_id, target_index, request, db)
+    if response.status_code >= 400:
+        return response
+    return JSONResponse({"ok": True, "state": _api_state(db)})
+
+
+@app.post("/api/subtasks/{subtask_id}/move")
+def api_move_subtask(
+    subtask_id: int, target_index: int, request: Request, db: Session = Depends(get_db)
+) -> Response:
+    response = tickets.move_subtask_to_index(subtask_id, target_index, request, db)
+    if response.status_code >= 400:
+        return response
+    return JSONResponse({"ok": True, "state": _api_state(db)})
+
+
+@app.post("/api/tickets/{ticket_id}/sync")
+def api_sync_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Response:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return JSONResponse({"ok": False, "message": "Ticket was not found."}, status_code=404)
+    try:
+        jira_service.sync_ticket(ticket, db, jira_client_factory=JiraClient)
+    except jira_service.JiraError as exc:
+        db.rollback()
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
+    return JSONResponse(
+        {"ok": True, "message": f"{ticket.summary} synced to Jira.", "state": _api_state(db)}
+    )
+
+
+@app.post("/api/tickets/{ticket_id}/sync-from-jira")
+def api_sync_ticket_from_jira(ticket_id: int, db: Session = Depends(get_db)) -> Response:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return JSONResponse({"ok": False, "message": "Ticket was not found."}, status_code=404)
+    try:
+        jira_service.sync_ticket_from_jira(ticket, db, jira_client_factory=JiraClient)
+    except jira_service.JiraError as exc:
+        db.rollback()
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": f"{ticket.summary} synced from Jira.",
+            "state": _api_state(db),
+        }
+    )
+
+
+@app.post("/api/categories")
+def api_create_category(
+    payload: CategoryPayload, db: Session = Depends(get_db)
+) -> dict[str, object]:
+    name = payload.name.strip()
+    if name and db.scalar(select(Category).where(Category.name == name)) is None:
+        db.add(Category(name=name))
+        db.commit()
+    return {"ok": True, "state": _api_state(db)}
+
+
+@app.delete("/api/categories/{category_id}")
+def api_delete_category(category_id: int, db: Session = Depends(get_db)) -> Response:
+    category = db.get(Category, category_id)
+    if category is None:
+        return JSONResponse({"ok": False, "message": "Category was not found."}, status_code=404)
+    db.execute(update(Ticket).where(Ticket.category_id == category_id).values(category_id=None))
+    db.delete(category)
+    db.commit()
+    return JSONResponse({"ok": True, "state": _api_state(db)})
+
+
+@app.put("/api/settings/jira")
+def api_save_jira_config(payload: JiraConfigPayload, db: Session = Depends(get_db)) -> Response:
+    response = _save_jira_config(payload, db)
+    if isinstance(response, JSONResponse):
+        return response
+    return JSONResponse({"ok": True, "message": response, "state": _api_state(db)})
+
+
+def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResponse:
+    existing = db.get(JiraConfig, 1)
+    token = payload.api_token.strip() or (existing.api_token if existing is not None else "")
+    normalized_base_url = payload.base_url.strip().rstrip("/")
+    browser_base_url = payload.browser_base_url.strip().rstrip("/") or normalized_base_url
+    values = {
+        "base_url": normalized_base_url,
+        "browser_base_url": browser_base_url,
+        "email": payload.email.strip(),
+        "api_token": token,
+        "project_key": payload.project_key.strip().upper(),
+        "issue_type": payload.issue_type.strip(),
+        "completed_statuses": payload.completed_statuses.strip() or "Done",
+    }
+    if not all(
+        values[key] for key in ("base_url", "email", "api_token", "project_key", "issue_type")
+    ):
+        return JSONResponse(
+            {"ok": False, "message": "All Jira connection fields are required."}, status_code=422
+        )
+    for url_key, label in (("base_url", "Jira API URL"), ("browser_base_url", "Jira browser URL")):
+        if not values[url_key].startswith(("https://", "http://")):
+            return JSONResponse(
+                {"ok": False, "message": f"{label} must start with http:// or https://."},
+                status_code=422,
+            )
+    candidate = JiraConfig(id=1, **values)
+    try:
+        if payload.validate_connection:
+            jira = JiraClient(candidate)
+            try:
+                jira.validate()
+            finally:
+                jira.close()
+        if existing is None:
+            db.add(candidate)
+        else:
+            for key, value in values.items():
+                setattr(existing, key, value)
+        db.commit()
+    except jira_service.JiraError as exc:
+        db.rollback()
+        return JSONResponse({"ok": False, "message": f"Jira setup failed: {exc}"}, status_code=422)
+    return (
+        "Jira connection validated and saved."
+        if payload.validate_connection
+        else "Jira configuration saved."
     )
 
 

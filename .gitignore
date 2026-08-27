@@ -7,3 +7,4 @@ work-tickets.db
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+frontend/node_modules/
