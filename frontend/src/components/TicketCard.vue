@@ -5,6 +5,7 @@ import Card from "primevue/card";
 import DatePicker from "primevue/datepicker";
 import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
+import CategoryButtons, { type Category } from "./CategoryButtons.vue";
 import {
   clearSubtaskDragState,
   clearSubtaskDragOverState,
@@ -33,6 +34,7 @@ export interface Ticket {
 
 const props = defineProps<{
   ticket: Ticket;
+  categories: Category[];
   categoryName: string;
   browserBaseUrl: string;
   reorderable?: boolean;
@@ -216,7 +218,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
           <div class="date-control"><InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="ticket.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove planned date" :disabled="!ticket.planned_date" @click="ticket.planned_date = null" /></div>
           <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" />
           <Textarea v-if="ticket.parent_id === null" v-model="ticket.notes" rows="4" autoResize aria-label="Personal notes" placeholder="Notes for your local workflow" />
-          <span class="ticket-meta">Category: {{ categoryName }}</span>
+          <label class="category-field">Category<CategoryButtons v-model="ticket.category_id" :categories="categories" /></label>
           <Button label="Save ticket" @click="emit('save', ticket)" />
         </template>
         <span v-else class="ticket-meta">Done items can only be marked active.</span>
