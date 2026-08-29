@@ -57,6 +57,9 @@ class JiraConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     base_url: Mapped[str] = mapped_column(String(300))
     browser_base_url: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    local_projects_directory: Mapped[str] = mapped_column(
+        String(1000), default="", server_default=""
+    )
     email: Mapped[str] = mapped_column(String(320))
     api_token: Mapped[str] = mapped_column(String(300))
     project_key: Mapped[str] = mapped_column(String(40))

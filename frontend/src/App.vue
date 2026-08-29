@@ -15,6 +15,7 @@ import { clearSubtaskDragState, displayedDropTargetIndex, dropTargetIndex } from
 interface JiraConfig {
   base_url: string;
   browser_base_url: string;
+  local_projects_directory: string;
   email: string;
   project_key: string;
   issue_type: string;
@@ -41,7 +42,7 @@ const newSubtasks = ref<Array<{ summary: string; description: string; planned_da
 const newCategory = ref("");
 const newComponent = ref("");
 const selectedComponentByCategory = ref<Record<number, number | null>>({});
-const settings = ref({ base_url: "", browser_base_url: "", email: "", api_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", validate: false });
+const settings = ref({ base_url: "", browser_base_url: "", local_projects_directory: "", email: "", api_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", validate: false });
 
 const visibleTickets = computed(() => categoryFilter.value === null ? state.value.tickets : state.value.tickets.filter((ticket) => ticket.category_id === categoryFilter.value));
 const dueTickets = computed(() => visibleTickets.value.filter((ticket) => !ticket.local_completed && ticket.planned_date && ticket.planned_date <= dateValue(todayDate())));
@@ -173,7 +174,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { page.val
       </template></Card>
     </main>
 
-    <main v-else class="narrow"><section class="hero"><div><span class="eyebrow">CONNECTIONS</span><h2>Application settings</h2><p>Configure the local Jira connection used for sync and imports.</p></div></section><Card><template #content><form class="form" @submit.prevent="saveSettings"><label>Jira API URL<InputText v-model="settings.base_url" type="url" required placeholder="https://api.atlassian.com/..." /></label><label>Jira browser URL<InputText v-model="settings.browser_base_url" type="url" placeholder="https://your-company.atlassian.net" /></label><div class="two-col"><label>Account email<InputText v-model="settings.email" type="email" required /></label><label>Project key<InputText v-model="settings.project_key" required /></label></div><div class="two-col"><label>Issue type<InputText v-model="settings.issue_type" required /></label><label>Completed statuses<InputText v-model="settings.completed_statuses" /></label></div><label>API token<InputText v-model="settings.api_token" type="password" placeholder="Leave blank to keep saved token" /></label><div class="button-row"><Button type="submit" label="Save settings" icon="pi pi-save" :loading="busy" /><Button type="button" label="Save & test connection" severity="secondary" @click="settings.validate = true; saveSettings(); settings.validate = false" /></div></form></template></Card></main>
+     <main v-else class="narrow"><section class="hero"><div><span class="eyebrow">CONNECTIONS</span><h2>Application settings</h2><p>Configure the local Jira connection and local project root used by Refine.</p></div></section><Card><template #content><form class="form" @submit.prevent="saveSettings"><label>Jira API URL<InputText v-model="settings.base_url" type="url" required placeholder="https://api.atlassian.com/..." /></label><label>Jira browser URL<InputText v-model="settings.browser_base_url" type="url" placeholder="https://your-company.atlassian.net" /></label><label>Local projects directory<InputText v-model="settings.local_projects_directory" placeholder="/path/to/local/projects" /></label><div class="two-col"><label>Account email<InputText v-model="settings.email" type="email" required /></label><label>Project key<InputText v-model="settings.project_key" required /></label></div><div class="two-col"><label>Issue type<InputText v-model="settings.issue_type" required /></label><label>Completed statuses<InputText v-model="settings.completed_statuses" /></label></div><label>API token<InputText v-model="settings.api_token" type="password" placeholder="Leave blank to keep saved token" /></label><div class="button-row"><Button type="submit" label="Save settings" icon="pi pi-save" :loading="busy" /><Button type="button" label="Save & test connection" severity="secondary" @click="settings.validate = true; saveSettings(); settings.validate = false" /></div></form></template></Card></main>
     <Card v-if="page === 'create'" class="create-notes-card"><template #content><label class="form">Personal notes<Textarea v-model="newTicket.notes" rows="4" autoResize placeholder="Notes for your local workflow" /></label></template></Card>
   </div>
 </template>
