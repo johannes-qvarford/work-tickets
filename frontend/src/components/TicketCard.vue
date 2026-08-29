@@ -35,8 +35,6 @@ const props = defineProps<{
   categoryName: string;
   browserBaseUrl: string;
   reorderable?: boolean;
-  canMoveUp?: boolean;
-  canMoveDown?: boolean;
   draggingTicketId?: number | null;
   dragOverTicketId?: number | null;
 }>();
@@ -49,7 +47,6 @@ const emit = defineEmits<{
   toggleSubtask: [id: number];
   removeSubtask: [id: number];
   addSubtask: [ticket: Ticket, draft: { summary: string; description: string; planned_date: string }];
-  moveTicket: [id: number, offset: number];
   ticketDragStart: [id: number];
   ticketDragEnd: [];
   ticketDragOver: [id: number];
@@ -175,16 +172,6 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
   }
 }
 
-function moveSubtaskBy(subtask: Ticket, offset: number) {
-  const currentIndex = activeSubtasks.value.findIndex((item) => item.id === subtask.id);
-  const targetIndex = currentIndex + offset;
-  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= activeSubtasks.value.length) return;
-  emit("moveSubtask", subtask.id, targetIndex);
-}
-
-function moveTicketBy(offset: number) {
-  emit("moveTicket", props.ticket.id, offset);
-}
 </script>
 
 <template>
@@ -215,8 +202,6 @@ function moveTicketBy(offset: number) {
           </div>
         </div>
         <div class="button-row">
-          <Button v-if="reorderable && !ticket.local_completed" icon="pi pi-arrow-up" text rounded :disabled="!canMoveUp" :aria-label="`Move up ${ticket.summary}`" @click="moveTicketBy(-1)" />
-          <Button v-if="reorderable && !ticket.local_completed" icon="pi pi-arrow-down" text rounded :disabled="!canMoveDown" :aria-label="`Move down ${ticket.summary}`" @click="moveTicketBy(1)" />
           <Button :icon="ticket.local_completed ? 'pi pi-undo' : 'pi pi-check'" text rounded :aria-label="ticket.local_completed ? 'Mark active' : 'Mark done'" @click="emit('toggle')" />
           <Button v-if="!ticket.local_completed && ticket.jira_issue_key" icon="pi pi-cloud-download" text rounded aria-label="Sync from Jira" @click="emit('sync')" />
           <Button v-else-if="!ticket.local_completed" icon="pi pi-sync" text rounded aria-label="Sync to Jira" @click="emit('sync')" />
@@ -233,7 +218,7 @@ function moveTicketBy(offset: number) {
           <Button label="Save ticket" @click="emit('save', ticket)" />
         </template>
         <span v-else class="ticket-meta">Done items can only be marked active.</span>
-        <div class="subtasks-heading"><h4>Subtasks ({{ ticket.subtasks.length }})</h4><span class="ticket-meta">Active subtasks can be dragged; use arrows with a keyboard.</span></div>
+        <div class="subtasks-heading"><h4>Subtasks ({{ ticket.subtasks.length }})</h4><span class="ticket-meta">Active subtasks can be dragged to reorder.</span></div>
         <div class="subtask-list">
           <div
             v-for="subtask in ticket.subtasks"
@@ -252,8 +237,6 @@ function moveTicketBy(offset: number) {
               <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" />
             </div>
             <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text :aria-label="subtask.local_completed ? 'Mark subtask active' : 'Mark subtask done'" @click="emit('toggleSubtask', subtask.id)" />
-            <Button v-if="!subtask.local_completed" icon="pi pi-arrow-up" text :disabled="activeSubtasks.indexOf(subtask) === 0" :aria-label="`Move up ${subtask.summary}`" @click="moveSubtaskBy(subtask, -1)" />
-            <Button v-if="!subtask.local_completed" icon="pi pi-arrow-down" text :disabled="activeSubtasks.indexOf(subtask) === activeSubtasks.length - 1" :aria-label="`Move down ${subtask.summary}`" @click="moveSubtaskBy(subtask, 1)" />
             <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text aria-label="Delete subtask" @click="emit('removeSubtask', subtask.id)" />
             <Button v-if="!subtask.local_completed" label="Save" text @click="emit('saveSubtask', subtask)" />
           </div>

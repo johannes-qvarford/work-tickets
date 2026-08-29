@@ -277,6 +277,26 @@ def test_spa_reordering_adjusts_target_index_after_source_removal() -> None:
     assert "return adjustedTargetIndex + (afterTarget ? 1 : 0)" in helper_source
 
 
+def test_spa_reordering_uses_drag_handles_without_arrow_controls() -> None:
+    frontend_source = Path(__file__).parents[1] / "frontend" / "src"
+    app_source = (frontend_source / "App.vue").read_text()
+    ticket_card_source = (frontend_source / "components" / "TicketCard.vue").read_text()
+
+    assert 'class="drag-handle ticket-drag-handle"' in ticket_card_source
+    assert 'class="drag-handle subtask-drag-handle"' in ticket_card_source
+    assert 'icon="pi pi-arrow-up"' not in ticket_card_source
+    assert 'icon="pi pi-arrow-down"' not in ticket_card_source
+    assert "canMoveUp" not in ticket_card_source
+    assert "canMoveDown" not in ticket_card_source
+    assert "moveTicketBy" not in ticket_card_source
+    assert "moveSubtaskBy" not in ticket_card_source
+    assert "@move-ticket=" not in app_source
+    assert "canMoveTicket" not in app_source
+    assert "Drag active tickets to reorder." in app_source
+    assert "arrow controls" not in app_source
+    assert "use arrows" not in ticket_card_source
+
+
 def test_api_reordering_swaps_adjacent_items_in_both_directions() -> None:
     with SessionLocal() as db:
         first = Ticket(summary="Swap first", position=0)
