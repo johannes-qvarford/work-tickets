@@ -90,7 +90,7 @@
 
   Add a GitLab base URL and user personal access token to application settings. Store and handle the token like the existing Jira credential.
 
-- [ ] Detect merge requests from Jira descriptions.
+- [x] Detect merge requests from Jira descriptions.
 
   For now, scan the Jira description for links matching the configured GitLab base URL, such as:
 
