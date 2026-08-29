@@ -52,7 +52,9 @@ def test_homepage_is_available_and_legacy_frontend_is_removed() -> None:
 def test_spa_state_api_serializes_tickets_categories_and_jira_config() -> None:
     with SessionLocal() as db:
         category = Category(name="API state category")
-        ticket = Ticket(summary="API state parent", position=0, category=category)
+        ticket = Ticket(
+            summary="API state parent", notes="Parent notes", position=0, category=category
+        )
         Ticket(summary="API state child", position=0, parent=ticket)
         db.add_all([category, ticket])
         db.commit()
@@ -64,7 +66,9 @@ def test_spa_state_api_serializes_tickets_categories_and_jira_config() -> None:
     assert {item["name"] for item in result["categories"]} >= {"API state category"}
     parent = next(item for item in result["tickets"] if item["summary"] == "API state parent")
     assert parent["category_name"] == "API state category"
+    assert parent["notes"] == "Parent notes"
     assert parent["subtasks"][0]["summary"] == "API state child"
+    assert "notes" not in parent["subtasks"][0]
 
 
 def test_packaged_spa_assets_are_served() -> None:
@@ -83,6 +87,7 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
         json={
             "summary": "API created ticket",
             "description": "Ticket details",
+            "notes": "Initial local notes",
             "planned_date": "2026-08-24",
         },
     )
@@ -97,6 +102,7 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
         json={
             "summary": "API updated ticket",
             "description": "Updated details",
+            "notes": "Updated local notes",
             "planned_date": "2026-08-25",
         },
     )
@@ -105,6 +111,7 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
         json={
             "summary": "API created subtask",
             "description": "Subtask details",
+            "notes": "Must not be stored on a subtask",
             "planned_date": "2026-08-26",
         },
     )
@@ -118,20 +125,33 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
         json={
             "summary": "API updated subtask",
             "description": "Updated subtask details",
+            "notes": "Must still not be stored on a subtask",
             "planned_date": "2026-08-27",
+        },
+    )
+    wrong_route_response = client.put(
+        f"/api/tickets/{subtask_id}",
+        json={
+            "summary": "Must remain unchanged",
+            "notes": "Must not be stored on a subtask",
         },
     )
 
     assert subtask_update_response.status_code == 200
+    assert wrong_route_response.status_code == 400
     with SessionLocal() as db:
         ticket = db.get(Ticket, ticket_id)
         subtask = db.get(Ticket, subtask_id)
         assert ticket is not None
         assert subtask is not None
         assert ticket.summary == "API updated ticket"
+        assert ticket.notes == "Updated local notes"
         assert ticket.planned_date == date(2026, 8, 25)
         assert subtask.summary == "API updated subtask"
+        assert subtask.notes is None
         assert subtask.planned_date == date(2026, 8, 27)
+    assert "notes" in update_response.json()["state"]["tickets"][0]
+    assert "notes" not in subtask_response.json()["state"]["tickets"][0]["subtasks"][0]
 
 
 def test_ticket_api_validation_does_not_persist_invalid_values() -> None:
@@ -498,6 +518,7 @@ def test_api_imports_jira_issue_and_subtasks_with_local_fields(monkeypatch) -> N
             "planned_date": "2026-08-30",
             "category_id": category_id,
             "description": "Ignored local description",
+            "notes": "Keep this local note",
         },
     )
 
@@ -509,6 +530,7 @@ def test_api_imports_jira_issue_and_subtasks_with_local_fields(monkeypatch) -> N
         assert child is not None
         assert parent.summary == "Imported API parent"
         assert parent.description == "Imported details"
+        assert parent.notes == "Keep this local note"
         assert parent.planned_date == date(2026, 8, 30)
         assert parent.category_id == category_id
         assert parent.jira_status_name == "In Progress"
@@ -614,7 +636,9 @@ def test_jira_client_creates_issue_and_refreshes_status() -> None:
         "/rest/api/3/issue/WORK-7",
     ]
     assert requests[0].headers["Authorization"].startswith("Basic ")
-    assert '"project":{"key":"WORK"' in requests[0].read().decode()
+    create_payload = json.loads(requests[0].read())
+    assert create_payload["fields"]["project"] == {"key": "WORK"}
+    assert "notes" not in create_payload["fields"]
 
 
 def test_jira_api_conventions_identify_cloud_and_server_urls() -> None:
@@ -648,6 +672,7 @@ def test_jira_client_uses_server_api_v2_and_plain_text_descriptions() -> None:
         if request.method == "PUT":
             payload = json.loads(request.content)
             assert payload["fields"]["description"] == "Updated details"
+            assert "notes" not in payload["fields"]
             return httpx.Response(200, json={})
         return httpx.Response(
             200,
@@ -1117,6 +1142,7 @@ def test_sync_from_jira_updates_parent_and_existing_or_new_subtasks(monkeypatch)
         parent = Ticket(
             summary="Old parent",
             description="Old parent details",
+            notes="Keep this local note",
             planned_date=date(2026, 10, 1),
             position=305,
             jira_issue_key="WORK-80",
@@ -1167,6 +1193,7 @@ def test_sync_from_jira_updates_parent_and_existing_or_new_subtasks(monkeypatch)
         assert parent is not None
         assert parent.summary == "Remote parent"
         assert parent.description == "Remote parent details"
+        assert parent.notes == "Keep this local note"
         assert parent.category_id == category_id
         assert parent.planned_date == date(2026, 10, 1)
         assert existing is not None

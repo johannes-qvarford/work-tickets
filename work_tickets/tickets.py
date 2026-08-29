@@ -21,6 +21,7 @@ def create_ticket(
     request: Request,
     summary: str,
     description: str,
+    notes: str,
     planned_date: str,
     category_id: str,
     db: Session,
@@ -54,6 +55,7 @@ def create_ticket(
                 jira_reference_value,
                 planned_date_value,
                 category_id_value,
+                notes,
                 db,
                 jira_client_factory=jira_client_factory,
             )
@@ -71,6 +73,7 @@ def create_ticket(
     ticket = Ticket(
         summary=summary_value,
         description=description,
+        notes=notes,
         planned_date=planned_date_value,
         category_id=category_id_value,
         position=0,
@@ -143,6 +146,7 @@ def update_ticket(
     request: Request,
     summary: str,
     description: str,
+    notes: str,
     planned_date: str,
     db: Session,
     jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
@@ -150,6 +154,8 @@ def update_ticket(
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
         return mutation_response(request, "error", "Ticket was not found.", 404)
+    if ticket.parent_id is not None:
+        return mutation_response(request, "error", "Subtasks cannot be edited here.", 400)
     if ticket.local_completed:
         return mutation_response(
             request,
@@ -166,6 +172,7 @@ def update_ticket(
 
     ticket.summary = summary_value
     ticket.description = description
+    ticket.notes = notes
     ticket.planned_date = planned_date_value
     if ticket.jira_issue_key:
         from .jira_service import sync_ticket

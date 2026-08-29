@@ -27,6 +27,7 @@ _REQUIRED_COLUMNS = {
         "parent_id",
         "summary",
         "description",
+        "notes",
         "planned_date",
         "position",
         "local_completed",
@@ -37,6 +38,10 @@ _REQUIRED_COLUMNS = {
         "updated_at",
         "category_id",
     },
+}
+_INITIAL_REQUIRED_COLUMNS = {
+    **_REQUIRED_COLUMNS,
+    "tickets": _REQUIRED_COLUMNS["tickets"] - {"notes"},
 }
 
 
@@ -99,15 +104,18 @@ def _prepare_legacy_schema(connection: Connection) -> None:
                 "ADD COLUMN browser_base_url VARCHAR(300) NOT NULL DEFAULT ''"
             )
 
-    _validate_current_schema(connection)
+    _validate_current_schema(connection, _INITIAL_REQUIRED_COLUMNS)
 
 
-def _validate_current_schema(connection: Connection) -> None:
+def _validate_current_schema(
+    connection: Connection,
+    required_columns: dict[str, set[str]] = _REQUIRED_COLUMNS,
+) -> None:
     inspector = inspect(connection)
     tables = set(inspector.get_table_names())
     missing = {
         table: sorted(columns - {column["name"] for column in inspector.get_columns(table)})
-        for table, columns in _REQUIRED_COLUMNS.items()
+        for table, columns in required_columns.items()
         if table not in tables
         or columns - {column["name"] for column in inspector.get_columns(table)}
     }

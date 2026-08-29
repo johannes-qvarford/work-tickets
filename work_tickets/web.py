@@ -20,8 +20,8 @@ def ticket_list_data(db: Session) -> dict[str, object]:
     categories = list(db.scalars(select(Category).order_by(Category.name)))
     config = db.get(JiraConfig, 1)
 
-    def serialize_ticket(ticket: Ticket) -> dict[str, object]:
-        return {
+    def serialize_ticket(ticket: Ticket, *, include_notes: bool = False) -> dict[str, object]:
+        serialized: dict[str, object] = {
             "id": ticket.id,
             "parent_id": ticket.parent_id,
             "summary": ticket.summary,
@@ -35,9 +35,12 @@ def ticket_list_data(db: Session) -> dict[str, object]:
             "category_name": ticket.category.name if ticket.category else None,
             "subtasks": [serialize_ticket(subtask) for subtask in ticket.subtasks],
         }
+        if include_notes:
+            serialized["notes"] = ticket.notes or ""
+        return serialized
 
     return {
-        "tickets": [serialize_ticket(ticket) for ticket in tickets],
+        "tickets": [serialize_ticket(ticket, include_notes=True) for ticket in tickets],
         "categories": [{"id": category.id, "name": category.name} for category in categories],
         "jira_config": (
             {
