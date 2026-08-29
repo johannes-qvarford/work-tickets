@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -26,6 +27,7 @@ class JiraIssue:
     description: str | None = None
     issue_type_name: str | None = None
     status_name: str | None = None
+    description_adf: Mapping[str, object] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -317,12 +319,16 @@ class JiraClient:
         fields = response.get("fields")
         summary: str | None = None
         description: str | None = None
+        description_adf: Mapping[str, object] | None = None
         issue_type_name: str | None = None
         status_name: str | None = None
         if isinstance(fields, dict):
             if isinstance(fields.get("summary"), str):
                 summary = fields["summary"]
-            description = self._description_text(fields.get("description"))
+            raw_description = fields.get("description")
+            description = self._description_text(raw_description)
+            if isinstance(raw_description, dict):
+                description_adf = raw_description
             issue_type = fields.get("issuetype")
             if isinstance(issue_type, dict) and isinstance(issue_type.get("name"), str):
                 issue_type_name = issue_type["name"]
@@ -335,6 +341,7 @@ class JiraClient:
             description=description,
             issue_type_name=issue_type_name,
             status_name=status_name,
+            description_adf=description_adf,
         )
 
     def _issue_fields(self, summary: str, description: str) -> dict[str, Any]:

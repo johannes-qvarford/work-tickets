@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Generator
 from datetime import date
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -510,7 +509,7 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
     normalized_base_url = payload.base_url.strip().rstrip("/")
     browser_base_url = payload.browser_base_url.strip().rstrip("/")
     local_projects_directory = payload.local_projects_directory.strip()
-    gitlab_base_url = payload.gitlab_base_url.strip().rstrip("/")
+    gitlab_base_url = payload.gitlab_base_url.rstrip("/")
     if local_projects_directory:
         try:
             local_projects_path = Path(local_projects_directory).expanduser()
@@ -553,12 +552,10 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
                 {"ok": False, "message": f"{label} must start with http:// or https://."},
                 status_code=422,
             )
-    try:
-        gitlab_url = urlsplit(values["gitlab_base_url"])
-        gitlab_url_is_valid = gitlab_url.scheme in {"http", "https"} and bool(gitlab_url.netloc)
-    except ValueError:
-        gitlab_url_is_valid = False
-    if values["gitlab_base_url"] and not gitlab_url_is_valid:
+    if (
+        payload.gitlab_base_url
+        and jira_service.parse_gitlab_base_url(payload.gitlab_base_url) is None
+    ):
         return JSONResponse(
             {"ok": False, "message": "GitLab base URL must start with http:// or https://."},
             status_code=422,
