@@ -30,7 +30,7 @@
 
 ## Categories and Components
 
-- [ ] Replace ticket category selection dropdowns with category buttons.
+- [x] Replace ticket category selection dropdowns with category buttons.
 
   Include an explicit `Uncategorized` button. This applies to ticket creation and editing; the category filter may remain a dropdown.
 
