@@ -20,7 +20,12 @@ atexit.register(_test_db_path.unlink, missing_ok=True)
 
 from work_tickets import refine  # noqa: E402
 from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
-from work_tickets.gitlab import GitLabClient, GitLabError, GitLabMergeRequest  # noqa: E402
+from work_tickets.gitlab import (  # noqa: E402
+    GitLabClient,
+    GitLabError,
+    GitLabMergeRequest,
+    GitLabMergeRequestApprovalState,
+)
 from work_tickets.jira import (  # noqa: E402
     JiraApiConventions,
     JiraClient,
@@ -1326,6 +1331,43 @@ def test_gitlab_client_reports_missing_fields_and_api_errors() -> None:
     gitlab.close()
 
 
+def test_gitlab_client_retrieves_and_changes_merge_request_approval() -> None:
+    requests: list[httpx.Request] = []
+    responses = [
+        httpx.Response(200, json={"approved": False}),
+        httpx.Response(201),
+        httpx.Response(200, json={"approved": True}),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return responses.pop(0)
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example/gitlab",
+        gitlab_token="gitlab-secret",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    assert gitlab.get_merge_request_approval_state("group/repository", 42) == (
+        GitLabMergeRequestApprovalState(approved=False)
+    )
+    gitlab.approve_merge_request("group/repository", 42)
+    assert gitlab.get_merge_request_approval_state("group/repository", 42).approved is True
+    gitlab.close()
+
+    assert [request.method for request in requests] == ["GET", "POST", "GET"]
+    assert requests[0].url.raw_path == (
+        b"/gitlab/api/v4/projects/group%2Frepository/merge_requests/42/approvals"
+    )
+    assert requests[1].url.raw_path == (
+        b"/gitlab/api/v4/projects/group%2Frepository/merge_requests/42/approve"
+    )
+
+
 def test_parse_gitlab_base_url_rejects_boundary_whitespace() -> None:
     for value in (
         " https://gitlab.example/group",
@@ -1686,6 +1728,15 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
             assert (project_path, number) == ("group/repository", 509)
             return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
 
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            assert (project_path, number) == ("group/repository", 509)
+            return GitLabMergeRequestApprovalState(approved=True)
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            raise AssertionError("an approved MR must not be approved again")
+
         def close(self) -> None:
             pass
 
@@ -1754,6 +1805,15 @@ def test_ready_to_merge_review_skips_transition_when_already_ready() -> None:
         def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
             assert (project_path, number) == ("group/repository", 510)
             return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            assert (project_path, number) == ("group/repository", 510)
+            return GitLabMergeRequestApprovalState(approved=True)
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            raise AssertionError("an approved MR must not be approved again")
 
         def close(self) -> None:
             pass
@@ -1852,6 +1912,15 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
             assert (project_path, number) == ("group/repository", 511)
             return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
 
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            assert (project_path, number) == ("group/repository", 511)
+            return GitLabMergeRequestApprovalState(approved=True)
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            raise AssertionError("an approved MR must not be approved again")
+
         def close(self) -> None:
             pass
 
@@ -1893,6 +1962,149 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
         ("comment", "WORK-511", "Tested and reviewed."),
         ("close",),
     ]
+
+
+def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> None:
+    calls: list[tuple[object, ...]] = []
+    approval_states = iter((False, True))
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(("jira-get", key))
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/513",
+                status_name="Awaiting Review",
+            )
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            calls.append(("transition", key, target_status, current_status))
+            return JiraIssue(key=key, status_name=target_status)
+
+        def add_comment(self, key: str, comment: str) -> None:
+            calls.append(("comment", key, comment))
+
+        def close(self) -> None:
+            calls.append(("jira-close",))
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            calls.append(("mr-get", project_path, number))
+            return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            calls.append(("approval-get", project_path, number))
+            return GitLabMergeRequestApprovalState(approved=next(approval_states))
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            calls.append(("approve", project_path, number))
+
+        def close(self) -> None:
+            calls.append(("gitlab-close",))
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.ready_to_merge_status = "Merge Queue"
+        config.gitlab_base_url = "https://gitlab.example"
+        db.commit()
+        result = ready_to_merge_review(
+            "WORK-513",
+            db,
+            jira_client_factory=FakeJiraClient,
+            gitlab_client_factory=FakeGitLabClient,
+        )
+        config.ready_to_merge_status = "Ready to Merge"
+        db.commit()
+
+    assert result.status_name == "Merge Queue"
+    assert calls == [
+        ("jira-get", "WORK-513"),
+        ("mr-get", "group/repository", 513),
+        ("approval-get", "group/repository", 513),
+        ("approve", "group/repository", 513),
+        ("approval-get", "group/repository", 513),
+        ("transition", "WORK-513", "Merge Queue", "Awaiting Review"),
+        ("comment", "WORK-513", "Tested and reviewed."),
+        ("gitlab-close",),
+        ("jira-close",),
+    ]
+
+
+def test_api_ready_to_merge_review_reports_gitlab_approval_failure_without_jira_side_effects(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(f"get:{key}")
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/514",
+                status_name="Awaiting Review",
+            )
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            del key, target_status, current_status
+            raise AssertionError("Jira must not transition after approval failure")
+
+        def add_comment(self, key: str, comment: str) -> None:
+            del key, comment
+            raise AssertionError("Jira must not be commented after approval failure")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 514)
+            return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            assert (project_path, number) == ("group/repository", 514)
+            raise GitLabError("GitLab returned HTTP 503: approvals unavailable.")
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            del project_path, number
+            raise AssertionError("approval mutation must not run after state failure")
+
+        def close(self) -> None:
+            calls.append("gitlab-close")
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", FakeGitLabClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.ready_to_merge_status = "Ready to Merge"
+        config.gitlab_base_url = "https://gitlab.example"
+        db.commit()
+
+    response = client.post("/api/reviews/work-514/ready-to-merge")
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "GitLab returned HTTP 503: approvals unavailable.",
+    }
+    assert calls == ["get:WORK-514", "gitlab-close", "close"]
 
 
 def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:

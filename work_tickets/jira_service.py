@@ -474,6 +474,11 @@ def ready_to_merge_review(
         )
         if not selection.enabled:
             raise JiraError(selection.reason)
+        _approve_selected_merge_request(
+            config.gitlab_base_url,
+            selection,
+            gitlab,
+        )
         if current.status_name != config.ready_to_merge_status:
             current = jira.transition_issue(
                 canonical_key,
@@ -486,6 +491,38 @@ def ready_to_merge_review(
         if gitlab is not None:
             gitlab.close()
         jira.close()
+
+
+def _approve_selected_merge_request(
+    gitlab_base_url: str,
+    selection: MergeRequestSelection,
+    gitlab_client: GitLabClient | None,
+) -> None:
+    """Approve only the MR selected after resolving all links in the description."""
+    if selection.selected is None or gitlab_client is None:
+        raise JiraError("GitLab merge request details could not be retrieved.")
+
+    selected_url = selection.selected.get("url")
+    if not isinstance(selected_url, str):
+        raise JiraError("The selected GitLab merge request has an invalid URL.")
+    base = parse_gitlab_base_url(gitlab_base_url)
+    parsed = _parse_merge_request_url(selected_url, base) if base is not None else None
+    if parsed is None:
+        raise JiraError("Could not determine the GitLab project for the selected merge request.")
+    reference, project_path = parsed
+    try:
+        approval = gitlab_client.get_merge_request_approval_state(project_path, reference.number)
+        if approval.approved:
+            return
+        gitlab_client.approve_merge_request(project_path, reference.number)
+        if not gitlab_client.get_merge_request_approval_state(
+            project_path, reference.number
+        ).approved:
+            raise JiraError(
+                f"GitLab did not approve merge request {reference.repository}!{reference.number}."
+            )
+    except GitLabError as exc:
+        raise JiraError(str(exc)) from exc
 
 
 def _jql_value(value: str) -> str:
