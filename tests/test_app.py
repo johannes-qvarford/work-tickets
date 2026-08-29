@@ -297,6 +297,24 @@ def test_spa_reordering_uses_drag_handles_without_arrow_controls() -> None:
     assert "use arrows" not in ticket_card_source
 
 
+def test_spa_ticket_edit_layout_constrains_narrow_content() -> None:
+    frontend_source = Path(__file__).parents[1] / "frontend" / "src"
+    style_source = (frontend_source / "style.css").read_text()
+
+    assert "grid-template-columns: minmax(0, 1fr)" in style_source
+    assert ".ticket-card { min-width: 0;" in style_source
+    assert ".details-form > * { min-width: 0; max-width: 100%; }" in style_source
+    assert ".details-form > .p-inputtext, .details-form > .p-textarea" in style_source
+    assert "{ width: 100%; }" in style_source
+    assert ".edit-toggle .p-button-label { white-space: normal;" in style_source
+    assert ".draft-row, .subtask-row { min-width: 0; flex-wrap: wrap; }" in style_source
+    assert ".draft-row > *, .subtask-row > * { min-width: 0; max-width: 100%; }" in style_source
+    assert "grid-template-columns: minmax(0, 1fr); display: grid" in style_source
+    date_control = ".date-control { display: flex; align-items: center; gap: 8px; min-width: 0;"
+    assert date_control in style_source
+    assert "max-width: 100%; flex-wrap: wrap; }" in style_source
+
+
 def test_api_reordering_swaps_adjacent_items_in_both_directions() -> None:
     with SessionLocal() as db:
         first = Ticket(summary="Swap first", position=0)

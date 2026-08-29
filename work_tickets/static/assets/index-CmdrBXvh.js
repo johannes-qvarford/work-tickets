@@ -2159,7 +2159,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         background: dt('select.option.selected.focus.background');
         color: dt('select.option.selected.focus.color');
     }
-
+   
     .p-select-option-blank-icon {
         flex-shrink: 0;
     }
