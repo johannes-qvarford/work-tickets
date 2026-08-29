@@ -14,7 +14,9 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
 
     assert set(inspect(database_engine).get_table_names()) == {
         "alembic_version",
+        "category_components",
         "categories",
+        "components",
         "jira_config",
         "tickets",
     }
@@ -31,11 +33,12 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
     }
     assert {column["name"] for column in inspect(database_engine).get_columns("tickets")} >= {
         "notes",
+        "component",
     }
     with database_engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one() == 1
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-            "002_add_ticket_notes"
+            "003_add_local_components"
         )
 
 
@@ -108,7 +111,7 @@ def test_existing_homegrown_tracking_is_converted_without_losing_data(tmp_path) 
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Legacy parent", 1), (10, "Legacy subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "002_add_ticket_notes"
+            "003_add_local_components"
         )
 
 
@@ -149,7 +152,7 @@ def test_untracked_pre_migration_schema_is_upgraded_without_losing_data(tmp_path
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Pre-migration parent", 1), (20, "Pre-migration subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "002_add_ticket_notes"
+            "003_add_local_components"
         )
 
 

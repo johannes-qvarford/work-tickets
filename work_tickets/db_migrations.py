@@ -11,6 +11,8 @@ _LEGACY_MIGRATIONS_TABLE = "schema_migrations"
 _INITIAL_REVISION = "001_initial"
 _REQUIRED_COLUMNS = {
     "categories": {"id", "name"},
+    "components": {"id", "name"},
+    "category_components": {"category_id", "component_id", "position"},
     "jira_config": {
         "id",
         "base_url",
@@ -37,11 +39,13 @@ _REQUIRED_COLUMNS = {
         "created_at",
         "updated_at",
         "category_id",
+        "component",
     },
 }
 _INITIAL_REQUIRED_COLUMNS = {
-    **_REQUIRED_COLUMNS,
-    "tickets": _REQUIRED_COLUMNS["tickets"] - {"notes"},
+    "categories": _REQUIRED_COLUMNS["categories"],
+    "jira_config": _REQUIRED_COLUMNS["jira_config"],
+    "tickets": _REQUIRED_COLUMNS["tickets"] - {"notes", "component"},
 }
 
 

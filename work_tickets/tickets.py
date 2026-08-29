@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .jira import JiraClient, JiraError
-from .models import Category, JiraConfig, Ticket
+from .models import Category, Component, JiraConfig, Ticket
 from .web import (
     move_response,
     mutation_response,
@@ -24,7 +24,9 @@ def create_ticket(
     notes: str,
     planned_date: str,
     category_id: str,
+    component: str | None,
     db: Session,
+    *,
     jira_reference: str = "",
     jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
 ) -> Response:
@@ -46,6 +48,9 @@ def create_ticket(
 
     if category_id_value is not None and db.get(Category, category_id_value) is None:
         return mutation_response(request, "error", "Ticket category was not found.", 422)
+    component_value = _validate_component(component, db)
+    if component and component_value is None:
+        return mutation_response(request, "error", "Ticket component was not found.", 422)
 
     if jira_reference_value:
         from .jira_service import import_ticket_from_jira
@@ -55,6 +60,7 @@ def create_ticket(
                 jira_reference_value,
                 planned_date_value,
                 category_id_value,
+                component_value,
                 notes,
                 db,
                 jira_client_factory=jira_client_factory,
@@ -76,6 +82,7 @@ def create_ticket(
         notes=notes,
         planned_date=planned_date_value,
         category_id=category_id_value,
+        component=component_value,
         position=0,
     )
     _append_unfinished(_top_level_tickets(db), ticket)
@@ -149,7 +156,10 @@ def update_ticket(
     notes: str,
     planned_date: str,
     category_id: int | None,
+    component: str | None,
     db: Session,
+    *,
+    component_provided: bool = True,
     jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
 ) -> Response:
     ticket = db.get(Ticket, ticket_id)
@@ -172,12 +182,19 @@ def update_ticket(
         return mutation_response(request, "error", "Ticket planned date is invalid.", 422)
     if category_id is not None and db.get(Category, category_id) is None:
         return mutation_response(request, "error", "Ticket category was not found.", 422)
+    component_value = _validate_component(component, db)
+    if component_provided and component and component_value is None:
+        if component.strip() != (ticket.component or ""):
+            return mutation_response(request, "error", "Ticket component was not found.", 422)
 
     ticket.summary = summary_value
     ticket.description = description
     ticket.notes = notes
     ticket.planned_date = planned_date_value
     ticket.category_id = category_id
+    if component_provided:
+        if component_value is not None or not component:
+            ticket.component = component_value
     if ticket.jira_issue_key:
         from .jira_service import sync_ticket
 
@@ -459,6 +476,14 @@ def _parse_date(value: str) -> date | None:
         return date.fromisoformat(value) if value else None
     except ValueError:
         return None
+
+
+def _validate_component(value: str | None, db: Session) -> str | None:
+    normalized = value.strip() if value else ""
+    if not normalized:
+        return None
+    component = db.scalar(select(Component).where(Component.name == normalized))
+    return component.name if component is not None else None
 
 
 def _is_jira_issue_reference_candidate(value: str) -> bool:

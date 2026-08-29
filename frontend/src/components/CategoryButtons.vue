@@ -4,6 +4,12 @@ import Button from "primevue/button";
 export interface Category {
   id: number;
   name: string;
+  components?: CategoryComponent[];
+}
+
+export interface CategoryComponent {
+  id: number;
+  name: string;
 }
 
 defineProps<{

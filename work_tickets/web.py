@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Category, JiraConfig, Ticket
+from .models import Category, Component, JiraConfig, Ticket
 
 
 def ticket_list_data(db: Session) -> dict[str, object]:
@@ -33,6 +33,7 @@ def ticket_list_data(db: Session) -> dict[str, object]:
             "jira_status_name": ticket.jira_status_name,
             "category_id": ticket.category_id,
             "category_name": ticket.category.name if ticket.category else None,
+            "component": ticket.component,
             "subtasks": [serialize_ticket(subtask) for subtask in ticket.subtasks],
         }
         if include_notes:
@@ -41,7 +42,21 @@ def ticket_list_data(db: Session) -> dict[str, object]:
 
     return {
         "tickets": [serialize_ticket(ticket, include_notes=True) for ticket in tickets],
-        "categories": [{"id": category.id, "name": category.name} for category in categories],
+        "categories": [
+            {
+                "id": category.id,
+                "name": category.name,
+                "components": [
+                    {"id": link.component.id, "name": link.component.name}
+                    for link in category.component_links
+                ],
+            }
+            for category in categories
+        ],
+        "components": [
+            {"id": component.id, "name": component.name}
+            for component in db.scalars(select(Component).order_by(Component.name))
+        ],
         "jira_config": (
             {
                 "base_url": config.base_url,

@@ -28,6 +28,8 @@ from work_tickets.jira import (  # noqa: E402
 from work_tickets.models import (  # noqa: E402
     Base,
     Category,
+    CategoryComponent,
+    Component,
     JiraConfig,
     SessionLocal,
     Ticket,
@@ -211,6 +213,111 @@ def test_category_api_creates_and_deletes_without_deleting_tickets() -> None:
         assert db.get(Category, category_id) is None
 
 
+def test_component_api_assigns_orders_and_deletes_without_changing_ticket_values() -> None:
+    category_response = client.post("/api/categories", json={"name": "Component category"})
+    category_id = next(
+        item["id"]
+        for item in category_response.json()["state"]["categories"]
+        if item["name"] == "Component category"
+    )
+    second_category_response = client.post(
+        "/api/categories", json={"name": "Second component category"}
+    )
+    second_category_id = next(
+        item["id"]
+        for item in second_category_response.json()["state"]["categories"]
+        if item["name"] == "Second component category"
+    )
+    component_ids = {}
+    for name in ("payment-integration-app", "payment-provider-app"):
+        response = client.post("/api/components", json={"name": name})
+        component_ids[name] = next(
+            item["id"] for item in response.json()["state"]["components"] if item["name"] == name
+        )
+
+    first_id = component_ids["payment-integration-app"]
+    second_id = component_ids["payment-provider-app"]
+    assert (
+        client.post(
+            f"/api/categories/{category_id}/components", json={"component_id": first_id}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/categories/{category_id}/components", json={"component_id": second_id}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/categories/{second_category_id}/components", json={"component_id": first_id}
+        ).status_code
+        == 200
+    )
+    move_response = client.post(
+        f"/api/categories/{category_id}/components/{first_id}/move",
+        params={"target_index": 1},
+    )
+
+    assert move_response.status_code == 200
+    category = next(
+        item for item in move_response.json()["state"]["categories"] if item["id"] == category_id
+    )
+    assert [item["id"] for item in category["components"]] == [second_id, first_id]
+    second_category = next(
+        item
+        for item in move_response.json()["state"]["categories"]
+        if item["id"] == second_category_id
+    )
+    assert [item["id"] for item in second_category["components"]] == [first_id]
+
+    ticket_response = client.post(
+        "/api/tickets",
+        json={
+            "summary": "Retain deleted component",
+            "category_id": category_id,
+            "component": "payment-integration-app",
+        },
+    )
+    ticket_id = ticket_response.json()["created_id"]
+    delete_response = client.delete(f"/api/components/{first_id}")
+
+    assert delete_response.status_code == 200
+    assert all(
+        component["id"] != first_id for component in delete_response.json()["state"]["components"]
+    )
+    assert all(
+        first_id not in {component["id"] for component in category["components"]}
+        for category in delete_response.json()["state"]["categories"]
+    )
+    ticket = next(
+        item for item in delete_response.json()["state"]["tickets"] if item["id"] == ticket_id
+    )
+    assert ticket["component"] == "payment-integration-app"
+
+    edit_response = client.put(
+        f"/api/tickets/{ticket_id}",
+        json={"summary": "Edited while component deleted", "component": "payment-integration-app"},
+    )
+    create_deleted_response = client.post(
+        "/api/tickets",
+        json={"summary": "Cannot select deleted", "component": "payment-integration-app"},
+    )
+
+    assert edit_response.status_code == 200
+    assert create_deleted_response.status_code == 422
+    with SessionLocal() as db:
+        stored_ticket = db.get(Ticket, ticket_id)
+        assert stored_ticket is not None
+        assert stored_ticket.component == "payment-integration-app"
+        assert (
+            db.scalar(select(CategoryComponent).where(CategoryComponent.component_id == first_id))
+            is None
+        )
+        assert db.get(Component, first_id) is None
+
+
 def test_completion_api_updates_local_priority_and_state() -> None:
     with SessionLocal() as db:
         first = Ticket(summary="Completion first", position=0)
@@ -341,6 +448,21 @@ def test_spa_ticket_edit_layout_constrains_narrow_content() -> None:
     date_control = ".date-control { display: flex; align-items: center; gap: 8px; min-width: 0;"
     assert date_control in style_source
     assert "max-width: 100%; flex-wrap: wrap; }" in style_source
+
+
+def test_spa_uses_a_category_first_component_dropdown() -> None:
+    frontend_source = Path(__file__).parents[1] / "frontend" / "src"
+    component_select_source = (frontend_source / "components" / "ComponentSelect.vue").read_text()
+    app_source = (frontend_source / "App.vue").read_text()
+
+    assert "<Select" in component_select_source
+    assert (
+        "const ordered = [...(category?.components || []), ...props.components]"
+        in component_select_source
+    )
+    assert "const seen = new Set<number>()" in component_select_source
+    assert "disabled: true" in component_select_source
+    assert "<ComponentSelect" in app_source
 
 
 def test_api_reordering_swaps_adjacent_items_in_both_directions() -> None:
