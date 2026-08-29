@@ -152,7 +152,7 @@
             <span class="field-label">Summary</span><input name="summary" value="{{ ticket.summary }}" required>
           </label>
           <label>
-            <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}">
+            <span class="field-label">Planned date</span><span class="date-control"><input type="date" name="planned_date" value="{{ ticket.planned_date or '' }}"><button class="secondary" type="button" data-today-date aria-label="Set planned date to today">Today</button></span>
           </label>
         </div>
         <label>
@@ -194,7 +194,7 @@
                   <span class="field-label">Summary</span><input name="summary" value="{{ subtask.summary }}" required>
                 </label>
                 <label>
-                  <span class="field-label">Planned date</span><input type="date" name="planned_date" value="{{ subtask.planned_date or '' }}">
+                  <span class="field-label">Planned date</span><span class="date-control"><input type="date" name="planned_date" value="{{ subtask.planned_date or '' }}"><button class="secondary" type="button" data-today-date aria-label="Set planned date to today">Today</button></span>
                 </label>
               </div>
               <label>
@@ -288,7 +288,7 @@
             <span class="field-label">Details (optional)</span><textarea name="description" placeholder="Details (optional)"></textarea>
           </label>
           <label>
-            <span class="field-label">Planned date</span><input type="date" name="planned_date">
+            <span class="field-label">Planned date</span><span class="date-control"><input type="date" name="planned_date"><button class="secondary" type="button" data-today-date aria-label="Set planned date to today">Today</button></span>
           </label>
           <button type="submit">Add subtask</button>
         </form>{% endif %}

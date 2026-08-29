@@ -712,6 +712,50 @@ def test_ticket_forms_group_summary_date_and_category_responsively() -> None:
     assert "Category: Form layout category" in edit_form
 
 
+def test_ticket_date_fields_offer_today_quick_actions() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(
+            summary="Today action parent",
+            planned_date=date(2026, 8, 28),
+            position=0,
+        )
+        subtask = Ticket(
+            summary="Today action subtask",
+            planned_date=date(2026, 8, 27),
+            position=0,
+            parent=parent,
+        )
+        db.add(parent)
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    page = client.get("/legacy")
+
+    assert page.status_code == 200
+    create_form = page.text.split('<form method="post" action="/tickets" data-ajax-form>', 1)[
+        1
+    ].split("</form>", 1)[0]
+    edit_form = page.text.split(f'action="/tickets/{parent_id}"', 1)[1].split("</form>", 1)[0]
+    subtask_edit_form = page.text.split(f'action="/subtasks/{subtask_id}"', 1)[1].split(
+        "</form>", 1
+    )[0]
+    new_subtask_form = page.text.split(f'action="/tickets/{parent_id}/subtasks"', 1)[1].split(
+        "</form>", 1
+    )[0]
+
+    for form in (create_form, edit_form, subtask_edit_form, new_subtask_form):
+        assert form.count("data-today-date") == 1
+        assert form.index('name="planned_date"') < form.index("data-today-date")
+        assert 'type="button"' in form
+        assert 'aria-label="Set planned date to today"' in form
+    assert 'value="2026-08-28"' in edit_form
+    assert 'value="2026-08-27"' in subtask_edit_form
+    assert "function localDateValue()" in page.text
+    assert "input.value = localDateValue();" in page.text
+    assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in page.text
+
+
 def test_edit_cannot_change_a_ticket_category() -> None:
     with SessionLocal() as db:
         original = Category(name="Original edit category")
@@ -3040,3 +3084,59 @@ def test_subtask_completion_rejects_missing_ids_and_top_level_tickets() -> None:
         top_level = db.get(Ticket, top_level_id)
         assert top_level is not None
         assert top_level.local_completed is False
+
+
+def test_spa_subtask_dates_are_created_and_updated() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="SPA date parent", position=211)
+        db.add(parent)
+        db.commit()
+        parent_id = parent.id
+
+    create_response = client.post(
+        f"/api/tickets/{parent_id}/subtasks",
+        json={
+            "summary": "SPA date child",
+            "description": "",
+            "planned_date": "2026-08-29",
+        },
+    )
+
+    assert create_response.status_code == 200
+    with SessionLocal() as db:
+        created = db.scalar(
+            select(Ticket).where(
+                Ticket.parent_id == parent_id,
+                Ticket.summary == "SPA date child",
+            )
+        )
+        assert created is not None
+        subtask_id = created.id
+        assert created.planned_date == date(2026, 8, 29)
+
+    parent_state = next(
+        ticket for ticket in create_response.json()["state"]["tickets"] if ticket["id"] == parent_id
+    )
+    assert parent_state["subtasks"][0]["planned_date"] == "2026-08-29"
+
+    update_response = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={
+            "summary": "SPA date child",
+            "description": "Updated",
+            "planned_date": "2026-09-01",
+        },
+    )
+
+    assert update_response.status_code == 200
+    updated_subtask = next(
+        subtask
+        for ticket in update_response.json()["state"]["tickets"]
+        for subtask in ticket["subtasks"]
+        if subtask["id"] == subtask_id
+    )
+    assert updated_subtask["planned_date"] == "2026-09-01"
+    with SessionLocal() as db:
+        persisted = db.get(Ticket, subtask_id)
+        assert persisted is not None
+        assert persisted.planned_date == date(2026, 9, 1)

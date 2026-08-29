@@ -34,10 +34,14 @@ h3 { margin: 0; font-size: 1.15rem; }
 .details-form { margin-top: 18px; }
 .form { display: grid; gap: 18px; }
 .form label, .inline-form label { display: grid; gap: 7px; color: #a9b8ca; font-size: .86rem; font-weight: 600; }
+.date-control { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.date-control > .p-datepicker, .date-control > .p-inputtext { flex: 1; min-width: 0; }
+.date-control > .p-button { flex: 0 0 auto; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .subtask-builder { display: grid; gap: 12px; padding-top: 18px; border-top: 1px solid #2a405d; }
 .draft-row, .subtask-row, .inline-form { display: flex; align-items: center; gap: 8px; }
 .draft-row > .p-inputtext:first-child, .subtask-row > .p-inputtext:first-child { flex: 1; }
+.draft-row > .date-control, .subtask-row > .date-control { flex: 1 1 10rem; }
 .category-list { margin-top: 24px; }
 .category-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #2a405d; }
 .category-item i { margin-right: 10px; color: #6ee7c2; }
@@ -45,4 +49,4 @@ h3 { margin: 0; font-size: 1.15rem; }
 .empty-state { display: grid; justify-items: center; gap: 8px; padding: 46px 20px; color: #93a4ba; text-align: center; }
 .empty-state i { color: #6ee7c2; font-size: 2rem; }
 @media (max-width: 760px) { .topbar, .hero { display: block; } .topbar nav { justify-content: flex-start; margin-top: 22px; } .hero .p-button { margin-top: 20px; } .ticket-section { padding: 18px; } }
-@media (max-width: 520px) { .two-col, .draft-row { grid-template-columns: 1fr; display: grid; } .inline-form { align-items: stretch; flex-direction: column; } }
+@media (max-width: 520px) { .two-col, .draft-row, .subtask-row { grid-template-columns: 1fr; display: grid; } .inline-form { align-items: stretch; flex-direction: column; } }
