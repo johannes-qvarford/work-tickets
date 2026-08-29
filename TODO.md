@@ -80,7 +80,7 @@
 
   Treat an item already in the requested target status as successfully transitioned so retries are idempotent.
 
-- [ ] Add a `Ready to Merge` action to each Reviews item.
+- [x] Add a `Ready to Merge` action to each Reviews item.
 
   There is no separate merge button. The action should perform the full review and merge workflow described below. It should transition the Jira issue to `Ready to Merge` and add the Jira comment `Tested and reviewed.`
 
