@@ -16,7 +16,7 @@
 
   Moving the item at position 2 before the item at position 1 should continue to work. Moving the item at position 1 after the item at position 2 must also swap the items correctly. The insertion index must account for removing the dragged item before calculating the final position.
 
-- [ ] Remove the ticket and subtask up/down arrow controls.
+- [x] Remove the ticket and subtask up/down arrow controls.
 
   Dragging is the supported reordering interaction.
 
