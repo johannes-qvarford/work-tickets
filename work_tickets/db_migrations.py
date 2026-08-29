@@ -98,12 +98,6 @@ def _prepare_legacy_schema(connection: Connection) -> None:
                 "ALTER TABLE jira_config "
                 "ADD COLUMN browser_base_url VARCHAR(300) NOT NULL DEFAULT ''"
             )
-            connection.execute(
-                text(
-                    "UPDATE jira_config SET browser_base_url = base_url "
-                    "WHERE browser_base_url IS NULL OR browser_base_url = ''"
-                )
-            )
 
     _validate_current_schema(connection)
 

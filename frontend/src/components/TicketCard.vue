@@ -21,7 +21,7 @@ export interface Ticket {
   subtasks: Ticket[];
 }
 
-const props = defineProps<{ ticket: Ticket; categoryName: string }>();
+const props = defineProps<{ ticket: Ticket; categoryName: string; browserBaseUrl: string }>();
 const emit = defineEmits<{
   toggle: [];
   sync: [];
@@ -40,6 +40,11 @@ function todayValue() {
   return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 }
 
+function jiraIssueUrl(issueKey: string | null) {
+  const browserBaseUrl = props.browserBaseUrl.trim().replace(/\/+$/, "");
+  return browserBaseUrl && issueKey ? `${browserBaseUrl}/browse/${encodeURIComponent(issueKey)}` : null;
+}
+
 function saveDraftSubtask() {
   if (!draftSubtask.value.summary.trim()) return;
   emit("addSubtask", props.ticket, draftSubtask.value);
@@ -53,7 +58,9 @@ function saveDraftSubtask() {
       <div class="ticket-title">
         <div>
           <span class="ticket-marker">{{ ticket.local_completed ? "✓" : "○" }}</span>
-          <strong>{{ ticket.summary }}</strong>
+           <strong>{{ ticket.summary }}</strong>
+           <a v-if="jiraIssueUrl(ticket.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(ticket.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ ticket.jira_issue_key }})</a>
+           <span v-else-if="ticket.jira_issue_key" class="jira-key">({{ ticket.jira_issue_key }})</span>
           <div class="ticket-meta">
             {{ categoryName }} · {{ ticket.planned_date || "Unscheduled" }}
             <span v-if="ticket.jira_status_name"> · Jira: {{ ticket.jira_status_name }}</span>
@@ -90,8 +97,10 @@ function saveDraftSubtask() {
         <span v-else class="ticket-meta">Done items can only be marked active.</span>
          <h4>Subtasks ({{ ticket.subtasks.length }})</h4>
          <div v-for="subtask in ticket.subtasks" :key="subtask.id" class="subtask-row">
-           <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" />
-           <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
+            <a v-if="jiraIssueUrl(subtask.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(subtask.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ subtask.jira_issue_key }})</a>
+            <span v-else-if="subtask.jira_issue_key" class="jira-key">({{ subtask.jira_issue_key }})</span>
+            <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" />
+            <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
            <div v-if="!subtask.local_completed" class="date-control">
              <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" />
              <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" />

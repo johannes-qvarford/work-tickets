@@ -2202,7 +2202,7 @@ def test_synced_ticket_label_links_to_jira_issue() -> None:
     assert 'href="https://jira.example.test/browse/WORK-42"' in page.text
     assert 'target="_blank"' in page.text
     assert 'rel="noopener noreferrer"' in page.text
-    assert ">WORK-42</a>" in page.text
+    assert ">(WORK-42)</a>" in page.text
 
 
 def test_synced_ticket_label_uses_configured_browser_base_url() -> None:
@@ -2213,7 +2213,7 @@ def test_synced_ticket_label_uses_configured_browser_base_url() -> None:
                 JiraConfig(
                     id=1,
                     base_url="https://api.atlassian.com/ex/jira/cloud-id",
-                    browser_base_url="https://johannesqvarford.atlassian.net",
+                    browser_base_url="https://johannesqvarford.atlassian.net/",
                     email="person@example.test",
                     api_token="test-token",
                     project_key="SCRUM",
@@ -2222,7 +2222,7 @@ def test_synced_ticket_label_uses_configured_browser_base_url() -> None:
             )
         else:
             config.base_url = "https://api.atlassian.com/ex/jira/cloud-id"
-            config.browser_base_url = "https://johannesqvarford.atlassian.net"
+            config.browser_base_url = "https://johannesqvarford.atlassian.net/"
             config.project_key = "SCRUM"
         ticket = Ticket(summary="Browser linked ticket", position=104, jira_issue_key="SCRUM-5")
         db.add(ticket)
@@ -2234,6 +2234,59 @@ def test_synced_ticket_label_uses_configured_browser_base_url() -> None:
     assert 'href="https://johannesqvarford.atlassian.net/browse/SCRUM-5"' in page.text
     assert page.text.count('href="https://johannesqvarford.atlassian.net/browse/SCRUM-5"') == 1
     assert 'href="https://api.atlassian.com/ex/jira/cloud-id/browse/SCRUM-5"' not in page.text
+
+
+def test_synced_subtask_labels_link_and_fall_back_without_browser_url() -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            db.add(
+                JiraConfig(
+                    id=1,
+                    base_url="https://api.atlassian.com/ex/jira/cloud-id",
+                    browser_base_url="https://jira.example.test/",
+                    email="person@example.test",
+                    api_token="test-token",
+                    project_key="SCRUM",
+                    issue_type="Task",
+                )
+            )
+        else:
+            config.base_url = "https://api.atlassian.com/ex/jira/cloud-id"
+            config.browser_base_url = "https://jira.example.test/"
+        parent = Ticket(summary="Subtask label parent", position=105, jira_issue_key="SCRUM-700")
+        child = Ticket(
+            summary="Subtask label child",
+            position=0,
+            parent=parent,
+            jira_issue_key="SCRUM-701",
+        )
+        db.add_all([parent, child])
+        db.commit()
+
+    page = client.get("/legacy")
+
+    assert page.status_code == 200
+    assert 'href="https://jira.example.test/browse/SCRUM-700"' in page.text
+    assert 'href="https://jira.example.test/browse/SCRUM-701"' in page.text
+    assert page.text.count('target="_blank"') >= 2
+    assert page.text.count('rel="noopener noreferrer"') >= 2
+    assert ">(SCRUM-700)</a>" in page.text
+    assert ">(SCRUM-701)</a>" in page.text
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = ""
+        db.commit()
+
+    page = client.get("/legacy")
+
+    assert page.status_code == 200
+    assert 'class="badge">(SCRUM-700)</span>' in page.text
+    assert 'class="badge">(SCRUM-701)</span>' in page.text
+    assert 'href="https://api.atlassian.com/ex/jira/cloud-id/browse/SCRUM-700"' not in page.text
+    assert 'href="https://api.atlassian.com/ex/jira/cloud-id/browse/SCRUM-701"' not in page.text
 
 
 def test_saving_jira_config_persists_separate_browser_base_url() -> None:
@@ -2256,6 +2309,89 @@ def test_saving_jira_config_persists_separate_browser_base_url() -> None:
         assert config is not None
         assert config.base_url == "https://api.atlassian.com/ex/jira/cloud-id"
         assert config.browser_base_url == "https://johannesqvarford.atlassian.net"
+
+
+def test_api_saving_jira_config_preserves_blank_browser_base_url_and_hides_api_url() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="API blank browser URL", position=106, jira_issue_key="BLANK-API-1")
+        child = Ticket(
+            summary="API blank browser URL subtask",
+            position=0,
+            parent=parent,
+            jira_issue_key="BLANK-API-2",
+        )
+        db.add_all([parent, child])
+        db.commit()
+
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://api.atlassian.com/ex/jira/cloud-id",
+            "browser_base_url": "",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "blank",
+            "issue_type": "Task",
+        },
+    )
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.browser_base_url == ""
+
+    page = client.get("/legacy")
+
+    assert 'class="badge">(BLANK-API-1)</span>' in page.text
+    assert 'class="badge">(BLANK-API-2)</span>' in page.text
+    assert 'href="https://api.atlassian.com/ex/jira/cloud-id/browse/BLANK-API-1"' not in page.text
+    assert 'href="https://api.atlassian.com/ex/jira/cloud-id/browse/BLANK-API-2"' not in page.text
+
+
+def test_legacy_saving_jira_config_preserves_blank_browser_base_url_and_hides_api_url() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(
+            summary="Legacy blank browser URL", position=107, jira_issue_key="BLANK-LEGACY-1"
+        )
+        child = Ticket(
+            summary="Legacy blank browser URL subtask",
+            position=0,
+            parent=parent,
+            jira_issue_key="BLANK-LEGACY-2",
+        )
+        db.add_all([parent, child])
+        db.commit()
+
+    response = client.post(
+        "/jira/config",
+        data={
+            "base_url": "https://api.atlassian.com/ex/jira/cloud-id",
+            "browser_base_url": "",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "legacy",
+            "issue_type": "Task",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.browser_base_url == ""
+
+    page = client.get("/legacy")
+
+    assert 'class="badge">(BLANK-LEGACY-1)</span>' in page.text
+    assert 'class="badge">(BLANK-LEGACY-2)</span>' in page.text
+    assert (
+        'href="https://api.atlassian.com/ex/jira/cloud-id/browse/BLANK-LEGACY-1"' not in page.text
+    )
+    assert (
+        'href="https://api.atlassian.com/ex/jira/cloud-id/browse/BLANK-LEGACY-2"' not in page.text
+    )
 
 
 def test_saving_jira_config_keeps_validate_form_field_compatible(monkeypatch) -> None:
@@ -2287,7 +2423,9 @@ def test_saving_jira_config_keeps_validate_form_field_compatible(monkeypatch) ->
     assert "Jira%20connection%20validated%20and%20saved" in response.headers["location"]
 
 
-def test_init_db_migrates_existing_jira_config_to_browser_base_url(tmp_path, monkeypatch) -> None:
+def test_init_db_migrates_existing_jira_config_with_blank_browser_base_url(
+    tmp_path, monkeypatch
+) -> None:
     legacy_engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     with legacy_engine.begin() as connection:
         connection.execute(
@@ -2326,7 +2464,7 @@ def test_init_db_migrates_existing_jira_config_to_browser_base_url(tmp_path, mon
             text("SELECT browser_base_url FROM jira_config WHERE id = 1")
         )
     assert "browser_base_url" in columns
-    assert browser_base_url == "https://jira.example.test"
+    assert browser_base_url == ""
 
 
 def test_sync_without_configuration_shows_error() -> None:

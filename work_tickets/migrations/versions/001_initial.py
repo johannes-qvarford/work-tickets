@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect
 
 revision = "001_initial"
 down_revision = None
@@ -59,12 +59,6 @@ def upgrade() -> None:
                 server_default="",
                 nullable=False,
             ),
-        )
-        op.execute(
-            text(
-                "UPDATE jira_config SET browser_base_url = base_url "
-                "WHERE browser_base_url IS NULL OR browser_base_url = ''"
-            )
         )
 
     if "tickets" not in tables:

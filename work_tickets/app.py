@@ -318,7 +318,7 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
     existing = db.get(JiraConfig, 1)
     token = payload.api_token.strip() or (existing.api_token if existing is not None else "")
     normalized_base_url = payload.base_url.strip().rstrip("/")
-    browser_base_url = payload.browser_base_url.strip().rstrip("/") or normalized_base_url
+    browser_base_url = payload.browser_base_url.strip().rstrip("/")
     values = {
         "base_url": normalized_base_url,
         "browser_base_url": browser_base_url,
@@ -335,7 +335,7 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
             {"ok": False, "message": "All Jira connection fields are required."}, status_code=422
         )
     for url_key, label in (("base_url", "Jira API URL"), ("browser_base_url", "Jira browser URL")):
-        if not values[url_key].startswith(("https://", "http://")):
+        if values[url_key] and not values[url_key].startswith(("https://", "http://")):
             return JSONResponse(
                 {"ok": False, "message": f"{label} must start with http:// or https://."},
                 status_code=422,
@@ -549,7 +549,7 @@ def save_jira_config(
     normalized_base_url = base_url.strip().rstrip("/")
     values = {
         "base_url": normalized_base_url,
-        "browser_base_url": browser_base_url.strip().rstrip("/") or normalized_base_url,
+        "browser_base_url": browser_base_url.strip().rstrip("/"),
         "email": email.strip(),
         "api_token": token,
         "project_key": project_key.strip().upper(),
@@ -560,7 +560,7 @@ def save_jira_config(
     if not all(values[key] for key in required_keys):
         return web.redirect_with_message("error", "All Jira connection fields are required.")
     for url_key, label in (("base_url", "Jira API URL"), ("browser_base_url", "Jira browser URL")):
-        if not values[url_key].startswith(("https://", "http://")):
+        if values[url_key] and not values[url_key].startswith(("https://", "http://")):
             return web.redirect_with_message(
                 "error", f"{label} must start with http:// or https://."
             )
