@@ -56,7 +56,7 @@
 
   Replace `<ticket browser URL>` with the configured Jira browser URL and the ticket's Jira key.
 
-- [ ] Add a local projects directory setting.
+- [x] Add a local projects directory setting.
 
   The setting selects the root directory containing local projects. Refine should use `<local projects>/<component>` as the subprocess working directory and inherit the environment of the server process.
 
