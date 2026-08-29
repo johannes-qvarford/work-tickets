@@ -22,13 +22,6 @@ export function clearSubtaskDragState() {
   clearSubtaskDragOverState();
 }
 
-export function displayedActiveItems(
-  items: readonly ReorderableItem[],
-  isDisplayed: (item: ReorderableItem) => boolean,
-): ReorderableItem[] {
-  return items.filter((item) => !item.local_completed && isDisplayed(item));
-}
-
 /** Return the server target index after removing the dragged active item. */
 export function dropTargetIndex(
   items: readonly ReorderableItem[],
@@ -53,7 +46,7 @@ export function displayedDropTargetIndex(
   afterTarget: boolean,
   isDisplayed: (item: ReorderableItem) => boolean,
 ): number | null {
-  const displayedItems = displayedActiveItems(items, isDisplayed);
+  const displayedItems = items.filter((item) => !item.local_completed && isDisplayed(item));
   if (!displayedItems.some((item) => item.id === sourceId)) return null;
   if (!displayedItems.some((item) => item.id === targetId)) return null;
   return dropTargetIndex(items, sourceId, targetId, afterTarget);
