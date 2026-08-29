@@ -70,6 +70,9 @@ class JiraConfigPayload(BaseModel):
     project_key: str = ""
     issue_type: str = "Task"
     completed_statuses: str = "Done"
+    in_review_status: str = "In Review"
+    ready_to_merge_status: str = "Ready to Merge"
+    ready_to_deploy_status: str = "Ready to Deploy"
     validate_connection: bool = Field(default=False, alias="validate")
 
     model_config = {"populate_by_name": True}
@@ -506,6 +509,9 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
         "project_key": payload.project_key.strip().upper(),
         "issue_type": payload.issue_type.strip(),
         "completed_statuses": payload.completed_statuses.strip() or "Done",
+        "in_review_status": payload.in_review_status.strip() or "In Review",
+        "ready_to_merge_status": payload.ready_to_merge_status.strip() or "Ready to Merge",
+        "ready_to_deploy_status": payload.ready_to_deploy_status.strip() or "Ready to Deploy",
     }
     if not all(
         values[key] for key in ("base_url", "email", "api_token", "project_key", "issue_type")

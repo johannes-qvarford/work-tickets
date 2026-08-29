@@ -233,6 +233,50 @@ class JiraClient:
                 return issues
             start_at += len(page)
 
+    def transition_issue(
+        self,
+        key: str,
+        target_status: str,
+        *,
+        current_status: str | None = None,
+    ) -> JiraIssue:
+        """Move an issue using the transition whose destination has the target name."""
+        current_issue: JiraIssue | None = None
+        if current_status is None:
+            current_issue = self.get_issue(key)
+            current_status = current_issue.status_name
+        if current_status == target_status:
+            return current_issue or JiraIssue(key=key, status_name=current_status)
+
+        transitions = self._request_dict(
+            "GET",
+            self._api_path(f"issue/{quote(key, safe='')}/transitions"),
+        ).get("transitions")
+        if not isinstance(transitions, list):
+            raise JiraError(f"Jira returned an unexpected transitions response for issue {key}.")
+
+        transition_id: str | None = None
+        for transition in transitions:
+            if not isinstance(transition, dict):
+                continue
+            destination = transition.get("to")
+            if not isinstance(destination, dict) or destination.get("name") != target_status:
+                continue
+            raw_id = transition.get("id")
+            if isinstance(raw_id, (str, int)) and str(raw_id):
+                transition_id = str(raw_id)
+                break
+        if transition_id is None:
+            raise JiraError(f"Jira issue {key} has no transition to status '{target_status}'.")
+
+        self._request(
+            "POST",
+            self._api_path(f"issue/{quote(key, safe='')}/transitions"),
+            expect_json=False,
+            json={"transition": {"id": transition_id}},
+        )
+        return self.get_issue(key)
+
     def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
         """Fetch an issue and the subtasks Jira currently links beneath it."""
         response = self._request_dict(

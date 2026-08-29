@@ -27,7 +27,11 @@ from work_tickets.jira import (  # noqa: E402
     JiraIssue,
     JiraIssueWithSubtasks,
 )
-from work_tickets.jira_service import canonicalize_jira_key, save_jira_issue  # noqa: E402
+from work_tickets.jira_service import (  # noqa: E402
+    canonicalize_jira_key,
+    save_jira_issue,
+    transition_jira_issue,
+)
 from work_tickets.models import (  # noqa: E402
     Base,
     Category,
@@ -637,6 +641,50 @@ def test_api_saves_jira_config_and_preserves_blank_browser_url() -> None:
         assert config.base_url == "https://api.atlassian.com/ex/jira/cloud-id"
         assert config.browser_base_url == ""
         assert config.project_key == "WORK"
+        assert config.in_review_status == "In Review"
+        assert config.ready_to_merge_status == "Ready to Merge"
+        assert config.ready_to_deploy_status == "Ready to Deploy"
+
+
+def test_api_saves_configured_jira_workflow_statuses() -> None:
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+            "in_review_status": "Awaiting Review",
+            "ready_to_merge_status": "Merge Queue",
+            "ready_to_deploy_status": "Deployment Queue",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"]["jira_config"] == {
+        "base_url": "https://jira.example.test",
+        "browser_base_url": "",
+        "local_projects_directory": "",
+        "email": "person@example.test",
+        "project_key": "WORK",
+        "issue_type": "Task",
+        "completed_statuses": "Done",
+        "in_review_status": "Awaiting Review",
+        "ready_to_merge_status": "Merge Queue",
+        "ready_to_deploy_status": "Deployment Queue",
+    }
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.in_review_status == "Awaiting Review"
+        assert config.ready_to_merge_status == "Merge Queue"
+        assert config.ready_to_deploy_status == "Deployment Queue"
+        config.in_review_status = "In Review"
+        config.ready_to_merge_status = "Ready to Merge"
+        config.ready_to_deploy_status = "Ready to Deploy"
+        db.commit()
 
 
 def test_api_saves_only_existing_local_projects_directory_and_rejects_missing_path(
@@ -789,8 +837,10 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
         def search_issues(self, jql: str) -> list[JiraIssue]:
             calls.append(jql)
             return [
-                JiraIssue(key="WORK-501", summary="Local review", status_name="In Review"),
-                JiraIssue(key="WORK-502", summary="Remote-only review", status_name="In Review"),
+                JiraIssue(key="WORK-501", summary="Local review", status_name="Awaiting Review"),
+                JiraIssue(
+                    key="WORK-502", summary="Remote-only review", status_name="Awaiting Review"
+                ),
             ]
 
         def get_issue(self, key: str) -> JiraIssue:
@@ -801,7 +851,7 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
                 summary="Updated local review",
                 description="Review details",
                 issue_type_name="Story",
-                status_name="In Review",
+                status_name="Awaiting Review",
             )
 
         def close(self) -> None:
@@ -823,6 +873,7 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
             db.add(config)
         config.project_key = "WORK"
         config.issue_type = "Story"
+        config.in_review_status = "Awaiting Review"
         local_ticket = Ticket(summary="Local ticket", jira_issue_key="work-501", position=0)
         db.add(local_ticket)
         db.commit()
@@ -831,7 +882,7 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
 
     assert response.status_code == 200
     assert calls == [
-        'project = "WORK" AND issuetype = "Story" AND status = "In Review" '
+        'project = "WORK" AND issuetype = "Story" AND status = "Awaiting Review" '
         "AND assignee = currentUser() ORDER BY key"
     ]
     reviews = response.json()["reviews"]
@@ -892,6 +943,134 @@ def test_jira_client_searches_issues_with_paging_fields() -> None:
     assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
 
 
+def test_jira_client_transitions_by_destination_status() -> None:
+    requests: list[httpx.Request] = []
+    transitioned = False
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal transitioned
+        requests.append(request)
+        if request.method == "GET" and request.url.path.endswith("/transitions"):
+            return httpx.Response(
+                200,
+                json={
+                    "transitions": [
+                        {"id": "11", "name": "Unrelated", "to": {"name": "Done"}},
+                        {"id": "42", "name": "Advance", "to": {"name": "Ready to Merge"}},
+                    ]
+                },
+            )
+        if request.method == "POST":
+            transitioned = True
+            assert json.loads(request.content) == {"transition": {"id": "42"}}
+            return httpx.Response(204)
+        return httpx.Response(
+            200,
+            json={
+                "key": "WORK-504",
+                "fields": {
+                    "summary": "Review item",
+                    "status": {"name": "Ready to Merge" if transitioned else "In Progress"},
+                },
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    issue = jira.transition_issue("WORK-504", "Ready to Merge")
+    jira.close()
+
+    assert issue == JiraIssue(key="WORK-504", summary="Review item", status_name="Ready to Merge")
+    assert [request.method for request in requests] == ["GET", "GET", "POST", "GET"]
+    assert all(request.method != "PUT" for request in requests)
+
+
+def test_jira_client_treats_current_target_status_as_idempotent() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "key": "WORK-505",
+                "fields": {"summary": "Already ready", "status": {"name": "Ready to Merge"}},
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    issue = jira.transition_issue("WORK-505", "Ready to Merge")
+    jira.close()
+
+    assert issue.status_name == "Ready to Merge"
+    assert [request.method for request in requests] == ["GET"]
+
+
+def test_jira_client_reports_missing_transition_destination() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"transitions": []})
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    try:
+        jira.transition_issue("WORK-506", "Ready to Deploy", current_status="In Progress")
+    except JiraError as exc:
+        assert str(exc) == "Jira issue WORK-506 has no transition to status 'Ready to Deploy'."
+    else:
+        raise AssertionError("Expected missing transition destination to fail")
+    finally:
+        jira.close()
+
+
+def test_transition_service_treats_current_target_status_as_idempotent() -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.ready_to_merge_status == "Ready to Merge"
+
+        def get_issue(self, key: str) -> JiraIssue:
+            return JiraIssue(key=key, status_name="Ready to Merge")
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            raise AssertionError("an already-target issue must not be transitioned")
+
+        def close(self) -> None:
+            pass
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.ready_to_merge_status = "Ready to Merge"
+        db.commit()
+        result = transition_jira_issue(
+            "work-507",
+            config.ready_to_merge_status,
+            db,
+            jira_client_factory=FakeJiraClient,
+        )
+
+    assert result == JiraIssue(key="WORK-507", status_name="Ready to Merge")
+
+
 def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
     app_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.vue").read_text()
 
@@ -900,6 +1079,14 @@ def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
     assert 'label="Refresh"' in app_source
     assert "review.error" in app_source
     assert "Not in local tickets" in app_source
+
+
+def test_workflow_status_settings_are_present_in_frontend() -> None:
+    app_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.vue").read_text()
+
+    assert 'v-model="settings.in_review_status"' in app_source
+    assert 'v-model="settings.ready_to_merge_status"' in app_source
+    assert 'v-model="settings.ready_to_deploy_status"' in app_source
 
 
 def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
