@@ -62,6 +62,7 @@ def ticket_list_data(db: Session) -> dict[str, object]:
                 "base_url": config.base_url,
                 "browser_base_url": config.browser_base_url,
                 "local_projects_directory": config.local_projects_directory,
+                "gitlab_base_url": config.gitlab_base_url,
                 "email": config.email,
                 "project_key": config.project_key,
                 "issue_type": config.issue_type,

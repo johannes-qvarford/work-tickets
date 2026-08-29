@@ -18,8 +18,10 @@ _REQUIRED_COLUMNS = {
         "base_url",
         "browser_base_url",
         "local_projects_directory",
+        "gitlab_base_url",
         "email",
         "api_token",
+        "gitlab_token",
         "project_key",
         "issue_type",
         "completed_statuses",
@@ -51,6 +53,8 @@ _INITIAL_REQUIRED_COLUMNS = {
     "jira_config": _REQUIRED_COLUMNS["jira_config"]
     - {
         "local_projects_directory",
+        "gitlab_base_url",
+        "gitlab_token",
         "in_review_status",
         "ready_to_merge_status",
         "ready_to_deploy_status",
