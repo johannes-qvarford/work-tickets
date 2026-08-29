@@ -2,7 +2,7 @@
 
 ## Ticket List and Editing
 
-- [ ] Make the ticket list a vertical list.
+- [x] Make the ticket list a vertical list.
 
   Each ticket should occupy the full available horizontal space of its container rather than being laid out as a multi-column grid.
 
