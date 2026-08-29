@@ -135,7 +135,8 @@ async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
         except refine.RefineError as exc:
             await refine.send_error(websocket, str(exc))
             return
-    await refine.run_refine(websocket, prompt, working_directory)
+    assert ticket.jira_issue_key is not None
+    await refine.run_refine(websocket, ticket.jira_issue_key, prompt, working_directory)
 
 
 @app.get("/", response_class=HTMLResponse)

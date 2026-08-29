@@ -2,18 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from .jira_service import canonicalize_jira_key
 from .local_projects import is_safe_local_component_name
 from .models import JiraConfig, Ticket
 
 
 class RefineError(Exception):
     """An expected, user-facing Refine error."""
+
+
+class _ClientReservation:
+    def __init__(self) -> None:
+        self.acquired = False
 
 
 def refine_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
@@ -28,7 +36,8 @@ def refine_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
         raise RefineError("The configured Jira browser URL is invalid.") from exc
     if browser_url.scheme.lower() not in {"http", "https"} or not browser_url.netloc:
         raise RefineError("The configured Jira browser URL is invalid.")
-    path = f"{browser_url.path.rstrip('/')}/browse/{quote(ticket.jira_issue_key, safe='')}"
+    jira_key = canonicalize_jira_key(ticket.jira_issue_key)
+    path = f"{browser_url.path.rstrip('/')}/browse/{quote(jira_key, safe='')}"
     return f"Refine {urlunsplit((browser_url.scheme, browser_url.netloc, path, '', ''))}"
 
 
@@ -67,99 +76,387 @@ async def send_error(websocket: WebSocket, message: str) -> None:
     try:
         await websocket.send_text(f"\r\n[Refine error] {message}\r\n")
         await websocket.close(code=1011)
-    except (RuntimeError, WebSocketDisconnect):
+    except (OSError, RuntimeError, WebSocketDisconnect):
         pass
-
-
-async def _forward_output(process: asyncio.subprocess.Process, websocket: WebSocket) -> None:
-    assert process.stdout is not None
-    while chunk := await process.stdout.read(4096):
-        await websocket.send_text(chunk.decode(errors="replace"))
-
-
-async def _forward_input(process: asyncio.subprocess.Process, websocket: WebSocket) -> bool:
-    try:
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                return False
-            data = message.get("text")
-            if data is None:
-                raw_data = message.get("bytes")
-                data = raw_data.decode(errors="replace") if raw_data is not None else ""
-            if process.stdin is not None and data:
-                process.stdin.write(data.encode())
-                await process.stdin.drain()
-    except (OSError, WebSocketDisconnect, RuntimeError):
-        return False
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
     if process.returncode is not None:
         return
-    process.terminate()
+    try:
+        process.terminate()
+    except OSError:
+        if process.returncode is not None:
+            return
     try:
         await asyncio.wait_for(process.wait(), timeout=5)
     except TimeoutError:
-        process.kill()
+        try:
+            process.kill()
+        except OSError:
+            if process.returncode is not None:
+                return
         await process.wait()
 
 
-async def run_refine(websocket: WebSocket, prompt: str, working_directory: Path) -> None:
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "opencode",
-            "--prompt",
-            prompt,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(working_directory),
-            env=os.environ.copy(),
+class RefineSession:
+    """Own one opencode process and fan its terminal stream out to its clients."""
+
+    max_buffer_size = 256 * 1024
+
+    def __init__(
+        self,
+        jira_key: str,
+        prompt: str,
+        working_directory: Path,
+        on_finished: Callable[[RefineSession], Awaitable[None]],
+        stale_after: float,
+    ) -> None:
+        self.jira_key = jira_key
+        self.prompt = prompt
+        self.working_directory = working_directory
+        self._on_finished = on_finished
+        self._stale_after = stale_after
+        self._lock = asyncio.Lock()
+        self._stdin_lock = asyncio.Lock()
+        self._clients: set[WebSocket] = set()
+        self._pending_clients = 0
+        self._output: deque[str] = deque()
+        self._output_size = 0
+        self._process: asyncio.subprocess.Process | None = None
+        self._error: str | None = None
+        self._stopping = False
+        self._ready = asyncio.Event()
+        self.finished = asyncio.Event()
+        self._stale_task: asyncio.Task[None] | None = None
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def reserve_client(self, reservation: _ClientReservation | None = None) -> bool:
+        async with self._lock:
+            if self._stopping or self.finished.is_set():
+                return False
+            self._pending_clients += 1
+            if reservation is not None:
+                reservation.acquired = True
+            self._cancel_stale_locked()
+            return True
+
+    async def release_client(self) -> None:
+        async with self._lock:
+            if not self._pending_clients:
+                return
+            self._pending_clients -= 1
+            self._schedule_stale_locked()
+
+    async def stop_if_idle(self) -> None:
+        async with self._lock:
+            if self._clients or self._pending_clients or self._stopping:
+                return
+            self._stopping = True
+            stale_task = self._stale_task
+            self._cancel_stale_locked()
+            startup_task = self._task
+            if startup_task is asyncio.current_task():
+                startup_task = None
+            elif startup_task is not None and not startup_task.done():
+                startup_task.cancel()
+
+        if stale_task is not None and stale_task is not asyncio.current_task():
+            await asyncio.gather(stale_task, return_exceptions=True)
+        if startup_task is not None:
+            await asyncio.gather(startup_task, return_exceptions=True)
+
+        process = self._process
+        if process is not None:
+            await _stop_process(process)
+
+    async def attach(self, websocket: WebSocket) -> tuple[bool, str | None]:
+        pending = True
+        try:
+            await self._ready.wait()
+            async with self._lock:
+                self._pending_clients -= 1
+                pending = False
+                if self._error is not None:
+                    return True, self._error
+                if self._stopping or self.finished.is_set():
+                    return False, None
+                self._cancel_stale_locked()
+                self._clients.add(websocket)
+                for output in self._output:
+                    await websocket.send_text(output)
+                return True, None
+        except (OSError, RuntimeError, WebSocketDisconnect):
+            async with self._lock:
+                if pending:
+                    self._pending_clients -= 1
+                self._clients.discard(websocket)
+                self._schedule_stale_locked()
+            return False, None
+        except asyncio.CancelledError:
+            async with self._lock:
+                if pending:
+                    self._pending_clients -= 1
+                self._clients.discard(websocket)
+                self._schedule_stale_locked()
+            raise
+
+    async def detach(self, websocket: WebSocket) -> None:
+        async with self._lock:
+            self._clients.discard(websocket)
+            self._schedule_stale_locked()
+
+    async def send_input(self, data: str) -> None:
+        if not data:
+            return
+        async with self._stdin_lock:
+            process = self._process
+            if process is None or process.returncode is not None or process.stdin is None:
+                return
+            try:
+                process.stdin.write(data.encode())
+                await process.stdin.drain()
+            except (BrokenPipeError, OSError, RuntimeError):
+                pass
+
+    async def _run(self) -> None:
+        process: asyncio.subprocess.Process | None = None
+        try:
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    "opencode",
+                    "--prompt",
+                    self.prompt,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=str(self.working_directory),
+                    env=os.environ.copy(),
+                )
+            except OSError as exc:
+                self._error = f"Could not start opencode: {exc.strerror or exc}"
+                return
+            self._process = process
+            self._ready.set()
+            if self._stopping:
+                return
+            await self._monitor_process(process)
+        finally:
+            self._ready.set()
+            if process is not None and process.returncode is None:
+                await _stop_process(process)
+            await self._finish(process)
+
+    async def _monitor_process(self, process: asyncio.subprocess.Process) -> None:
+        output_task = asyncio.create_task(self._forward_output(process))
+        wait_task = asyncio.create_task(process.wait())
+        try:
+            await wait_task
+            await output_task
+        except (OSError, RuntimeError, WebSocketDisconnect):
+            if process.returncode is None:
+                await _stop_process(process)
+        finally:
+            if not output_task.done():
+                output_task.cancel()
+            if not wait_task.done():
+                wait_task.cancel()
+            await asyncio.gather(output_task, wait_task, return_exceptions=True)
+
+    async def _forward_output(self, process: asyncio.subprocess.Process) -> None:
+        if process.stdout is None:
+            return
+        while chunk := await process.stdout.read(4096):
+            await self._broadcast(chunk.decode(errors="replace"))
+
+    async def _broadcast(self, output: str) -> None:
+        async with self._lock:
+            self._output.append(output)
+            self._output_size += len(output)
+            while self._output and self._output_size > self.max_buffer_size:
+                self._output_size -= len(self._output.popleft())
+            clients = tuple(self._clients)
+        results = await asyncio.gather(
+            *(self._send_output(websocket, output) for websocket in clients),
+            return_exceptions=False,
         )
-    except OSError as exc:
-        await send_error(websocket, f"Could not start opencode: {exc.strerror or exc}")
+        failed_clients = [
+            websocket for websocket, sent in zip(clients, results, strict=True) if not sent
+        ]
+        if failed_clients:
+            async with self._lock:
+                for websocket in failed_clients:
+                    self._clients.discard(websocket)
+                self._schedule_stale_locked()
+
+    async def _send_output(self, websocket: WebSocket, output: str) -> bool:
+        try:
+            await asyncio.wait_for(websocket.send_text(output), timeout=5)
+        except (OSError, RuntimeError, TimeoutError, WebSocketDisconnect):
+            return False
+        return True
+
+    async def _finish(self, process: asyncio.subprocess.Process | None) -> None:
+        async with self._lock:
+            self._stopping = True
+            self._cancel_stale_locked()
+            clients = tuple(self._clients)
+            self._clients.clear()
+            error = self._error
+            returncode = process.returncode if process is not None else None
+
+        if process is not None and error is None:
+            exit_message = f"\r\n[Refine exited with code {returncode}]\r\n"
+            await asyncio.gather(
+                *(self._close_client(websocket, exit_message) for websocket in clients),
+                return_exceptions=True,
+            )
+
+        await self._on_finished(self)
+        self.finished.set()
+
+    async def _close_client(self, websocket: WebSocket, output: str) -> None:
+        if not await self._send_output(websocket, output):
+            return
+        try:
+            await asyncio.wait_for(websocket.close(code=1000), timeout=5)
+        except (OSError, RuntimeError, TimeoutError, WebSocketDisconnect):
+            pass
+
+    def _cancel_stale_locked(self) -> None:
+        if (
+            self._stale_task is not None
+            and self._stale_task is not asyncio.current_task()
+            and not self._stale_task.done()
+        ):
+            self._stale_task.cancel()
+        self._stale_task = None
+
+    def _schedule_stale_locked(self) -> None:
+        if self._clients or self._pending_clients or self._stopping or self._stale_task is not None:
+            return
+        self._stale_task = asyncio.create_task(self._expire_when_stale())
+
+    async def _expire_when_stale(self) -> None:
+        try:
+            await asyncio.sleep(self._stale_after)
+            await self._on_stale()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            async with self._lock:
+                if self._stale_task is asyncio.current_task():
+                    self._stale_task = None
+
+    async def _on_stale(self) -> None:
+        await self.stop_if_idle()
+
+
+class RefineSessionRegistry:
+    """In-memory Jira-keyed Refine session registry for this server process."""
+
+    def __init__(self, stale_after: float = 300.0) -> None:
+        self._stale_after = stale_after
+        self._lock = asyncio.Lock()
+        self._sessions: dict[str, RefineSession] = {}
+
+    async def _reserve_client(self, session: RefineSession) -> bool:
+        reservation = _ClientReservation()
+        try:
+            return await session.reserve_client(reservation)
+        except asyncio.CancelledError:
+            if reservation.acquired:
+                await session.release_client()
+            raise
+
+    async def attach(
+        self,
+        jira_key: str,
+        prompt: str,
+        working_directory: Path,
+        websocket: WebSocket,
+    ) -> tuple[RefineSession | None, str | None]:
+        canonical_key = canonicalize_jira_key(jira_key)
+        while True:
+            created = False
+            async with self._lock:
+                session = self._sessions.get(canonical_key)
+                if session is None:
+                    session = RefineSession(
+                        canonical_key,
+                        prompt,
+                        working_directory,
+                        self._remove,
+                        self._stale_after,
+                    )
+                    self._sessions[canonical_key] = session
+                    session.start()
+                    created = True
+            try:
+                reserved = await self._reserve_client(session)
+            except asyncio.CancelledError:
+                if created:
+                    await session.stop_if_idle()
+                raise
+            if not reserved:
+                await session.finished.wait()
+                continue
+
+            try:
+                attached, error = await session.attach(websocket)
+            except asyncio.CancelledError:
+                # RefineSession.attach releases its reservation while holding
+                # the session lock before propagating cancellation.
+                if created:
+                    await session.stop_if_idle()
+                raise
+            if attached:
+                if error is not None:
+                    await self._remove(session)
+                return session, error
+            # The old session exited or is being expired. Retry against the
+            # registry so a concurrent reconnect cannot create two processes.
+            await session.finished.wait()
+
+    async def detach(self, session: RefineSession, websocket: WebSocket) -> None:
+        await session.detach(websocket)
+
+    async def _remove(self, session: RefineSession) -> None:
+        async with self._lock:
+            if self._sessions.get(session.jira_key) is session:
+                del self._sessions[session.jira_key]
+
+
+session_registry = RefineSessionRegistry()
+
+
+async def run_refine(
+    websocket: WebSocket,
+    jira_key: str,
+    prompt: str,
+    working_directory: Path,
+) -> None:
+    session, error = await session_registry.attach(jira_key, prompt, working_directory, websocket)
+    if error is not None:
+        await send_error(websocket, error)
+        return
+    if session is None:
         return
 
-    input_task = asyncio.create_task(_forward_input(process, websocket))
-    output_task = asyncio.create_task(_forward_output(process, websocket))
-    wait_task = asyncio.create_task(process.wait())
-    connected = True
     try:
-        done, _ = await asyncio.wait(
-            {input_task, output_task, wait_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if input_task in done:
-            try:
-                connected = input_task.result()
-            except (OSError, RuntimeError, WebSocketDisconnect):
-                connected = False
-        if output_task in done:
-            try:
-                output_task.result()
-            except (OSError, RuntimeError, WebSocketDisconnect):
-                connected = False
-        if not connected:
-            await _stop_process(process)
-        else:
-            await wait_task
-            if not output_task.done():
-                try:
-                    await output_task
-                except (OSError, RuntimeError, WebSocketDisconnect):
-                    connected = False
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            data = message.get("text")
+            if data is None:
+                raw_data = message.get("bytes")
+                data = raw_data.decode(errors="replace") if raw_data is not None else ""
+            await session.send_input(data)
+    except (OSError, RuntimeError, WebSocketDisconnect):
+        pass
     finally:
-        if process.returncode is None:
-            await _stop_process(process)
-        for task in (input_task, output_task, wait_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(input_task, output_task, wait_task, return_exceptions=True)
-
-    if connected:
-        try:
-            await websocket.send_text(f"\r\n[Refine exited with code {process.returncode}]\r\n")
-            await websocket.close(code=1000)
-        except (RuntimeError, WebSocketDisconnect):
-            pass
+        await session_registry.detach(session, websocket)

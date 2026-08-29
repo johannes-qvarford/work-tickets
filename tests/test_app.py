@@ -3,7 +3,7 @@ import atexit
 import json
 import os
 import tempfile
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
@@ -18,6 +18,7 @@ _test_db_path = Path(_test_db_name)
 os.environ["WORK_TICKETS_DATABASE_URL"] = f"sqlite:///{_test_db_path}"
 atexit.register(_test_db_path.unlink, missing_ok=True)
 
+from work_tickets import refine  # noqa: E402
 from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
 from work_tickets.jira import (  # noqa: E402
     JiraApiConventions,
@@ -26,6 +27,7 @@ from work_tickets.jira import (  # noqa: E402
     JiraIssue,
     JiraIssueWithSubtasks,
 )
+from work_tickets.jira_service import canonicalize_jira_key, save_jira_issue  # noqa: E402
 from work_tickets.models import (  # noqa: E402
     Base,
     Category,
@@ -775,6 +777,352 @@ def test_api_jira_config_validation_uses_jira_client(monkeypatch) -> None:
     assert response.json()["message"] == "Jira connection validated and saved."
 
 
+def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+        async def read(self, size: int) -> bytes:
+            del size
+            chunk = await self.chunks.get()
+            return b"" if chunk is None else chunk
+
+        def emit(self, chunk: bytes) -> None:
+            self.chunks.put_nowait(chunk)
+
+        def close(self) -> None:
+            self.chunks.put_nowait(None)
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.stdout = FakeStream()
+            self.terminated = False
+            self.finished = asyncio.Event()
+
+        async def wait(self) -> int:
+            await self.finished.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+            self.stdout.close()
+            self.finished.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self.stdout.close()
+            self.finished.set()
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.output: list[str] = []
+
+        async def send_text(self, output: str) -> None:
+            self.output.append(output)
+
+        async def close(self, code: int = 1000) -> None:
+            del code
+
+    processes: list[FakeProcess] = []
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        del args, kwargs
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "work_tickets.refine.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def exercise() -> None:
+        registry = refine.RefineSessionRegistry(stale_after=0.01)
+        first_client = FakeWebSocket()
+        first_session, error = await registry.attach(
+            "WORK-706", "Refine prompt", tmp_path, first_client
+        )
+        assert first_session is not None
+        assert error is None
+        assert len(processes) == 1
+
+        processes[0].stdout.emit(b"buffered output")
+        for _ in range(10):
+            if first_client.output:
+                break
+            await asyncio.sleep(0)
+        assert first_client.output == ["buffered output"]
+
+        await registry.detach(first_session, first_client)
+        second_client = FakeWebSocket()
+        second_session, error = await registry.attach(
+            "work-706", "A different prompt must not launch", tmp_path, second_client
+        )
+        assert second_session is first_session
+        assert error is None
+        assert second_client.output == ["buffered output"]
+        assert len(processes) == 1
+
+        await registry.detach(second_session, second_client)
+        await asyncio.wait_for(first_session.finished.wait(), timeout=1)
+        assert processes[0].terminated is True
+
+    asyncio.run(exercise())
+
+
+def test_refine_registry_cancellation_releases_reservation_and_stops_startup(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.chunks: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+        async def read(self, size: int) -> bytes:
+            del size
+            chunk = await self.chunks.get()
+            return b"" if chunk is None else chunk
+
+        def close(self) -> None:
+            self.chunks.put_nowait(None)
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.stdout = FakeStream()
+            self.finished = asyncio.Event()
+
+        async def wait(self) -> int:
+            await self.finished.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+            self.stdout.close()
+            self.finished.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self.stdout.close()
+            self.finished.set()
+
+    startup_started = asyncio.Event()
+    processes: list[FakeProcess] = []
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        del args, kwargs
+        startup_started.set()
+        await asyncio.Future[None]()
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "work_tickets.refine.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def exercise() -> None:
+        registry = refine.RefineSessionRegistry(stale_after=0.01)
+        attach_task = asyncio.create_task(
+            registry.attach("WORK-708", "Refine prompt", tmp_path, object())
+        )
+        await startup_started.wait()
+        session = registry._sessions["WORK-708"]
+
+        attach_task.cancel()
+        try:
+            await attach_task
+        except asyncio.CancelledError:
+            pass
+        assert session._pending_clients == 0
+
+        assert session._task is not None
+        assert session._task.done()
+        assert session.finished.is_set()
+        assert registry._sessions == {}
+        assert processes == []
+        assert session._stale_task is None or session._stale_task.done()
+
+    asyncio.run(exercise())
+
+
+def test_refine_registry_cancellation_while_reserving_cleans_up_new_session(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeStream:
+        def __init__(self) -> None:
+            self.closed = asyncio.Event()
+
+        async def read(self, size: int) -> bytes:
+            del size
+            await self.closed.wait()
+            return b""
+
+        def close(self) -> None:
+            self.closed.set()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.stdout = FakeStream()
+            self.terminated = False
+            self.finished = asyncio.Event()
+
+        async def wait(self) -> int:
+            await self.finished.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+            self.stdout.close()
+            self.finished.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self.stdout.close()
+            self.finished.set()
+
+    process = FakeProcess()
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(
+        "work_tickets.refine.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+    original_reserve_client = refine.RefineSession.reserve_client
+    reservation_started = asyncio.Event()
+    allow_reservation = asyncio.Event()
+
+    async def blocked_reserve_client(session, reservation=None) -> bool:
+        reservation_started.set()
+        await allow_reservation.wait()
+        return await original_reserve_client(session, reservation)
+
+    monkeypatch.setattr(refine.RefineSession, "reserve_client", blocked_reserve_client)
+
+    async def exercise() -> None:
+        registry = refine.RefineSessionRegistry(stale_after=1)
+        attach_task = asyncio.create_task(
+            registry.attach("WORK-709", "Refine prompt", tmp_path, object())
+        )
+        await reservation_started.wait()
+        session = registry._sessions["WORK-709"]
+        await session._lock.acquire()
+        allow_reservation.set()
+        await asyncio.sleep(0)
+
+        attach_task.cancel()
+        session._lock.release()
+        try:
+            await attach_task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("attach should be cancelled")
+
+        await asyncio.wait_for(session.finished.wait(), timeout=1)
+        assert process.terminated is True
+        assert session._pending_clients == 0
+        assert registry._sessions == {}
+
+    asyncio.run(exercise())
+
+
+def test_canonicalize_jira_key_is_used_for_storage_and_prompt() -> None:
+    assert canonicalize_jira_key(" work-123 ") == "WORK-123"
+    ticket = Ticket(summary="Canonical key", position=0)
+    save_jira_issue(ticket, JiraIssue(key="work-123"), datetime.utcnow())
+    assert ticket.jira_issue_key == "WORK-123"
+    config = JiraConfig(browser_base_url="https://jira.example.test/context")
+    assert refine.refine_prompt(ticket, config) == (
+        "Refine https://jira.example.test/context/browse/WORK-123"
+    )
+
+
+def test_refine_registry_removes_sessions_after_process_exit(monkeypatch, tmp_path) -> None:
+    class FakeStream:
+        async def read(self, size: int) -> bytes:
+            del size
+            return b""
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = None
+            self.stdout = FakeStream()
+            self.finished = asyncio.Event()
+
+        async def wait(self) -> int:
+            await self.finished.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+        def finish(self) -> None:
+            self.returncode = 0
+            self.finished.set()
+
+        def terminate(self) -> None:
+            self.returncode = -15
+            self.finished.set()
+
+        def kill(self) -> None:
+            self.returncode = -9
+            self.finished.set()
+
+    class FakeWebSocket:
+        async def send_text(self, output: str) -> None:
+            del output
+
+        async def close(self, code: int = 1000) -> None:
+            del code
+
+    processes: list[FakeProcess] = []
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        del args, kwargs
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "work_tickets.refine.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+
+    async def exercise() -> None:
+        registry = refine.RefineSessionRegistry(stale_after=1)
+        second_client = FakeWebSocket()
+        first_session, error = await registry.attach(
+            "WORK-707", "Refine prompt", tmp_path, FakeWebSocket()
+        )
+        assert first_session is not None
+        assert error is None
+        processes[0].finish()
+        await asyncio.wait_for(first_session.finished.wait(), timeout=1)
+
+        second_session, error = await registry.attach(
+            "WORK-707", "Refine prompt", tmp_path, second_client
+        )
+        assert second_session is not None
+        assert second_session is not first_session
+        assert error is None
+        assert len(processes) == 2
+        await registry.detach(second_session, second_client)
+        await asyncio.wait_for(second_session.finished.wait(), timeout=2)
+
+    asyncio.run(exercise())
+
+
 def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_path) -> None:
     class FakeStream:
         async def read(self, size: int) -> bytes:
@@ -1076,10 +1424,17 @@ def test_refine_frontend_uses_xterm_and_only_renders_for_jira_keys() -> None:
     ticket_card_source = (frontend_source / "components" / "TicketCard.vue").read_text()
 
     assert 'from "@xterm/xterm"' in terminal_source
-    assert "new WebSocket(socketUrl())" in terminal_source
+    assert "acquireRefineSession(sessionIdentity(), socketUrl())" in terminal_source
     assert 'v-if="ticket.jira_issue_key"' in terminal_source
     assert ':disabled="!ticket.component || !browserBaseUrl"' in terminal_source
     assert '<RefineTerminal :ticket="subtask"' in ticket_card_source
+    assert "onMounted(() =>" in terminal_source
+    coordinator_source = (
+        frontend_source / "components" / "RefineSessionCoordinator.vue"
+    ).read_text()
+    app_source = (frontend_source / "App.vue").read_text()
+    assert "RefineSessionCoordinator" in coordinator_source
+    assert '<RefineSessionCoordinator :tickets="state.tickets" />' in app_source
 
 
 def test_api_imports_jira_issue_and_subtasks_with_local_fields(monkeypatch) -> None:
