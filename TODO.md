@@ -46,7 +46,7 @@
 
 ## Refine Terminal
 
-- [ ] Add a `Refine` button backed by an xterm.js console.
+- [x] Add a `Refine` button backed by an xterm.js console.
 
   The button should be available for synced top-level tickets and synced subtasks, and should launch:
 
