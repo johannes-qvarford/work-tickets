@@ -23,6 +23,9 @@ _REQUIRED_COLUMNS = {
         "project_key",
         "issue_type",
         "completed_statuses",
+        "in_review_status",
+        "ready_to_merge_status",
+        "ready_to_deploy_status",
         "updated_at",
     },
     "tickets": {
@@ -45,7 +48,13 @@ _REQUIRED_COLUMNS = {
 }
 _INITIAL_REQUIRED_COLUMNS = {
     "categories": _REQUIRED_COLUMNS["categories"],
-    "jira_config": _REQUIRED_COLUMNS["jira_config"] - {"local_projects_directory"},
+    "jira_config": _REQUIRED_COLUMNS["jira_config"]
+    - {
+        "local_projects_directory",
+        "in_review_status",
+        "ready_to_merge_status",
+        "ready_to_deploy_status",
+    },
     "tickets": _REQUIRED_COLUMNS["tickets"] - {"notes", "component"},
 }
 

@@ -65,6 +65,15 @@ class JiraConfig(Base):
     project_key: Mapped[str] = mapped_column(String(40))
     issue_type: Mapped[str] = mapped_column(String(80), default="Task")
     completed_statuses: Mapped[str] = mapped_column(String(500), default="Done")
+    in_review_status: Mapped[str] = mapped_column(
+        String(80), default="In Review", server_default="In Review"
+    )
+    ready_to_merge_status: Mapped[str] = mapped_column(
+        String(80), default="Ready to Merge", server_default="Ready to Merge"
+    )
+    ready_to_deploy_status: Mapped[str] = mapped_column(
+        String(80), default="Ready to Deploy", server_default="Ready to Deploy"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )

@@ -66,6 +66,9 @@ def ticket_list_data(db: Session) -> dict[str, object]:
                 "project_key": config.project_key,
                 "issue_type": config.issue_type,
                 "completed_statuses": config.completed_statuses,
+                "in_review_status": config.in_review_status,
+                "ready_to_merge_status": config.ready_to_merge_status,
+                "ready_to_deploy_status": config.ready_to_deploy_status,
             }
             if config is not None
             else None

@@ -26,6 +26,7 @@ __all__ = [
     "sync_subtask",
     "sync_ticket",
     "sync_ticket_from_jira",
+    "transition_jira_issue",
 ]
 
 
@@ -55,7 +56,8 @@ def fetch_reviews(
     jql = (
         f"project = {_jql_value(config.project_key)} "
         f"AND issuetype = {_jql_value(config.issue_type)} "
-        'AND status = "In Review" AND assignee = currentUser() ORDER BY key'
+        f"AND status = {_jql_value(config.in_review_status)} "
+        "AND assignee = currentUser() ORDER BY key"
     )
     jira = jira_client_factory(config)
     try:
@@ -73,6 +75,33 @@ def fetch_reviews(
     finally:
         jira.close()
     return {"reviews": reviews}
+
+
+def transition_jira_issue(
+    issue_key: str,
+    target_status: str,
+    db: Session,
+    *,
+    jira_client_factory: JiraClientFactory = JiraClient,
+) -> JiraIssue:
+    """Transition a Jira issue to a configured destination status if needed."""
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before changing status.")
+
+    canonical_key = canonicalize_jira_key(issue_key)
+    jira = jira_client_factory(config)
+    try:
+        current = jira.get_issue(canonical_key)
+        if current.status_name == target_status:
+            return current
+        return jira.transition_issue(
+            canonical_key,
+            target_status,
+            current_status=current.status_name,
+        )
+    finally:
+        jira.close()
 
 
 def _jql_value(value: str) -> str:

@@ -30,6 +30,9 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
         "project_key",
         "issue_type",
         "completed_statuses",
+        "in_review_status",
+        "ready_to_merge_status",
+        "ready_to_deploy_status",
         "updated_at",
     }
     assert {column["name"] for column in inspect(database_engine).get_columns("tickets")} >= {
@@ -39,7 +42,7 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
     with database_engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one() == 1
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-            "004_add_local_projects_directory"
+            "005_add_jira_workflow_statuses"
         )
 
 
@@ -62,12 +65,18 @@ def test_reapplying_migrations_preserves_an_initialized_database(tmp_path) -> No
 
     with database_engine.connect() as connection:
         config = connection.execute(
-            text("SELECT base_url, browser_base_url, project_key FROM jira_config WHERE id = 1")
+            text(
+                "SELECT base_url, browser_base_url, project_key, in_review_status, "
+                "ready_to_merge_status, ready_to_deploy_status FROM jira_config WHERE id = 1"
+            )
         ).one()
         assert tuple(config) == (
             "https://api.example.test",
             "https://jira.example.test",
             "WORK",
+            "In Review",
+            "Ready to Merge",
+            "Ready to Deploy",
         )
         assert connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one() == 1
 
@@ -112,7 +121,7 @@ def test_existing_homegrown_tracking_is_converted_without_losing_data(tmp_path) 
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Legacy parent", 1), (10, "Legacy subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "004_add_local_projects_directory"
+            "005_add_jira_workflow_statuses"
         )
 
 
@@ -153,7 +162,7 @@ def test_untracked_pre_migration_schema_is_upgraded_without_losing_data(tmp_path
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Pre-migration parent", 1), (20, "Pre-migration subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "004_add_local_projects_directory"
+            "005_add_jira_workflow_statuses"
         )
 
 
