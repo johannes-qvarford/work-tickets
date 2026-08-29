@@ -17,6 +17,7 @@ __all__ = [
     "JiraError",
     "canonicalize_jira_key",
     "delete_linked_jira_issue",
+    "fetch_reviews",
     "import_ticket_from_jira",
     "is_jira_issue_reference_candidate",
     "parse_jira_issue_reference",
@@ -34,6 +35,72 @@ type JiraClientFactory = Callable[[JiraConfig], JiraClient]
 def canonicalize_jira_key(key: str) -> str:
     """Return the stable representation used for stored and runtime Jira keys."""
     return key.strip().upper()
+
+
+def fetch_reviews(
+    db: Session,
+    *,
+    jira_client_factory: JiraClientFactory = JiraClient,
+) -> dict[str, object]:
+    """Fetch the current user's in-review Jira issues and match local tickets."""
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before viewing reviews.")
+
+    local_tickets_by_key = {
+        canonicalize_jira_key(ticket.jira_issue_key): ticket
+        for ticket in db.scalars(select(Ticket)).all()
+        if ticket.jira_issue_key
+    }
+    jql = (
+        f"project = {_jql_value(config.project_key)} "
+        f"AND issuetype = {_jql_value(config.issue_type)} "
+        'AND status = "In Review" AND assignee = currentUser() ORDER BY key'
+    )
+    jira = jira_client_factory(config)
+    try:
+        search_results = jira.search_issues(jql)
+        reviews: list[dict[str, object]] = []
+        for search_result in search_results:
+            review = _review_data(search_result, local_tickets_by_key)
+            try:
+                issue = jira.get_issue(search_result.key)
+            except JiraError as exc:
+                review["error"] = str(exc)
+            else:
+                review.update(_review_data(issue, local_tickets_by_key))
+            reviews.append(review)
+    finally:
+        jira.close()
+    return {"reviews": reviews}
+
+
+def _jql_value(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _review_data(
+    issue: JiraIssue,
+    local_tickets_by_key: dict[str, Ticket],
+) -> dict[str, object]:
+    local_ticket = local_tickets_by_key.get(canonicalize_jira_key(issue.key))
+    return {
+        "key": issue.key,
+        "summary": issue.summary or issue.key,
+        "description": issue.description or "",
+        "issue_type_name": issue.issue_type_name,
+        "status_name": issue.status_name,
+        "local_ticket": (
+            {
+                "id": local_ticket.id,
+                "summary": local_ticket.summary,
+                "parent_id": local_ticket.parent_id,
+            }
+            if local_ticket is not None
+            else None
+        ),
+        "error": None,
+    }
 
 
 def parse_jira_issue_reference(reference: str, browser_base_url: str) -> str:

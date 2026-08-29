@@ -28,6 +28,15 @@ interface State {
   components: CategoryComponent[];
   jira_config: JiraConfig | null;
 }
+interface Review {
+  key: string;
+  summary: string;
+  description: string;
+  issue_type_name: string | null;
+  status_name: string | null;
+  local_ticket: { id: number; summary: string; parent_id: number | null } | null;
+  error: string | null;
+}
 type TicketView = "focus" | "queue";
 
 const state = ref<State>({ tickets: [], categories: [], components: [], jira_config: null });
@@ -35,6 +44,9 @@ const page = ref(window.location.hash.slice(1) || "tickets");
 const categoryFilter = ref<number | null>(null);
 const ticketView = ref<TicketView>(loadTicketView());
 const notice = ref<{ severity: "success" | "error"; text: string } | null>(null);
+const reviews = ref<Review[]>([]);
+const reviewsLoading = ref(false);
+const reviewsError = ref<string | null>(null);
 const busy = ref(false);
 const draggingTicketId = ref<number | null>(null);
 const dragOverTicketId = ref<number | null>(null);
@@ -59,7 +71,12 @@ function switchTicketView() {
   ticketView.value = ticketView.value === "focus" ? "queue" : "focus";
   try { window.localStorage.setItem("work-tickets-view-mode", ticketView.value); } catch { /* Storage may be unavailable. */ }
 }
-function go(next: string) { page.value = next; window.location.hash = next; notice.value = null; }
+function go(next: string) { setPage(next); window.location.hash = next; notice.value = null; }
+function setPage(next: string) {
+  const changed = page.value !== next;
+  page.value = next;
+  if (changed && next === "reviews") void loadReviews();
+}
 function todayDate() {
   const today = new Date();
   return new Date(today.getFullYear(), today.getMonth(), today.getDate());
@@ -77,6 +94,21 @@ async function request(url: string, init: RequestInit = {}) {
   return result;
 }
 async function load() { const loaded = await (await fetch("/api/state")).json() as State; state.value = loaded; if (loaded.jira_config) Object.assign(settings.value, loaded.jira_config); }
+async function loadReviews() {
+  reviewsLoading.value = true;
+  reviewsError.value = null;
+  try {
+    const response = await fetch("/api/reviews");
+    const result = await response.json() as { ok: boolean; message?: string; reviews?: Review[] };
+    if (!response.ok || !result.ok) throw new Error(result.message || "Could not load reviews.");
+    reviews.value = result.reviews || [];
+  } catch (error) {
+    reviews.value = [];
+    reviewsError.value = error instanceof Error ? error.message : "Could not load reviews.";
+  } finally {
+    reviewsLoading.value = false;
+  }
+}
 async function run(action: () => Promise<void>, success = "Saved.") {
   busy.value = true; notice.value = null;
   try { await action(); notice.value = { severity: "success", text: success }; }
@@ -128,7 +160,11 @@ function dropTicket(ticketId: number, afterTarget: boolean) {
 function addDraftSubtask() { newSubtasks.value.push({ summary: "", description: "", planned_date: null }); }
 function removeDraftSubtask(index: number) { if (!confirm("Delete this subtask?")) return; newSubtasks.value.splice(index, 1); }
 function categoryName(id: number | null) { return state.value.categories.find((category) => category.id === id)?.name || "Uncategorized"; }
-onMounted(() => { load(); window.addEventListener("hashchange", () => { page.value = window.location.hash.slice(1) || "tickets"; }); });
+function reviewIssueUrl(key: string) {
+  const baseUrl = state.value.jira_config?.browser_base_url.trim().replace(/\/+$/, "");
+  return baseUrl ? `${baseUrl}/browse/${encodeURIComponent(key)}` : null;
+}
+onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(window.location.hash.slice(1) || "tickets"); }); if (page.value === "reviews") void loadReviews(); });
 </script>
 
 <template>
@@ -137,6 +173,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { page.val
       <div><span class="eyebrow">PERSONAL WORKFLOW</span><h1>Work tickets</h1><p>Keep momentum across the work that matters.</p></div>
       <nav aria-label="Main navigation">
         <Button label="Tickets" icon="pi pi-list" :severity="page === 'tickets' ? undefined : 'secondary'" text @click="go('tickets')" />
+        <Button label="Reviews" icon="pi pi-eye" :severity="page === 'reviews' ? undefined : 'secondary'" text @click="go('reviews')" />
         <Button label="Create" icon="pi pi-plus" :severity="page === 'create' ? undefined : 'secondary'" text @click="go('create')" />
         <Button label="Categories" icon="pi pi-tags" :severity="page === 'categories' ? undefined : 'secondary'" text @click="go('categories')" />
         <Button label="Settings" icon="pi pi-cog" :severity="page === 'settings' ? undefined : 'secondary'" text @click="go('settings')" />
@@ -149,9 +186,19 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { page.val
       <Card class="filter-card"><template #content><div class="filter-row"><label for="category-filter">Filter by category</label><Select id="category-filter" v-model="categoryFilter" :options="[{ id: null, name: 'All categories' }, ...state.categories]" optionLabel="name" optionValue="id" placeholder="All categories" /><Button type="button" class="view-toggle" severity="secondary" :label="ticketView === 'focus' ? 'Show Queue' : 'Show Focus'" :aria-label="ticketView === 'focus' ? 'Switch to Queue' : 'Switch to Focus'" :aria-controls="ticketView === 'focus' ? 'focus-section' : 'queue-section'" @click="switchTicketView" /><span>{{ visibleTickets.length }} tickets</span></div></template></Card>
       <section v-if="ticketView === 'focus'" id="focus-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">FOCUS</span><h2>Today</h2></div><span class="muted">Due today and overdue</span></div><div v-if="dueTickets.length" class="ticket-grid"><TicketCard v-for="ticket in dueTickets" :key="`due-${ticket.id}`" :ticket="ticket" :categories="state.categories" :components="state.components" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-check-circle"></i><strong>Nothing due right now</strong><span>Add the next useful thing when it arrives.</span></div></section>
       <section v-if="ticketView === 'queue'" id="queue-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">QUEUE</span><h2>All tickets</h2></div><span class="muted">Drag active tickets to reorder.</span></div><div v-if="visibleTickets.length" class="ticket-grid"><TicketCard v-for="ticket in visibleTickets" :key="ticket.id" :ticket="ticket" :categories="state.categories" :components="state.components" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" :reorderable="true" :dragging-ticket-id="draggingTicketId" :drag-over-ticket-id="dragOverTicketId" @ticket-drag-start="startTicketDrag" @ticket-drag-end="endTicketDrag" @ticket-drag-over="overTicket" @ticket-drop="dropTicket" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-inbox"></i><strong>No tickets yet</strong><span>Create a ticket to start your queue.</span></div></section>
-    </main>
+     </main>
 
-    <main v-else-if="page === 'create'" class="narrow">
+     <main v-else-if="page === 'reviews'" class="narrow">
+       <section class="hero"><div><span class="eyebrow">JIRA WORKFLOW</span><h2>Reviews</h2><p>Issues assigned to you and waiting for review.</p></div><Button label="Refresh" icon="pi pi-refresh" severity="secondary" :loading="reviewsLoading" @click="loadReviews" /></section>
+       <Message v-if="reviewsError" severity="error">{{ reviewsError }}</Message>
+       <Card v-else-if="reviewsLoading && !reviews.length"><template #content><div class="empty-state"><i class="pi pi-spin pi-spinner"></i><span>Loading reviews...</span></div></template></Card>
+       <section v-else-if="reviews.length" class="review-list">
+         <Card v-for="review in reviews" :key="review.key" class="review-card"><template #content><div class="review-heading"><div><a v-if="reviewIssueUrl(review.key)" class="jira-key" :href="reviewIssueUrl(review.key) || undefined" target="_blank" rel="noopener noreferrer">{{ review.key }}</a><span v-else class="jira-key">{{ review.key }}</span><h3>{{ review.summary }}</h3></div><span class="review-status">{{ review.status_name || "In Review" }}</span></div><div class="ticket-meta">{{ review.issue_type_name || "Jira issue" }} · <span v-if="review.local_ticket">Local ticket: {{ review.local_ticket.summary }}</span><span v-else>Not in local tickets</span></div><Message v-if="review.error" severity="error" class="review-error">{{ review.error }}</Message><p v-if="review.description" class="review-description">{{ review.description }}</p></template></Card>
+       </section>
+       <Card v-else><template #content><div class="empty-state"><i class="pi pi-check-circle"></i><strong>No issues in review</strong><span>Nothing assigned to you is waiting for review.</span></div></template></Card>
+     </main>
+
+     <main v-else-if="page === 'create'" class="narrow">
       <section class="hero"><div><span class="eyebrow">BUILD</span><h2>Create a ticket</h2><p>Capture the outcome and break it into clear next steps.</p></div></section>
       <Card><template #content><form class="form" @submit.prevent="createTicket"><label>Summary or Jira reference<InputText v-model="newTicket.summary" required placeholder="What needs doing? Or WORK-123" /></label><div class="two-col"><label>Planned date<div class="date-control"><DatePicker v-model="newTicket.planned_date" dateFormat="yy-mm-dd" showIcon aria-label="Planned date" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="newTicket.planned_date = todayDate()" /><Button type="button" label="Unfocus" text aria-label="Remove planned date" :disabled="!newTicket.planned_date" @click="newTicket.planned_date = null" /></div></label><label>Category<CategoryButtons v-model="newTicket.category_id" :categories="state.categories" /></label></div><label>Component<ComponentSelect v-model="newTicket.component" :categories="state.categories" :components="state.components" :category-id="newTicket.category_id" /></label><label>Description<Textarea v-model="newTicket.description" rows="5" autoResize /></label><label>Jira import URL (optional)<InputText v-model="newTicket.jira_reference" placeholder="https://your-site/browse/WORK-123" /></label><div class="subtask-builder"><div class="section-heading"><h3>Subtasks</h3><Button type="button" label="Add step" icon="pi pi-plus" text @click="addDraftSubtask" /></div><div v-for="(subtask, index) in newSubtasks" :key="index" class="draft-row"><InputText v-model="subtask.summary" :placeholder="`Step ${index + 1}`" /><div class="date-control"><DatePicker v-model="subtask.planned_date" dateFormat="yy-mm-dd" showIcon :aria-label="`Planned date for step ${index + 1}`" /><Button type="button" label="Today" text :aria-label="`Set planned date for step ${index + 1}`" @click="subtask.planned_date = todayDate()" /><Button type="button" label="Unfocus" text :aria-label="`Remove planned date for step ${index + 1}`" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" /></div><Button type="button" icon="pi pi-trash" severity="danger" text @click="removeDraftSubtask(index)" /></div></div><Button type="submit" label="Create ticket" icon="pi pi-check" :loading="busy" /></form></template></Card>
     </main>

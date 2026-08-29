@@ -197,6 +197,42 @@ class JiraClient:
         )
         return self._issue_from_payload(key, response)
 
+    def search_issues(self, jql: str) -> list[JiraIssue]:
+        """Return all issues matching a JQL query."""
+        issues: list[JiraIssue] = []
+        start_at = 0
+        while True:
+            response = self._request_dict(
+                "GET",
+                self._api_path("search"),
+                params={
+                    "jql": jql,
+                    "startAt": start_at,
+                    "maxResults": 100,
+                    "fields": "summary,description,issuetype,status",
+                },
+            )
+            raw_issues = response.get("issues")
+            if not isinstance(raw_issues, list):
+                raise JiraError("Jira returned an unexpected issue search response.")
+
+            page: list[JiraIssue] = []
+            for raw_issue in raw_issues:
+                if not isinstance(raw_issue, dict):
+                    raise JiraError("Jira returned an invalid issue search result.")
+                key = raw_issue.get("key")
+                if not isinstance(key, str) or not key:
+                    raise JiraError("Jira returned an issue search result without a key.")
+                page.append(self._issue_from_payload(key, raw_issue))
+            issues.extend(page)
+
+            total = response.get("total")
+            if not page or (isinstance(total, int) and len(issues) >= total):
+                return issues
+            if not isinstance(total, int) and len(page) < 100:
+                return issues
+            start_at += len(page)
+
     def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
         """Fetch an issue and the subtasks Jira currently links beneath it."""
         response = self._request_dict(

@@ -82,6 +82,13 @@ h3 { margin: 0; font-size: 1.15rem; }
 .create-notes-card { max-width: 900px; margin: -24px auto 24px; }
 .empty-state { display: grid; justify-items: center; gap: 8px; padding: 46px 20px; color: #93a4ba; text-align: center; }
 .empty-state i { color: #6ee7c2; font-size: 2rem; }
+.review-list { display: grid; gap: 14px; }
+.review-card { border: 1px solid #2a405d; background: #142238; }
+.review-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; flex-wrap: wrap; }
+.review-heading h3 { margin-top: 8px; overflow-wrap: anywhere; }
+.review-status { color: #f4c95d; font-size: .82rem; font-weight: 700; white-space: nowrap; }
+.review-error { margin-top: 16px; }
+.review-description { color: #c2cede; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .refine-terminal { min-height: 420px; padding: 12px; background: #050a12; }
 @media (max-width: 760px) { .topbar, .hero { display: block; } .topbar nav { justify-content: flex-start; margin-top: 22px; } .hero .p-button { margin-top: 20px; } .ticket-section { padding: 18px; } }
 @media (max-width: 520px) { .two-col, .draft-row, .subtask-row { grid-template-columns: minmax(0, 1fr); display: grid; } .ticket-title { display: grid; grid-template-columns: auto minmax(0, 1fr); } .ticket-title > .button-row { grid-column: 1 / -1; } .inline-form { align-items: stretch; flex-direction: column; } .subtasks-heading { align-items: start; flex-direction: column; } .subtasks-heading .ticket-meta { text-align: left; } }
