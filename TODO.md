@@ -20,7 +20,7 @@
 
   Dragging is the supported reordering interaction.
 
-- [ ] Fix the expanded ticket edit layout.
+- [x] Fix the expanded ticket edit layout.
 
   Clicking `Edit ticket and subtasks` must expand within the ticket/container width and never overflow horizontally. The layout must also remain usable on narrow screens.
 
