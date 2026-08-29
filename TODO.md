@@ -6,7 +6,7 @@
 
   Each ticket should occupy the full available horizontal space of its container rather than being laid out as a multi-column grid.
 
-- [ ] Remove the ticket completion marker.
+- [x] Remove the ticket completion marker.
 
   The ticket state should remain clear from the existing styling and controls without an additional marker beside the title.
 
