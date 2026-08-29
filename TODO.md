@@ -34,7 +34,7 @@
 
   Include an explicit `Uncategorized` button. This applies to ticket creation and editing; the category filter may remain a dropdown.
 
-- [ ] Add local category-specific components.
+- [x] Add local category-specific components.
 
   The Categories page should allow components such as `payment-integration-app` and `payment-provider-app` to be assigned to categories, reordered, and removed.
 
