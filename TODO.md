@@ -7,4 +7,4 @@
 - [x] Button to switch between showing Focus and Queue. Should be located in same section as "Filter by category". Should be preserved across refreshes.
 - [x] Be able to rearrange tickets and subtasks within a ticket by dragging. When syncing to Jira, order is preserved for subtask creation but is not synced to jira beyond that point. A new library is fine if needed.
 - [x] Git hook for verification. Both installation command, and installing it yourself.
-- [ ] Remove legacy frontend support and legacy-only related resources and code.
+- [x] Remove legacy frontend support and legacy-only related resources and code.
