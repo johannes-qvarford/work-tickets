@@ -37,11 +37,12 @@ export function dropTargetIndex(
   afterTarget: boolean,
 ): number | null {
   const activeItems = items.filter((item) => !item.local_completed);
-  if (sourceId === targetId || !activeItems.some((item) => item.id === sourceId)) return null;
+  const sourceIndex = activeItems.findIndex((item) => item.id === sourceId);
+  const targetIndex = activeItems.findIndex((item) => item.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceId === targetId) return null;
 
-  const remainingItems = activeItems.filter((item) => item.id !== sourceId);
-  const targetIndex = remainingItems.findIndex((item) => item.id === targetId);
-  return targetIndex < 0 ? null : targetIndex + (afterTarget ? 1 : 0);
+  const adjustedTargetIndex = targetIndex > sourceIndex ? targetIndex - 1 : targetIndex;
+  return adjustedTargetIndex + (afterTarget ? 1 : 0);
 }
 
 /** Translate a displayed reorder into the global active insertion index. */

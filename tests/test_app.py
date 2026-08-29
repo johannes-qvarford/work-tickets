@@ -264,6 +264,58 @@ def test_api_reordering_uses_active_items_and_persists_positions() -> None:
         assert [child.id for child in parent.subtasks] == [child_middle_id, child_first_id]
 
 
+def test_spa_reordering_adjusts_target_index_after_source_removal() -> None:
+    helper_source = (Path(__file__).parents[1] / "frontend" / "src" / "reordering.ts").read_text()
+
+    assert (
+        "const sourceIndex = activeItems.findIndex((item) => item.id === sourceId)" in helper_source
+    )
+    assert (
+        "const adjustedTargetIndex = targetIndex > sourceIndex ? targetIndex - 1 : targetIndex"
+        in helper_source
+    )
+    assert "return adjustedTargetIndex + (afterTarget ? 1 : 0)" in helper_source
+
+
+def test_api_reordering_swaps_adjacent_items_in_both_directions() -> None:
+    with SessionLocal() as db:
+        first = Ticket(summary="Swap first", position=0)
+        second = Ticket(summary="Swap second", position=1)
+        db.add_all([first, second])
+        db.commit()
+        first_id = first.id
+        second_id = second.id
+
+    move_second_before_first = client.post(
+        f"/api/tickets/{second_id}/move", params={"target_index": 0}
+    )
+    move_first_before_second = client.post(
+        f"/api/tickets/{first_id}/move", params={"target_index": 0}
+    )
+    move_first_after_second = client.post(
+        f"/api/tickets/{first_id}/move", params={"target_index": 1}
+    )
+
+    assert move_second_before_first.status_code == 200
+    assert move_first_before_second.status_code == 200
+    assert move_first_after_second.status_code == 200
+    assert [
+        ticket["id"]
+        for ticket in move_second_before_first.json()["state"]["tickets"]
+        if ticket["id"] in {first_id, second_id}
+    ] == [second_id, first_id]
+    assert [
+        ticket["id"]
+        for ticket in move_first_before_second.json()["state"]["tickets"]
+        if ticket["id"] in {first_id, second_id}
+    ] == [first_id, second_id]
+    assert [
+        ticket["id"]
+        for ticket in move_first_after_second.json()["state"]["tickets"]
+        if ticket["id"] in {first_id, second_id}
+    ] == [second_id, first_id]
+
+
 def test_api_rejects_invalid_reordering_targets() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="Invalid move ticket", position=0)
