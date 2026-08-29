@@ -241,8 +241,7 @@
   name="browser_base_url"
   type="url"
   placeholder="https://your-company.atlassian.net"
-  value="{{ jira_config.browser_base_url if jira_config and jira_config.browser_base_url else (jira_config.base_url if jira_config else '') }}"
-  required
+  value="{{ jira_config.browser_base_url if jira_config else '' }}"
 >
             </label>
             <label>
