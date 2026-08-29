@@ -24,7 +24,7 @@
 
   Clicking `Edit ticket and subtasks` must expand within the ticket/container width and never overflow horizontally. The layout must also remain usable on narrow screens.
 
-- [ ] Add personal notes to top-level tickets.
+- [x] Add personal notes to top-level tickets.
 
   Notes need a textarea when creating and editing a ticket. They are local-only, must never be sent to Jira, and must not be added to subtasks.
 
