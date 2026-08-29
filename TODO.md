@@ -110,7 +110,7 @@
 
   An MR that is already approved should be treated as successful.
 
-- [ ] Make the `Ready to Merge` action mark the selected MR as no longer a draft.
+- [x] Make the `Ready to Merge` action mark the selected MR as no longer a draft.
 
 - [ ] Resolve all unresolved discussion threads on the selected MR.
 
