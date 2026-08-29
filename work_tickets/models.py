@@ -60,8 +60,10 @@ class JiraConfig(Base):
     local_projects_directory: Mapped[str] = mapped_column(
         String(1000), default="", server_default=""
     )
+    gitlab_base_url: Mapped[str] = mapped_column(String(300), default="", server_default="")
     email: Mapped[str] = mapped_column(String(320))
     api_token: Mapped[str] = mapped_column(String(300))
+    gitlab_token: Mapped[str] = mapped_column(String(300), default="", server_default="")
     project_key: Mapped[str] = mapped_column(String(40))
     issue_type: Mapped[str] = mapped_column(String(80), default="Task")
     completed_statuses: Mapped[str] = mapped_column(String(500), default="Done")

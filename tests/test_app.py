@@ -647,6 +647,73 @@ def test_api_saves_jira_config_and_preserves_blank_browser_url() -> None:
         assert config.ready_to_deploy_status == "Ready to Deploy"
 
 
+def test_api_saves_gitlab_settings_without_exposing_or_overwriting_token() -> None:
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+            "gitlab_base_url": "https://gitlab.example.test/",
+            "gitlab_token": "gitlab-secret",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"]["jira_config"]["gitlab_base_url"] == (
+        "https://gitlab.example.test"
+    )
+    assert "gitlab_token" not in response.json()["state"]["jira_config"]
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.gitlab_base_url == "https://gitlab.example.test"
+        assert config.gitlab_token == "gitlab-secret"
+
+    update_response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+            "gitlab_base_url": "https://gitlab.example.test",
+            "gitlab_token": "",
+        },
+    )
+
+    assert update_response.status_code == 200
+    assert "gitlab_token" not in update_response.json()["state"]["jira_config"]
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.gitlab_token == "gitlab-secret"
+
+
+def test_api_rejects_invalid_gitlab_base_url_without_persisting_it() -> None:
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+            "gitlab_base_url": "gitlab.example.test",
+            "gitlab_token": "gitlab-secret",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "GitLab base URL must start with http:// or https://.",
+    }
+
+
 def test_api_saves_configured_jira_workflow_statuses() -> None:
     response = client.put(
         "/api/settings/jira",
@@ -667,6 +734,7 @@ def test_api_saves_configured_jira_workflow_statuses() -> None:
         "base_url": "https://jira.example.test",
         "browser_base_url": "",
         "local_projects_directory": "",
+        "gitlab_base_url": "",
         "email": "person@example.test",
         "project_key": "WORK",
         "issue_type": "Task",
@@ -1279,6 +1347,14 @@ def test_workflow_status_settings_are_present_in_frontend() -> None:
     assert 'v-model="settings.in_review_status"' in app_source
     assert 'v-model="settings.ready_to_merge_status"' in app_source
     assert 'v-model="settings.ready_to_deploy_status"' in app_source
+
+
+def test_gitlab_settings_are_present_in_frontend() -> None:
+    app_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.vue").read_text()
+
+    assert 'v-model="settings.gitlab_base_url"' in app_source
+    assert 'v-model="settings.gitlab_token"' in app_source
+    assert 'settings.value.gitlab_token = ""' in app_source
 
 
 def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
