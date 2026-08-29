@@ -135,6 +135,31 @@ def test_category_filter_renders_category_metadata_for_both_ticket_sections() ->
     )
 
 
+def test_ticket_view_toggle_defaults_to_focus_and_persists_with_category_filter() -> None:
+    spa_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.vue").read_text()
+    legacy_page = client.get("/legacy")
+
+    assert legacy_page.status_code == 200
+    assert 'id="ticket-view-toggle"' in legacy_page.text
+    assert 'aria-controls="ticket-lists"' in legacy_page.text
+    assert ">Show Queue</button>" in legacy_page.text
+    assert 'let ticketView = "focus"' in legacy_page.text
+    assert 'window.localStorage.getItem(ticketViewStorageKey) === "queue"' in legacy_page.text
+    assert "window.localStorage.setItem(ticketViewStorageKey, ticketView)" in legacy_page.text
+    assert 'ticketView = ticketView === "focus" ? "queue" : "focus"' in legacy_page.text
+    assert "section.hidden = section.dataset.ticketSection !== selectedSection" in legacy_page.text
+    assert "applyTicketView();\n          applyCategoryFilter();" in legacy_page.text
+
+    assert 'type TicketView = "focus" | "queue";' in spa_source
+    assert "const ticketView = ref<TicketView>(loadTicketView());" in spa_source
+    assert 'window.localStorage.getItem("work-tickets-view-mode") === "queue"' in spa_source
+    assert 'window.localStorage.setItem("work-tickets-view-mode", ticketView.value)' in spa_source
+    assert 'ticketView.value = ticketView.value === "focus" ? "queue" : "focus"' in spa_source
+    assert "v-if=\"ticketView === 'focus'\"" in spa_source
+    assert "v-if=\"ticketView === 'queue'\"" in spa_source
+    assert "const dueTickets = computed(() => visibleTickets.value.filter" in spa_source
+
+
 def test_ticket_controls_use_compact_accessible_actions() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="Compact controls", planned_date=date.today(), position=0)

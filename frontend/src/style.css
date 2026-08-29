@@ -16,6 +16,7 @@ h3 { margin: 0; font-size: 1.15rem; }
 .filter-card, .ticket-section, .narrow > .p-card { margin-bottom: 24px; border: 1px solid #253851; background: rgba(18, 29, 48, .82); }
 .filter-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; color: #9cadc2; }
 .filter-row .p-select { min-width: 220px; }
+.filter-row .view-toggle { flex: 0 0 auto; }
 .ticket-section { padding: 28px; border-radius: 16px; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
 .muted { color: #93a4ba; }

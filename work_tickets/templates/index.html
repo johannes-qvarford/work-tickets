@@ -94,6 +94,7 @@
     .category-filter-panel { margin-bottom:20px; }
     .category-filter-controls { display:flex; align-items:end; flex-wrap:wrap; gap:12px 18px; }
     .category-filter-controls label { flex:1 1 14rem; max-width:26rem; }
+    .category-filter-controls .view-toggle { width:auto; flex:0 0 auto; }
     .category-filter-status { flex:1 1 14rem; margin:0; }
     .ticket-details { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); }
     .ticket-details > summary { color:#cbd5e2; cursor:pointer; font-size:.88rem; font-weight:700; }
@@ -172,6 +173,7 @@
                 {% for category in categories %}<option value="{{ category.id }}">{{ category.name }}</option>{% endfor %}
               </select>
             </label>
+            <button id="ticket-view-toggle" class="secondary view-toggle" type="button" aria-controls="ticket-lists">Show Queue</button>
             <p id="category-filter-status" class="muted category-filter-status" role="status" aria-live="polite">
             </p>
           </div>
@@ -336,6 +338,15 @@
         const actionStatus = document.getElementById("action-status");
         const categoryFilter = document.getElementById("category-filter");
         const categoryFilterStatus = document.getElementById("category-filter-status");
+        const ticketViewToggle = document.getElementById("ticket-view-toggle");
+        const ticketViewStorageKey = "work-tickets-view-mode";
+        let ticketView = "focus";
+
+        try {
+          ticketView = window.localStorage.getItem(ticketViewStorageKey) === "queue" ? "queue" : "focus";
+        } catch {
+          ticketView = "focus";
+        }
 
         function announce(message) {
           if (status) status.textContent = message;
@@ -380,6 +391,24 @@
               : `Showing all ${totalTickets} tickets.`;
           }
         }
+
+        function applyTicketView() {
+          const selectedSection = ticketView === "queue" ? "all" : "today";
+          document.querySelectorAll("#ticket-lists [data-ticket-section]").forEach((section) => {
+            section.hidden = section.dataset.ticketSection !== selectedSection;
+          });
+          if (ticketViewToggle) {
+            ticketViewToggle.textContent = ticketView === "focus" ? "Show Queue" : "Show Focus";
+            ticketViewToggle.setAttribute("aria-label", ticketView === "focus" ? "Switch to Queue" : "Switch to Focus");
+          }
+        }
+
+        ticketViewToggle?.addEventListener("click", () => {
+          ticketView = ticketView === "focus" ? "queue" : "focus";
+          try { window.localStorage.setItem(ticketViewStorageKey, ticketView); } catch { /* Storage may be unavailable. */ }
+          applyTicketView();
+          applyCategoryFilter();
+        });
 
         function updateMoveControls(container) {
           const subtasks = [...container.querySelectorAll(".subtask:not(.completed)")];
@@ -460,6 +489,7 @@
           if (!targetElement || !result.html) throw new Error("The saved view could not be updated.");
           targetElement.outerHTML = result.html;
           applyCategoryFilter();
+          applyTicketView();
           restoreTicketState(ticketId, ticketDetailsOpen, subtaskId, subtaskDetailsOpen);
            if (form.action.endsWith("/tickets")) {
              form.reset();
@@ -524,6 +554,7 @@
             }
             targetElement.outerHTML = result.html;
             applyCategoryFilter();
+            applyTicketView();
             restoreTicketDetails(openDetails);
             announce(result.message);
             announceAction(result.message);
@@ -576,6 +607,8 @@
               throw new Error("The reordered view could not be updated.");
             }
             targetElement.outerHTML = result.html;
+            applyCategoryFilter();
+            applyTicketView();
             restoreTicketDetails(openDetails);
             announce(result.message);
             announceAction(result.message);
@@ -696,6 +729,7 @@
 
         categoryFilter?.addEventListener("change", applyCategoryFilter);
         applyCategoryFilter();
+        applyTicketView();
         document.querySelectorAll("[data-subtasks]").forEach(updateMoveControls);
         document.querySelectorAll("[data-tickets]").forEach(updateTicketMoveControls);
       })();
