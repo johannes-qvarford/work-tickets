@@ -28,6 +28,7 @@ h3 { margin: 0; font-size: 1.15rem; }
 .ticket-card.dragging, .subtask-row.dragging { opacity: .45; }
 .ticket-card.drag-over, .subtask-row.drag-over { border-color: #6ee7c2; box-shadow: 0 0 0 1px #6ee7c2; }
 .ticket-title { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.ticket-summary { flex: 1; min-width: 0; }
 .ticket-title strong { display: block; font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
 .jira-key { color: #6ee7c2; font-size: .78rem; font-weight: 700; white-space: nowrap; }
 .jira-key:hover { color: #b1f7e2; }
@@ -36,6 +37,7 @@ h3 { margin: 0; font-size: 1.15rem; }
 .button-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .ticket-title > .button-row { flex-shrink: 0; }
 .drag-handle { border: 0; background: transparent; color: #8fa2b9; cursor: grab; font-size: 1.15rem; line-height: 1; padding: 6px; }
+.ticket-drag-handle { flex: 0 0 auto; font-size: 1.5rem; padding: 10px 12px; }
 .drag-handle:hover { color: #6ee7c2; background: transparent; }
 .drag-handle:active { cursor: grabbing; }
 .details-form { margin-top: 18px; }
@@ -59,4 +61,4 @@ h3 { margin: 0; font-size: 1.15rem; }
 .empty-state { display: grid; justify-items: center; gap: 8px; padding: 46px 20px; color: #93a4ba; text-align: center; }
 .empty-state i { color: #6ee7c2; font-size: 2rem; }
 @media (max-width: 760px) { .topbar, .hero { display: block; } .topbar nav { justify-content: flex-start; margin-top: 22px; } .hero .p-button { margin-top: 20px; } .ticket-section { padding: 18px; } }
-@media (max-width: 520px) { .two-col, .draft-row, .subtask-row { grid-template-columns: 1fr; display: grid; } .inline-form { align-items: stretch; flex-direction: column; } .subtasks-heading { align-items: start; flex-direction: column; } .subtasks-heading .ticket-meta { text-align: left; } }
+@media (max-width: 520px) { .two-col, .draft-row, .subtask-row { grid-template-columns: 1fr; display: grid; } .ticket-title { display: grid; grid-template-columns: auto minmax(0, 1fr); } .ticket-title > .button-row { grid-column: 1 / -1; } .inline-form { align-items: stretch; flex-direction: column; } .subtasks-heading { align-items: start; flex-direction: column; } .subtasks-heading .ticket-meta { text-align: left; } }

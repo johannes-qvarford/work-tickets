@@ -195,7 +195,17 @@ function moveTicketBy(offset: number) {
   >
     <template #content>
       <div class="ticket-title">
-        <div>
+        <button
+          v-if="ticketCanDrag"
+          type="button"
+          class="drag-handle ticket-drag-handle"
+          draggable="true"
+          :aria-label="`Drag to reorder ${ticket.summary}`"
+          title="Drag to reorder"
+          @dragstart="onTicketDragStart"
+          @dragend="emit('ticketDragEnd')"
+        >⠿</button>
+        <div class="ticket-summary">
           <strong>{{ ticket.summary }}</strong>
           <a v-if="jiraIssueUrl(ticket.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(ticket.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ ticket.jira_issue_key }})</a>
           <span v-else-if="ticket.jira_issue_key" class="jira-key">({{ ticket.jira_issue_key }})</span>
@@ -205,16 +215,6 @@ function moveTicketBy(offset: number) {
           </div>
         </div>
         <div class="button-row">
-          <button
-            v-if="ticketCanDrag"
-            type="button"
-            class="drag-handle ticket-drag-handle"
-            draggable="true"
-            :aria-label="`Drag to reorder ${ticket.summary}`"
-            title="Drag to reorder"
-            @dragstart="onTicketDragStart"
-            @dragend="emit('ticketDragEnd')"
-          >⠿</button>
           <Button v-if="reorderable && !ticket.local_completed" icon="pi pi-arrow-up" text rounded :disabled="!canMoveUp" :aria-label="`Move up ${ticket.summary}`" @click="moveTicketBy(-1)" />
           <Button v-if="reorderable && !ticket.local_completed" icon="pi pi-arrow-down" text rounded :disabled="!canMoveDown" :aria-label="`Move down ${ticket.summary}`" @click="moveTicketBy(1)" />
           <Button :icon="ticket.local_completed ? 'pi pi-undo' : 'pi pi-check'" text rounded :aria-label="ticket.local_completed ? 'Mark active' : 'Mark done'" @click="emit('toggle')" />
