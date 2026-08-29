@@ -74,7 +74,7 @@
 
   Add a manual refresh button. If Jira fails for one ticket, show an inline error for that ticket without preventing other tickets from loading.
 
-- [ ] Add configurable Jira workflow status settings.
+- [x] Add configurable Jira workflow status settings.
 
   Add settings for `In Review`, `Ready to Merge`, and `Ready to Deploy`, using those values as the defaults. Status changes should find the Jira transition whose destination matches the configured status rather than attempting to update the status field directly.
 
