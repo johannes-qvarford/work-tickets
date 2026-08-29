@@ -73,6 +73,24 @@ def test_spa_has_distinct_hash_navigation_pages() -> None:
     assert (Path(__file__).parents[1] / "work_tickets" / "static" / "assets").exists()
 
 
+def test_ticket_pages_remove_overview_and_keep_focus_and_queue() -> None:
+    spa_page = client.get("/")
+    assert spa_page.status_code == 200
+    asset_dir = Path(__file__).parents[1] / "work_tickets" / "static" / "assets"
+    spa_bundle = next(asset_dir.glob("index-*.js")).read_text()
+    assert "OVERVIEW" not in spa_bundle
+    assert "Ticket command center" not in spa_bundle
+    assert "FOCUS" in spa_bundle
+    assert "QUEUE" in spa_bundle
+    assert "All tickets" in spa_bundle
+
+    legacy_page = client.get("/legacy")
+    assert legacy_page.status_code == 200
+    assert "Overview" not in legacy_page.text
+    assert "<h2>Today</h2>" in legacy_page.text
+    assert "<h2>All tickets</h2>" in legacy_page.text
+
+
 def test_homepage_uses_wider_responsive_layout() -> None:
     page = client.get("/legacy")
 
