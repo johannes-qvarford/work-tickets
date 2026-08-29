@@ -106,7 +106,7 @@
 
   If one open MR remains after filtering, use it and ignore closed MRs. If all MRs are closed, use the most recently updated MR. Disable the action when no MRs are found or when more than one MR remains after filtering.
 
-- [ ] Make the `Ready to Merge` action approve the selected MR when necessary.
+- [x] Make the `Ready to Merge` action approve the selected MR when necessary.
 
   An MR that is already approved should be treated as successful.
 
