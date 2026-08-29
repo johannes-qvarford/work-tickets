@@ -67,7 +67,16 @@ h3 { margin: 0; font-size: 1.15rem; }
 .draft-row > .p-inputtext, .subtask-row > .p-inputtext { flex: 1 1 12rem; }
 .draft-row > .date-control, .subtask-row > .date-control { flex: 1 1 10rem; }
 .category-list { margin-top: 24px; }
-.category-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #2a405d; }
+.component-create-form { margin-top: 16px; }
+.component-list { display: grid; gap: 4px; margin-top: 18px; padding-bottom: 14px; border-bottom: 1px solid #2a405d; }
+.component-item, .assigned-component { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 0; }
+.component-item i, .assigned-component i { margin-right: 10px; color: #6ee7c2; }
+.category-item { padding: 16px 0; border-bottom: 1px solid #2a405d; }
+.category-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.component-assignment { margin-top: 12px; }
+.component-assignment .p-select { flex: 1; min-width: 0; }
+.assigned-components { margin: 8px 0 0 18px; }
+.category-components-empty { display: block; margin: 14px 0 0 18px; }
 .category-item i { margin-right: 10px; color: #6ee7c2; }
 .narrow { max-width: 900px; margin: auto; }
 .create-notes-card { max-width: 900px; margin: -24px auto 24px; }

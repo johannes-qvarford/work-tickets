@@ -26,6 +26,30 @@ class Category(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(80), unique=True)
     tickets: Mapped[list[Ticket]] = relationship(back_populates="category")
+    component_links: Mapped[list[CategoryComponent]] = relationship(
+        back_populates="category",
+        cascade="all, delete-orphan",
+        order_by=lambda: CategoryComponent.position,
+    )
+
+
+class Component(Base):
+    __tablename__ = "components"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    category_links: Mapped[list[CategoryComponent]] = relationship(
+        back_populates="component",
+        cascade="all, delete-orphan",
+    )
+
+
+class CategoryComponent(Base):
+    __tablename__ = "category_components"
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), primary_key=True)
+    component_id: Mapped[int] = mapped_column(ForeignKey("components.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    category: Mapped[Category] = relationship(back_populates="component_links")
+    component: Mapped[Component] = relationship(back_populates="category_links")
 
 
 class JiraConfig(Base):
@@ -61,6 +85,7 @@ class Ticket(Base):
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
     )
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id"), nullable=True)
+    component: Mapped[str | None] = mapped_column(String(120), nullable=True)
     category: Mapped[Category | None] = relationship(back_populates="tickets")
     parent: Mapped[Ticket | None] = relationship(remote_side=[id], back_populates="subtasks")
     subtasks: Mapped[list[Ticket]] = relationship(

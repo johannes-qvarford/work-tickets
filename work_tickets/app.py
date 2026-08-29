@@ -13,7 +13,15 @@ from sqlalchemy.orm import Session
 
 from . import jira_service, tickets, web
 from .jira import JiraClient
-from .models import Category, JiraConfig, SessionLocal, Ticket, init_db
+from .models import (
+    Category,
+    CategoryComponent,
+    Component,
+    JiraConfig,
+    SessionLocal,
+    Ticket,
+    init_db,
+)
 
 app = FastAPI(title="Work Tickets")
 parse_jira_issue_reference = jira_service.parse_jira_issue_reference
@@ -30,6 +38,7 @@ class TicketPayload(BaseModel):
     notes: str = ""
     planned_date: date | None = None
     category_id: int | None = None
+    component: str | None = None
     jira_reference: str = ""
 
 
@@ -41,6 +50,14 @@ class SubtaskPayload(BaseModel):
 
 class CategoryPayload(BaseModel):
     name: str
+
+
+class ComponentPayload(BaseModel):
+    name: str
+
+
+class CategoryComponentPayload(BaseModel):
+    component_id: int
 
 
 class JiraConfigPayload(BaseModel):
@@ -118,8 +135,9 @@ def api_create_ticket(
         payload.notes,
         payload.planned_date.isoformat() if payload.planned_date else "",
         str(payload.category_id) if payload.category_id is not None else "",
+        payload.component,
         db,
-        payload.jira_reference,
+        jira_reference=payload.jira_reference,
         jira_client_factory=JiraClient,
     )
     return _service_json_response(response, db)
@@ -152,7 +170,9 @@ def api_update_ticket(
         payload.notes,
         payload.planned_date.isoformat() if payload.planned_date else "",
         payload.category_id,
+        payload.component,
         db,
+        component_provided="component" in payload.model_fields_set,
         jira_client_factory=JiraClient,
     )
     return _service_json_response(response, db)
@@ -287,6 +307,117 @@ def api_create_category(
         db.add(Category(name=name))
         db.commit()
     return {"ok": True, "state": _api_state(db)}
+
+
+@app.post("/api/components")
+def api_create_component(
+    payload: ComponentPayload, db: Session = Depends(get_db)
+) -> dict[str, object]:
+    name = payload.name.strip()
+    if name and db.scalar(select(Component).where(Component.name == name)) is None:
+        db.add(Component(name=name))
+        db.commit()
+    return {"ok": True, "state": _api_state(db)}
+
+
+@app.delete("/api/components/{component_id}")
+def api_delete_component(component_id: int, db: Session = Depends(get_db)) -> Response:
+    component = db.get(Component, component_id)
+    if component is None:
+        return JSONResponse({"ok": False, "message": "Component was not found."}, status_code=404)
+    db.delete(component)
+    db.commit()
+    return JSONResponse({"ok": True, "state": _api_state(db)})
+
+
+@app.post("/api/categories/{category_id}/components")
+def api_assign_component(
+    category_id: int,
+    payload: CategoryComponentPayload,
+    db: Session = Depends(get_db),
+) -> Response:
+    category = db.get(Category, category_id)
+    component = db.get(Component, payload.component_id)
+    if category is None:
+        return JSONResponse({"ok": False, "message": "Category was not found."}, status_code=404)
+    if component is None:
+        return JSONResponse({"ok": False, "message": "Component was not found."}, status_code=404)
+    existing = db.get(CategoryComponent, (category_id, payload.component_id))
+    if existing is None:
+        position = db.scalar(
+            select(CategoryComponent.position)
+            .where(CategoryComponent.category_id == category_id)
+            .order_by(CategoryComponent.position.desc())
+        )
+        db.add(
+            CategoryComponent(
+                category_id=category_id,
+                component_id=payload.component_id,
+                position=(position + 1 if position is not None else 0),
+            )
+        )
+        db.commit()
+    return JSONResponse({"ok": True, "state": _api_state(db)})
+
+
+@app.delete("/api/categories/{category_id}/components/{component_id}")
+def api_unassign_component(
+    category_id: int, component_id: int, db: Session = Depends(get_db)
+) -> Response:
+    link = db.get(CategoryComponent, (category_id, component_id))
+    if link is None:
+        return JSONResponse(
+            {"ok": False, "message": "Category component assignment was not found."},
+            status_code=404,
+        )
+    db.delete(link)
+    _normalize_category_components(category_id, db)
+    db.commit()
+    return JSONResponse({"ok": True, "state": _api_state(db)})
+
+
+def _normalize_category_components(category_id: int, db: Session) -> None:
+    links = list(
+        db.scalars(
+            select(CategoryComponent)
+            .where(CategoryComponent.category_id == category_id)
+            .order_by(CategoryComponent.position, CategoryComponent.component_id)
+        )
+    )
+    for position, link in enumerate(links):
+        link.position = position
+
+
+@app.post("/api/categories/{category_id}/components/{component_id}/move")
+def api_move_component(
+    category_id: int,
+    component_id: int,
+    target_index: int,
+    db: Session = Depends(get_db),
+) -> Response:
+    links = list(
+        db.scalars(
+            select(CategoryComponent)
+            .where(CategoryComponent.category_id == category_id)
+            .order_by(CategoryComponent.position, CategoryComponent.component_id)
+        )
+    )
+    link = next((candidate for candidate in links if candidate.component_id == component_id), None)
+    if link is None:
+        return JSONResponse(
+            {"ok": False, "message": "Category component assignment was not found."},
+            status_code=404,
+        )
+    if target_index < 0 or target_index >= len(links):
+        return JSONResponse(
+            {"ok": False, "message": "Component target position is invalid."}, status_code=422
+        )
+    links.remove(link)
+    links.insert(target_index, link)
+    for position, candidate in enumerate(links):
+        candidate.position = position
+    db.commit()
+    return JSONResponse({"ok": True, "state": _api_state(db)})
 
 
 @app.delete("/api/categories/{category_id}")

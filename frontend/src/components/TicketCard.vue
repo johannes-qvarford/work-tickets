@@ -5,7 +5,8 @@ import Card from "primevue/card";
 import DatePicker from "primevue/datepicker";
 import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
-import CategoryButtons, { type Category } from "./CategoryButtons.vue";
+import CategoryButtons, { type Category, type CategoryComponent } from "./CategoryButtons.vue";
+import ComponentSelect from "./ComponentSelect.vue";
 import {
   clearSubtaskDragState,
   clearSubtaskDragOverState,
@@ -29,12 +30,14 @@ export interface Ticket {
   jira_status_name: string | null;
   category_id: number | null;
   category_name: string | null;
+  component: string | null;
   subtasks: Ticket[];
 }
 
 const props = defineProps<{
   ticket: Ticket;
   categories: Category[];
+  components: CategoryComponent[];
   categoryName: string;
   browserBaseUrl: string;
   reorderable?: boolean;
@@ -219,6 +222,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
           <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" />
           <Textarea v-if="ticket.parent_id === null" v-model="ticket.notes" rows="4" autoResize aria-label="Personal notes" placeholder="Notes for your local workflow" />
           <label class="category-field">Category<CategoryButtons v-model="ticket.category_id" :categories="categories" /></label>
+          <label class="component-field">Component<ComponentSelect v-model="ticket.component" :categories="categories" :components="components" :category-id="ticket.category_id" /></label>
           <Button label="Save ticket" @click="emit('save', ticket)" />
         </template>
         <span v-else class="ticket-meta">Done items can only be marked active.</span>
