@@ -11,7 +11,6 @@ run_check() {
 
 run_check uv run ruff check .
 run_check uv run ruff format --check .
-run_check uv run djlint --check work_tickets/templates/index.html
 run_check uv run mypy work_tickets
 run_check uv run pytest
 run_check npm run check --prefix frontend

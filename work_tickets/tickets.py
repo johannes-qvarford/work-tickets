@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import date
 
 from fastapi import Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,8 +13,6 @@ from .models import Category, JiraConfig, Ticket
 from .web import (
     move_response,
     mutation_response,
-    render_ticket,
-    render_ticket_lists,
     ticket_move_response,
 )
 
@@ -67,7 +65,6 @@ def create_ticket(
             "success",
             f"Ticket {ticket.summary} imported from Jira.",
             200,
-            tickets_html=render_ticket_lists(request, db),
             created_id=ticket.id,
         )
 
@@ -86,7 +83,6 @@ def create_ticket(
         "success",
         f"Ticket {ticket.summary} added.",
         200,
-        tickets_html=render_ticket_lists(request, db),
         created_id=ticket.id,
     )
 
@@ -139,8 +135,6 @@ def create_subtask(
         "success",
         f"Subtask {subtask.summary} added.",
         200,
-        ticket_html=render_ticket(request, parent, db),
-        ticket_target=f"ticket-{parent.id}",
     )
 
 
@@ -188,7 +182,6 @@ def update_ticket(
         "success",
         f"Ticket {ticket.summary} updated.",
         200,
-        tickets_html=render_ticket_lists(request, db),
     )
 
 
@@ -244,8 +237,6 @@ def update_subtask(
         "success",
         f"Subtask {subtask.summary} updated.",
         200,
-        ticket_html=render_ticket(request, parent, db),
-        ticket_target=f"ticket-{parent.id}",
     )
 
 
@@ -253,14 +244,14 @@ def delete_subtask(
     subtask_id: int,
     db: Session,
     jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
-) -> RedirectResponse:
+) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
-        return _redirect_error("Subtask was not found.")
+        return _error_response("Subtask was not found.", 404)
     if subtask.parent_id is None:
-        return _redirect_error("Top-level tickets cannot be deleted here.")
+        return _error_response("Top-level tickets cannot be deleted here.", 400)
     if subtask.local_completed:
-        return _redirect_error("Done subtasks can only be marked active.")
+        return _error_response("Done subtasks can only be marked active.", 400)
     summary = subtask.summary
     from .jira_service import delete_linked_jira_issue
 
@@ -268,25 +259,25 @@ def delete_subtask(
     db.delete(subtask)
     db.commit()
     if jira_error is not None:
-        return _redirect_error(f"Subtask {summary} deleted locally, but {jira_error}")
-    return _redirect_success(f"Subtask {summary} deleted.")
+        return _error_response(f"Subtask {summary} deleted locally, but {jira_error}", 200)
+    return Response(status_code=200)
 
 
 def delete_ticket(
     ticket_id: int,
     db: Session,
     jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
-) -> RedirectResponse:
+) -> Response:
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
-        return _redirect_error("Ticket was not found.")
+        return _error_response("Ticket was not found.", 404)
     if ticket.parent_id is not None:
-        return _redirect_error("Subtasks cannot be deleted here.")
+        return _error_response("Subtasks cannot be deleted here.", 400)
     if ticket.local_completed:
-        return _redirect_error("Done tickets can only be marked active.")
+        return _error_response("Done tickets can only be marked active.", 400)
     if any(subtask.local_completed for subtask in ticket.subtasks):
-        return _redirect_error(
-            "Tickets with done subtasks can only be deleted after they are active."
+        return _error_response(
+            "Tickets with done subtasks can only be deleted after they are active.", 400
         )
     summary = ticket.summary
     from .jira_service import delete_linked_jira_issue
@@ -295,70 +286,32 @@ def delete_ticket(
     db.delete(ticket)
     db.commit()
     if jira_error is not None:
-        return _redirect_error(f"Ticket {summary} deleted locally, but {jira_error}")
-    return _redirect_success(f"Ticket {summary} deleted.")
+        return _error_response(f"Ticket {summary} deleted locally, but {jira_error}", 200)
+    return Response(status_code=200)
 
 
-def complete_ticket(ticket_id: int, db: Session) -> RedirectResponse:
+def complete_ticket(ticket_id: int, db: Session) -> Response:
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
-        return _redirect_error("Ticket was not found.")
+        return _error_response("Ticket was not found.", 404)
     if ticket.parent_id is not None:
-        return _redirect_error("Only top-level tickets can be completed here.")
+        return _error_response("Only top-level tickets can be completed here.", 400)
     ticket.local_completed = not ticket.local_completed
     _prioritize_completion(ticket, db)
     db.commit()
-    state = "done" if ticket.local_completed else "active"
-    return _redirect_success(f"Ticket {ticket.summary} marked {state}.")
+    return Response(status_code=200)
 
 
-def complete_subtask(subtask_id: int, db: Session) -> RedirectResponse:
+def complete_subtask(subtask_id: int, db: Session) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
-        return _redirect_error("Subtask was not found.")
+        return _error_response("Subtask was not found.", 404)
     if subtask.parent_id is None:
-        return _redirect_error("Top-level tickets cannot be completed here.")
+        return _error_response("Top-level tickets cannot be completed here.", 400)
     subtask.local_completed = not subtask.local_completed
     _prioritize_completion(subtask, db)
     db.commit()
-    state = "done" if subtask.local_completed else "active"
-    return _redirect_success(f"Subtask {subtask.summary} marked {state}.")
-
-
-def move_subtask(subtask_id: int, offset: int, request: Request, db: Session) -> Response:
-    subtask = db.get(Ticket, subtask_id)
-    if subtask is None:
-        return move_response(request, "error", "Subtask was not found.", 404)
-    if subtask.parent_id is None:
-        return move_response(request, "error", "Top-level tickets cannot be reordered here.", 400)
-    siblings = _subtasks(db, subtask.parent_id)
-    if subtask.local_completed:
-        return move_response(request, "error", "Done subtasks cannot be reordered.", 400)
-    active_siblings = [sibling for sibling in siblings if not sibling.local_completed]
-    current_index = next(
-        index for index, sibling in enumerate(active_siblings) if sibling.id == subtask.id
-    )
-    target_index = current_index + offset
-    direction = "up" if offset < 0 else "down"
-    if target_index < 0 or target_index >= len(active_siblings):
-        _normalize_positions(active_siblings)
-        db.commit()
-        boundary = "top" if offset < 0 else "bottom"
-        return move_response(
-            request,
-            "success",
-            f"Subtask {subtask.summary} is already at the {boundary}.",
-            200,
-            subtask.parent_id,
-            [sibling.id for sibling in siblings],
-        )
-    return move_subtask_to_index(
-        subtask_id,
-        target_index,
-        request,
-        db,
-        message=f"Subtask {subtask.summary} moved {direction}.",
-    )
+    return Response(status_code=200)
 
 
 def move_subtask_to_index(
@@ -400,44 +353,6 @@ def move_subtask_to_index(
     )
 
 
-def move_ticket(ticket_id: int, offset: int, request: Request, db: Session) -> Response:
-    ticket = db.get(Ticket, ticket_id)
-    if ticket is None:
-        return ticket_move_response(request, "error", "Ticket was not found.", 404)
-    if ticket.parent_id is not None:
-        return ticket_move_response(
-            request, "error", "Subtasks cannot be reordered with top-level tickets.", 400
-        )
-    if ticket.local_completed:
-        return ticket_move_response(request, "error", "Done tickets cannot be reordered.", 400)
-    tickets = _top_level_tickets(db)
-    active_tickets = [candidate for candidate in tickets if not candidate.local_completed]
-    current_index = next(
-        index for index, candidate in enumerate(active_tickets) if candidate.id == ticket.id
-    )
-    target_index = current_index + offset
-    direction = "up" if offset < 0 else "down"
-    if target_index < 0 or target_index >= len(active_tickets):
-        _normalize_positions(active_tickets)
-        db.commit()
-        boundary = "top" if offset < 0 else "bottom"
-        return ticket_move_response(
-            request,
-            "success",
-            f"Ticket {ticket.summary} is already at the {boundary}.",
-            200,
-            db=db,
-            order=[candidate.id for candidate in tickets],
-        )
-    return move_ticket_to_index(
-        ticket_id,
-        target_index,
-        request,
-        db,
-        message=f"Ticket {ticket.summary} moved {direction}.",
-    )
-
-
 def move_ticket_to_index(
     ticket_id: int,
     target_index: int,
@@ -474,7 +389,6 @@ def move_ticket_to_index(
         "success",
         message or f"Ticket {ticket.summary} reordered.",
         200,
-        db=db,
         order=[candidate.id for candidate in ordered_tickets],
     )
 
@@ -542,13 +456,5 @@ def _is_jira_issue_reference_candidate(value: str) -> bool:
     return is_jira_issue_reference_candidate(value)
 
 
-def _redirect_error(message: str) -> RedirectResponse:
-    from .web import redirect_with_message
-
-    return redirect_with_message("error", message)
-
-
-def _redirect_success(message: str) -> RedirectResponse:
-    from .web import redirect_with_message
-
-    return redirect_with_message("success", message)
+def _error_response(message: str, status_code: int) -> JSONResponse:
+    return JSONResponse({"ok": False, "message": message}, status_code=status_code)

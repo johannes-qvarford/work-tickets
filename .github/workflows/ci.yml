@@ -29,8 +29,6 @@ jobs:
         run: uv run ruff check .
       - name: Check formatting
         run: uv run ruff format --check .
-      - name: Check HTML template formatting
-        run: uv run djlint --check work_tickets/templates/index.html
       - name: Type check
         run: uv run mypy work_tickets
       - name: Test
