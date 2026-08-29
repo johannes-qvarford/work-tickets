@@ -89,6 +89,8 @@ h3 { margin: 0; font-size: 1.15rem; }
 .review-status { color: #f4c95d; font-size: .82rem; font-weight: 700; white-space: nowrap; }
 .review-error { margin-top: 16px; }
 .review-description { color: #c2cede; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+.review-actions .p-message { margin: 0; }
 .refine-terminal { min-height: 420px; padding: 12px; background: #050a12; }
 @media (max-width: 760px) { .topbar, .hero { display: block; } .topbar nav { justify-content: flex-start; margin-top: 22px; } .hero .p-button { margin-top: 20px; } .ticket-section { padding: 18px; } }
 @media (max-width: 520px) { .two-col, .draft-row, .subtask-row { grid-template-columns: minmax(0, 1fr); display: grid; } .ticket-title { display: grid; grid-template-columns: auto minmax(0, 1fr); } .ticket-title > .button-row { grid-column: 1 / -1; } .inline-form { align-items: stretch; flex-direction: column; } .subtasks-heading { align-items: start; flex-direction: column; } .subtasks-heading .ticket-meta { text-align: left; } }

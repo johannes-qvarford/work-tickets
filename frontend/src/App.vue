@@ -50,6 +50,8 @@ const notice = ref<{ severity: "success" | "error"; text: string } | null>(null)
 const reviews = ref<Review[]>([]);
 const reviewsLoading = ref(false);
 const reviewsError = ref<string | null>(null);
+const reviewActionState = ref<Record<string, "loading" | "success">>({});
+const reviewActionErrors = ref<Record<string, string>>({});
 const busy = ref(false);
 const draggingTicketId = ref<number | null>(null);
 const dragOverTicketId = ref<number | null>(null);
@@ -110,6 +112,18 @@ async function loadReviews() {
     reviewsError.value = error instanceof Error ? error.message : "Could not load reviews.";
   } finally {
     reviewsLoading.value = false;
+  }
+}
+async function readyToMerge(review: Review) {
+  reviewActionState.value[review.key] = "loading";
+  delete reviewActionErrors.value[review.key];
+  try {
+    const result = await request(`/api/reviews/${encodeURIComponent(review.key)}/ready-to-merge`, { method: "POST" });
+    review.status_name = result.review?.status_name || review.status_name;
+    reviewActionState.value[review.key] = "success";
+  } catch (error) {
+    delete reviewActionState.value[review.key];
+    reviewActionErrors.value[review.key] = error instanceof Error ? error.message : "Could not complete review.";
   }
 }
 async function run(action: () => Promise<void>, success = "Saved.") {
@@ -196,7 +210,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
        <Message v-if="reviewsError" severity="error">{{ reviewsError }}</Message>
        <Card v-else-if="reviewsLoading && !reviews.length"><template #content><div class="empty-state"><i class="pi pi-spin pi-spinner"></i><span>Loading reviews...</span></div></template></Card>
        <section v-else-if="reviews.length" class="review-list">
-         <Card v-for="review in reviews" :key="review.key" class="review-card"><template #content><div class="review-heading"><div><a v-if="reviewIssueUrl(review.key)" class="jira-key" :href="reviewIssueUrl(review.key) || undefined" target="_blank" rel="noopener noreferrer">{{ review.key }}</a><span v-else class="jira-key">{{ review.key }}</span><h3>{{ review.summary }}</h3></div><span class="review-status">{{ review.status_name || "In Review" }}</span></div><div class="ticket-meta">{{ review.issue_type_name || "Jira issue" }} · <span v-if="review.local_ticket">Local ticket: {{ review.local_ticket.summary }}</span><span v-else>Not in local tickets</span></div><Message v-if="review.error" severity="error" class="review-error">{{ review.error }}</Message><p v-if="review.description" class="review-description">{{ review.description }}</p></template></Card>
+          <Card v-for="review in reviews" :key="review.key" class="review-card"><template #content><div class="review-heading"><div><a v-if="reviewIssueUrl(review.key)" class="jira-key" :href="reviewIssueUrl(review.key) || undefined" target="_blank" rel="noopener noreferrer">{{ review.key }}</a><span v-else class="jira-key">{{ review.key }}</span><h3>{{ review.summary }}</h3></div><span class="review-status">{{ review.status_name || "In Review" }}</span></div><div class="ticket-meta">{{ review.issue_type_name || "Jira issue" }} · <span v-if="review.local_ticket">Local ticket: {{ review.local_ticket.summary }}</span><span v-else>Not in local tickets</span></div><Message v-if="review.error" severity="error" class="review-error">{{ review.error }}</Message><p v-if="review.description" class="review-description">{{ review.description }}</p><div class="review-actions"><Button :label="reviewActionErrors[review.key] ? 'Retry Ready to Merge' : 'Ready to Merge'" icon="pi pi-check" :loading="reviewActionState[review.key] === 'loading'" :disabled="Boolean(review.error) || reviewActionState[review.key] === 'loading'" @click="readyToMerge(review)" /><Message v-if="reviewActionErrors[review.key]" severity="error">{{ reviewActionErrors[review.key] }}</Message><Message v-else-if="reviewActionState[review.key] === 'success'" severity="success">Tested, reviewed, and marked ready to merge.</Message></div></template></Card>
        </section>
        <Card v-else><template #content><div class="empty-state"><i class="pi pi-check-circle"></i><strong>No issues in review</strong><span>Nothing assigned to you is waiting for review.</span></div></template></Card>
      </main>

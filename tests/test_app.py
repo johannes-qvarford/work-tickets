@@ -29,6 +29,7 @@ from work_tickets.jira import (  # noqa: E402
 )
 from work_tickets.jira_service import (  # noqa: E402
     canonicalize_jira_key,
+    ready_to_merge_review,
     save_jira_issue,
     transition_jira_issue,
 )
@@ -943,6 +944,39 @@ def test_jira_client_searches_issues_with_paging_fields() -> None:
     assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
 
 
+def test_jira_client_adds_plain_text_comment() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={"id": "comment-1"})
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    jira.add_comment("work-508", "Tested and reviewed.")
+    jira.close()
+
+    assert requests[0].url.path == "/rest/api/3/issue/work-508/comment"
+    assert json.loads(requests[0].content) == {
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": "Tested and reviewed."}],
+                }
+            ],
+        }
+    }
+
+
 def test_jira_client_transitions_by_destination_status() -> None:
     requests: list[httpx.Request] = []
     transitioned = False
@@ -1071,6 +1105,161 @@ def test_transition_service_treats_current_target_status_as_idempotent() -> None
     assert result == JiraIssue(key="WORK-507", status_name="Ready to Merge")
 
 
+def test_ready_to_merge_review_transitions_and_comments_once() -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.ready_to_merge_status == "Merge Queue"
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(("get", key))
+            return JiraIssue(key=key, status_name="Awaiting Review")
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            calls.append(("transition", key, target_status, current_status))
+            return JiraIssue(key=key, status_name=target_status)
+
+        def add_comment(self, key: str, comment: str) -> None:
+            calls.append(("comment", key, comment))
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://jira.example.test",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+            )
+            db.add(config)
+        config.ready_to_merge_status = "Merge Queue"
+        db.commit()
+        result = ready_to_merge_review(
+            "work-509",
+            db,
+            jira_client_factory=FakeJiraClient,
+        )
+        config.ready_to_merge_status = "Ready to Merge"
+        db.commit()
+
+    assert result == JiraIssue(key="WORK-509", status_name="Merge Queue")
+    assert calls == [
+        ("get", "WORK-509"),
+        ("transition", "WORK-509", "Merge Queue", "Awaiting Review"),
+        ("comment", "WORK-509", "Tested and reviewed."),
+        ("close",),
+    ]
+
+
+def test_ready_to_merge_review_skips_transition_when_already_ready() -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(f"get:{key}")
+            return JiraIssue(key=key, status_name="Ready to Merge")
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            del key, target_status, current_status
+            raise AssertionError("an already-ready issue must not be transitioned")
+
+        def add_comment(self, key: str, comment: str) -> None:
+            calls.append(f"comment:{key}:{comment}")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://jira.example.test",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+            )
+            db.add(config)
+        config.ready_to_merge_status = "Ready to Merge"
+        result = ready_to_merge_review(
+            "WORK-510",
+            db,
+            jira_client_factory=FakeJiraClient,
+        )
+
+    assert result.status_name == "Ready to Merge"
+    assert calls == ["get:WORK-510", "comment:WORK-510:Tested and reviewed.", "close"]
+
+
+def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.ready_to_merge_status == "Merge Queue"
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(("get", key))
+            return JiraIssue(key=key, status_name="Awaiting Review")
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            calls.append(("transition", key, target_status, current_status))
+            return JiraIssue(key=key, status_name=target_status)
+
+        def add_comment(self, key: str, comment: str) -> None:
+            calls.append(("comment", key, comment))
+
+        def close(self) -> None:
+            calls.append(("close",))
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://jira.example.test",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+            )
+            db.add(config)
+        config.ready_to_merge_status = "Merge Queue"
+        db.commit()
+
+    response = client.post("/api/reviews/work-511/ready-to-merge")
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.ready_to_merge_status = "Ready to Merge"
+        db.commit()
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "message": "Review marked ready to merge.",
+        "review": {"key": "WORK-511", "status_name": "Merge Queue"},
+    }
+    assert calls == [
+        ("get", "WORK-511"),
+        ("transition", "WORK-511", "Merge Queue", "Awaiting Review"),
+        ("comment", "WORK-511", "Tested and reviewed."),
+        ("close",),
+    ]
+
+
 def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
     app_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.vue").read_text()
 
@@ -1079,6 +1268,9 @@ def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
     assert 'label="Refresh"' in app_source
     assert "review.error" in app_source
     assert "Not in local tickets" in app_source
+    assert "ready-to-merge" in app_source
+    assert "reviewActionState" in app_source
+    assert "reviewActionErrors" in app_source
 
 
 def test_workflow_status_settings_are_present_in_frontend() -> None:
