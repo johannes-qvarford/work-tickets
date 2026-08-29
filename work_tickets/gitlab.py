@@ -19,6 +19,11 @@ class GitLabMergeRequest:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class GitLabMergeRequestApprovalState:
+    approved: bool
+
+
 class GitLabClient:
     """Small GitLab REST client for retrieving merge request state."""
 
@@ -59,7 +64,33 @@ class GitLabClient:
             )
         return GitLabMergeRequest(state=state, updated_at=updated_at)
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    def get_merge_request_approval_state(
+        self, project_path: str, number: int
+    ) -> GitLabMergeRequestApprovalState:
+        response = self._request(
+            "GET",
+            f"{self._api_prefix}/projects/{quote(project_path, safe='')}/merge_requests/"
+            f"{number}/approvals",
+        )
+        approved = response.get("approved")
+        if not isinstance(approved, bool):
+            raise GitLabError(
+                f"GitLab returned merge request {project_path}!{number} without a valid "
+                "approval state."
+            )
+        return GitLabMergeRequestApprovalState(approved=approved)
+
+    def approve_merge_request(self, project_path: str, number: int) -> None:
+        self._request(
+            "POST",
+            f"{self._api_prefix}/projects/{quote(project_path, safe='')}/merge_requests/"
+            f"{number}/approve",
+            expect_json=False,
+        )
+
+    def _request(
+        self, method: str, path: str, *, expect_json: bool = True, **kwargs: Any
+    ) -> dict[str, Any]:
         try:
             response = self._client.request(method, path, **kwargs)
             response.raise_for_status()
@@ -76,6 +107,9 @@ class GitLabClient:
             raise GitLabError(f"GitLab returned HTTP {exc.response.status_code}{detail}.") from exc
         except httpx.RequestError as exc:
             raise GitLabError(f"Could not reach GitLab: {exc}") from exc
+
+        if not expect_json:
+            return {}
 
         try:
             payload = response.json()
