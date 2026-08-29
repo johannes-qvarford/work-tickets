@@ -86,7 +86,7 @@
 
 ## GitLab Merge Requests
 
-- [ ] Add GitLab settings.
+- [x] Add GitLab settings.
 
   Add a GitLab base URL and user personal access token to application settings. Store and handle the token like the existing Jira credential.
 
