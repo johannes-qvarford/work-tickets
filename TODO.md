@@ -68,7 +68,7 @@
 
 ## Reviews and Jira Workflow
 
-- [ ] Add a separate `Reviews` page.
+- [x] Add a separate `Reviews` page.
 
   On page switch, fetch Jira issues assigned to the configured Jira account, limited to the configured project and issue type, with the configured `In Review` status. Include Jira issues even when they have no local ticket equivalent.
 
