@@ -121,6 +121,15 @@ def api_state(db: Session = Depends(get_db)) -> dict[str, object]:
     return _api_state(db)
 
 
+@app.get("/api/reviews")
+def api_reviews(db: Session = Depends(get_db)) -> Response:
+    try:
+        reviews = jira_service.fetch_reviews(db, jira_client_factory=JiraClient)
+    except jira_service.JiraError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
+    return JSONResponse({"ok": True, **reviews})
+
+
 @app.websocket("/api/tickets/{ticket_id}/refine")
 async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
     await websocket.accept()

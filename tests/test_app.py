@@ -777,6 +777,131 @@ def test_api_jira_config_validation_uses_jira_client(monkeypatch) -> None:
     assert response.json()["message"] == "Jira connection validated and saved."
 
 
+def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.email == "person@example.test"
+            assert config.project_key == "WORK"
+            assert config.issue_type == "Story"
+
+        def search_issues(self, jql: str) -> list[JiraIssue]:
+            calls.append(jql)
+            return [
+                JiraIssue(key="WORK-501", summary="Local review", status_name="In Review"),
+                JiraIssue(key="WORK-502", summary="Remote-only review", status_name="In Review"),
+            ]
+
+        def get_issue(self, key: str) -> JiraIssue:
+            if key == "WORK-502":
+                raise JiraError("Jira returned HTTP 503.")
+            return JiraIssue(
+                key=key,
+                summary="Updated local review",
+                description="Review details",
+                issue_type_name="Story",
+                status_name="In Review",
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://jira.example.test",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+                completed_statuses="Done",
+            )
+            db.add(config)
+        config.project_key = "WORK"
+        config.issue_type = "Story"
+        local_ticket = Ticket(summary="Local ticket", jira_issue_key="work-501", position=0)
+        db.add(local_ticket)
+        db.commit()
+
+    response = client.get("/api/reviews")
+
+    assert response.status_code == 200
+    assert calls == [
+        'project = "WORK" AND issuetype = "Story" AND status = "In Review" '
+        "AND assignee = currentUser() ORDER BY key"
+    ]
+    reviews = response.json()["reviews"]
+    assert reviews[0]["summary"] == "Updated local review"
+    assert reviews[0]["local_ticket"]["summary"] == "Local ticket"
+    assert reviews[0]["error"] is None
+    assert reviews[1]["key"] == "WORK-502"
+    assert reviews[1]["summary"] == "Remote-only review"
+    assert reviews[1]["local_ticket"] is None
+    assert reviews[1]["error"] == "Jira returned HTTP 503."
+
+
+def test_jira_client_searches_issues_with_paging_fields() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "issues": [
+                    {
+                        "key": "WORK-503",
+                        "fields": {
+                            "summary": "Search result",
+                            "issuetype": {"name": "Story"},
+                            "status": {"name": "In Review"},
+                        },
+                    }
+                ],
+                "total": 1,
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Story",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    issues = jira.search_issues('project = "WORK"')
+    jira.close()
+
+    assert issues == [
+        JiraIssue(
+            key="WORK-503",
+            summary="Search result",
+            issue_type_name="Story",
+            status_name="In Review",
+        )
+    ]
+    assert requests[0].url.path == "/rest/api/3/search"
+    assert requests[0].url.params["jql"] == 'project = "WORK"'
+    assert requests[0].url.params["startAt"] == "0"
+    assert requests[0].url.params["maxResults"] == "100"
+    assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
+
+
+def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
+    app_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.vue").read_text()
+
+    assert 'label="Reviews"' in app_source
+    assert 'fetch("/api/reviews")' in app_source
+    assert 'label="Refresh"' in app_source
+    assert "review.error" in app_source
+    assert "Not in local tickets" in app_source
+
+
 def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
     monkeypatch, tmp_path
 ) -> None:
