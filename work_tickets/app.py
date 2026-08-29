@@ -12,6 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from . import jira_service, refine, tickets, web
+from .gitlab import GitLabClient
 from .jira import JiraClient
 from .local_projects import is_safe_local_component_name
 from .models import (
@@ -129,7 +130,11 @@ def api_state(db: Session = Depends(get_db)) -> dict[str, object]:
 @app.get("/api/reviews")
 def api_reviews(db: Session = Depends(get_db)) -> Response:
     try:
-        reviews = jira_service.fetch_reviews(db, jira_client_factory=JiraClient)
+        reviews = jira_service.fetch_reviews(
+            db,
+            jira_client_factory=JiraClient,
+            gitlab_client_factory=GitLabClient,
+        )
     except jira_service.JiraError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
     return JSONResponse({"ok": True, **reviews})
@@ -142,6 +147,7 @@ def api_ready_to_merge_review(issue_key: str, db: Session = Depends(get_db)) -> 
             issue_key,
             db,
             jira_client_factory=JiraClient,
+            gitlab_client_factory=GitLabClient,
         )
     except jira_service.JiraError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)

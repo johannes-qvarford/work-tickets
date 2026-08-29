@@ -3,13 +3,14 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from unicodedata import category
 from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .gitlab import GitLabClient, GitLabError, GitLabMergeRequest
 from .jira import JiraClient, JiraError, JiraIssue
 from .models import JiraConfig, Ticket
 
@@ -27,10 +28,20 @@ class MergeRequestReference:
     url: str
 
 
+@dataclass(frozen=True)
+class MergeRequestSelection:
+    selected: dict[str, object] | None
+    enabled: bool
+    reason: str
+
+
 __all__ = [
     "JiraClientFactory",
+    "GitLabClientFactory",
+    "MergeRequestSelection",
     "JiraError",
     "MergeRequestReference",
+    "select_merge_request",
     "canonicalize_jira_key",
     "detect_merge_requests",
     "delete_linked_jira_issue",
@@ -50,6 +61,14 @@ __all__ = [
 
 
 type JiraClientFactory = Callable[[JiraConfig], JiraClient]
+type GitLabClientFactory = Callable[[JiraConfig], GitLabClient]
+
+_OPEN_MERGE_REQUEST_STATE = "opened"
+_CLOSED_MERGE_REQUEST_STATES = {"closed", "locked", "merged"}
+_KNOWN_MERGE_REQUEST_STATES = {
+    _OPEN_MERGE_REQUEST_STATE,
+    *_CLOSED_MERGE_REQUEST_STATES,
+}
 
 
 def canonicalize_jira_key(key: str) -> str:
@@ -186,10 +205,146 @@ def _effective_port(scheme: str, port: int | None) -> int:
     return port if port is not None else {"http": 80, "https": 443}[scheme]
 
 
+def select_merge_request(
+    merge_requests: list[tuple[MergeRequestReference, GitLabMergeRequest]],
+) -> MergeRequestSelection:
+    """Select one MR without guessing when the GitLab state is ambiguous."""
+    if not merge_requests:
+        return MergeRequestSelection(
+            selected=None,
+            enabled=False,
+            reason="No merge requests were found in the Jira description.",
+        )
+
+    candidates: list[tuple[MergeRequestReference, GitLabMergeRequest, datetime]] = []
+    for reference, merge_request in merge_requests:
+        if (
+            not isinstance(merge_request.state, str)
+            or merge_request.state not in _KNOWN_MERGE_REQUEST_STATES
+        ):
+            raise JiraError(
+                f"GitLab returned an unsupported state '{merge_request.state}' for "
+                f"merge request {reference.repository}!{reference.number}."
+            )
+        candidates.append(
+            (reference, merge_request, _parse_merge_request_updated_at(reference, merge_request))
+        )
+
+    open_candidates = [
+        candidate for candidate in candidates if candidate[1].state == _OPEN_MERGE_REQUEST_STATE
+    ]
+    if len(open_candidates) > 1:
+        return MergeRequestSelection(
+            selected=None,
+            enabled=False,
+            reason=("Ready to Merge requires one unambiguous MR; multiple open MRs were found."),
+        )
+    if len(open_candidates) == 1:
+        return MergeRequestSelection(
+            selected=_merge_request_dict(open_candidates[0]),
+            enabled=True,
+            reason="Selected the only open MR; closed MRs were ignored.",
+        )
+
+    closed_candidates = [
+        candidate for candidate in candidates if candidate[1].state in _CLOSED_MERGE_REQUEST_STATES
+    ]
+    if not closed_candidates:
+        return MergeRequestSelection(
+            selected=None,
+            enabled=False,
+            reason="No merge requests have a usable open or closed state.",
+        )
+    most_recent = max(closed_candidates, key=lambda candidate: candidate[2])
+    if sum(candidate[2] == most_recent[2] for candidate in closed_candidates) > 1:
+        return MergeRequestSelection(
+            selected=None,
+            enabled=False,
+            reason="The most recently updated closed MRs are tied; one unambiguous MR is required.",
+        )
+    return MergeRequestSelection(
+        selected=_merge_request_dict(most_recent),
+        enabled=True,
+        reason="All MRs are closed; selected the most recently updated MR.",
+    )
+
+
+def _parse_merge_request_updated_at(
+    reference: MergeRequestReference, merge_request: GitLabMergeRequest
+) -> datetime:
+    value = merge_request.updated_at
+    if not isinstance(value, str) or not value:
+        raise JiraError(
+            f"GitLab returned an invalid updated_at for merge request "
+            f"{reference.repository}!{reference.number}."
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise JiraError(
+            f"GitLab returned an invalid updated_at for merge request "
+            f"{reference.repository}!{reference.number}."
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _merge_request_dict(
+    candidate: tuple[MergeRequestReference, GitLabMergeRequest, datetime],
+) -> dict[str, object]:
+    reference, merge_request, _ = candidate
+    return {
+        **asdict(reference),
+        "state": merge_request.state,
+        "updated_at": merge_request.updated_at,
+    }
+
+
+def _retrieve_merge_requests(
+    description: str | Mapping[str, object] | None,
+    gitlab_base_url: str,
+    gitlab_client: GitLabClient | None,
+) -> tuple[list[dict[str, object]], MergeRequestSelection]:
+    references = detect_merge_requests(description, gitlab_base_url)
+    if not references:
+        return [], select_merge_request([])
+    if gitlab_client is None:
+        raise JiraError("GitLab merge request details could not be retrieved.")
+
+    base = parse_gitlab_base_url(gitlab_base_url)
+    if base is None:
+        raise JiraError("GitLab merge request links use an invalid configured base URL.")
+    details: list[tuple[MergeRequestReference, GitLabMergeRequest]] = []
+    for reference in references:
+        parsed = _parse_merge_request_url(reference.url, base)
+        if parsed is None:
+            raise JiraError(
+                f"Could not determine the GitLab project for merge request "
+                f"{reference.repository}!{reference.number}."
+            )
+        _, project_path = parsed
+        try:
+            merge_request = gitlab_client.get_merge_request(project_path, reference.number)
+        except GitLabError as exc:
+            raise JiraError(str(exc)) from exc
+        details.append((reference, merge_request))
+
+    selection = select_merge_request(details)
+    payload = [
+        _merge_request_dict(
+            (reference, merge_request, _parse_merge_request_updated_at(reference, merge_request))
+        )
+        for reference, merge_request in details
+    ]
+    return payload, selection
+
+
 def fetch_reviews(
     db: Session,
     *,
     jira_client_factory: JiraClientFactory = JiraClient,
+    gitlab_client_factory: GitLabClientFactory = GitLabClient,
 ) -> dict[str, object]:
     """Fetch the current user's in-review Jira issues and match local tickets."""
     config = db.get(JiraConfig, 1)
@@ -208,19 +363,54 @@ def fetch_reviews(
         "AND assignee = currentUser() ORDER BY key"
     )
     jira = jira_client_factory(config)
+    gitlab: GitLabClient | None = None
+    gitlab_error: str | None = None
+    if parse_gitlab_base_url(config.gitlab_base_url) is not None:
+        try:
+            gitlab = gitlab_client_factory(config)
+        except GitLabError as exc:
+            gitlab_error = str(exc)
     try:
         search_results = jira.search_issues(jql)
         reviews: list[dict[str, object]] = []
         for search_result in search_results:
-            review = _review_data(search_result, local_tickets_by_key, config.gitlab_base_url)
+            review = _review_data(
+                search_result,
+                local_tickets_by_key,
+                config.gitlab_base_url,
+                gitlab_client=None,
+                resolve_merge_requests=False,
+            )
             try:
                 issue = jira.get_issue(search_result.key)
             except JiraError as exc:
                 review["error"] = str(exc)
             else:
-                review.update(_review_data(issue, local_tickets_by_key, config.gitlab_base_url))
+                try:
+                    review.update(
+                        _review_data(
+                            issue,
+                            local_tickets_by_key,
+                            config.gitlab_base_url,
+                            gitlab_client=gitlab,
+                            gitlab_error=gitlab_error,
+                        )
+                    )
+                except JiraError as exc:
+                    review.update(
+                        _review_data(
+                            issue,
+                            local_tickets_by_key,
+                            config.gitlab_base_url,
+                            gitlab_client=None,
+                            resolve_merge_requests=False,
+                        )
+                    )
+                    review["error"] = str(exc)
             reviews.append(review)
     finally:
+        if gitlab is not None:
+            gitlab.close()
         jira.close()
     return {"reviews": reviews}
 
@@ -257,6 +447,7 @@ def ready_to_merge_review(
     db: Session,
     *,
     jira_client_factory: JiraClientFactory = JiraClient,
+    gitlab_client_factory: GitLabClientFactory = GitLabClient,
 ) -> JiraIssue:
     """Mark a review ready to merge and record that it was tested and reviewed."""
     config = db.get(JiraConfig, 1)
@@ -265,8 +456,24 @@ def ready_to_merge_review(
 
     canonical_key = canonicalize_jira_key(issue_key)
     jira = jira_client_factory(config)
+    gitlab: GitLabClient | None = None
     try:
         current = jira.get_issue(canonical_key)
+        if parse_gitlab_base_url(config.gitlab_base_url) is not None:
+            try:
+                gitlab = gitlab_client_factory(config)
+            except GitLabError as exc:
+                raise JiraError(str(exc)) from exc
+        description = (
+            current.description_adf if current.description_adf is not None else current.description
+        )
+        _, selection = _retrieve_merge_requests(
+            description,
+            config.gitlab_base_url,
+            gitlab,
+        )
+        if not selection.enabled:
+            raise JiraError(selection.reason)
         if current.status_name != config.ready_to_merge_status:
             current = jira.transition_issue(
                 canonical_key,
@@ -276,6 +483,8 @@ def ready_to_merge_review(
         jira.add_comment(canonical_key, "Tested and reviewed.")
         return current
     finally:
+        if gitlab is not None:
+            gitlab.close()
         jira.close()
 
 
@@ -287,17 +496,38 @@ def _review_data(
     issue: JiraIssue,
     local_tickets_by_key: dict[str, Ticket],
     gitlab_base_url: str,
+    *,
+    gitlab_client: GitLabClient | None,
+    gitlab_error: str | None = None,
+    resolve_merge_requests: bool = True,
 ) -> dict[str, object]:
     local_ticket = local_tickets_by_key.get(canonicalize_jira_key(issue.key))
     description = issue.description_adf if issue.description_adf is not None else issue.description
-    merge_requests = [
-        asdict(reference) for reference in detect_merge_requests(description, gitlab_base_url)
-    ]
+    merge_requests = detect_merge_requests(description, gitlab_base_url)
+    selection = select_merge_request([])
+    if merge_requests and resolve_merge_requests:
+        if gitlab_error is not None:
+            raise JiraError(gitlab_error)
+        merge_request_data, selection = _retrieve_merge_requests(
+            description, gitlab_base_url, gitlab_client
+        )
+    elif merge_requests:
+        merge_request_data = [asdict(reference) for reference in merge_requests]
+        selection = MergeRequestSelection(
+            selected=None,
+            enabled=False,
+            reason="Merge request state has not been retrieved.",
+        )
+    else:
+        merge_request_data = []
     return {
         "key": issue.key,
         "summary": issue.summary or issue.key,
         "description": issue.description or "",
-        "merge_requests": merge_requests,
+        "merge_requests": merge_request_data,
+        "selected_merge_request": selection.selected,
+        "ready_to_merge_enabled": selection.enabled,
+        "merge_request_selection_reason": selection.reason,
         "issue_type_name": issue.issue_type_name,
         "status_name": issue.status_name,
         "local_ticket": (

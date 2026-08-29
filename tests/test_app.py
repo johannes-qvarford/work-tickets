@@ -20,6 +20,7 @@ atexit.register(_test_db_path.unlink, missing_ok=True)
 
 from work_tickets import refine  # noqa: E402
 from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
+from work_tickets.gitlab import GitLabClient, GitLabError, GitLabMergeRequest  # noqa: E402
 from work_tickets.jira import (  # noqa: E402
     JiraApiConventions,
     JiraClient,
@@ -34,6 +35,7 @@ from work_tickets.jira_service import (  # noqa: E402
     parse_gitlab_base_url,
     ready_to_merge_review,
     save_jira_issue,
+    select_merge_request,
     transition_jira_issue,
 )
 from work_tickets.models import (  # noqa: E402
@@ -929,7 +931,20 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
         def close(self) -> None:
             pass
 
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            assert config.gitlab_base_url == "https://gitlab.example"
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert project_path == "group/repository"
+            assert number == 1234
+            return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", FakeGitLabClient)
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
         if config is None:
@@ -967,12 +982,99 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
             "repository": "repository",
             "number": 1234,
             "url": "https://gitlab.example/group/repository/-/merge_requests/1234",
+            "state": "opened",
+            "updated_at": "2026-08-30T10:00:00Z",
         }
     ]
+    assert reviews[0]["selected_merge_request"]["number"] == 1234
+    assert reviews[0]["ready_to_merge_enabled"] is True
+    assert reviews[0]["merge_request_selection_reason"] == (
+        "Selected the only open MR; closed MRs were ignored."
+    )
     assert reviews[1]["key"] == "WORK-502"
     assert reviews[1]["summary"] == "Remote-only review"
     assert reviews[1]["local_ticket"] is None
     assert reviews[1]["error"] == "Jira returned HTTP 503."
+
+
+def test_api_reviews_exposes_selection_and_disables_ambiguous_or_failed_items(monkeypatch) -> None:
+    descriptions = {
+        "WORK-601": "https://gitlab.example/team/repository/-/merge_requests/1",
+        "WORK-602": " ".join(
+            (
+                "https://gitlab.example/team/repository/-/merge_requests/2",
+                "https://gitlab.example/team/repository/-/merge_requests/3",
+            )
+        ),
+        "WORK-603": " ".join(
+            (
+                "https://gitlab.example/team/repository/-/merge_requests/4",
+                "https://gitlab.example/team/repository/-/merge_requests/5",
+            )
+        ),
+        "WORK-604": "https://gitlab.example/team/repository/-/merge_requests/6",
+        "WORK-605": "No review link",
+    }
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def search_issues(self, jql: str) -> list[JiraIssue]:
+            del jql
+            return [JiraIssue(key=key, summary=key) for key in descriptions]
+
+        def get_issue(self, key: str) -> JiraIssue:
+            return JiraIssue(key=key, summary=key, description=descriptions[key])
+
+        def close(self) -> None:
+            pass
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert project_path == "team/repository"
+            if number == 1:
+                return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+            if number in {2, 3}:
+                return GitLabMergeRequest("opened", f"2026-08-30T{number:02d}:00:00Z")
+            if number == 4:
+                return GitLabMergeRequest("closed", "2026-08-30T10:00:00Z")
+            if number == 5:
+                return GitLabMergeRequest("closed", "2026-08-30T11:00:00Z")
+            if number == 6:
+                raise GitLabError("GitLab returned HTTP 503: unavailable.")
+            raise AssertionError(f"unexpected merge request {number}")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", FakeGitLabClient)
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.gitlab_base_url = "https://gitlab.example"
+        db.commit()
+
+    response = client.get("/api/reviews")
+
+    assert response.status_code == 200
+    reviews = {review["key"]: review for review in response.json()["reviews"]}
+    assert reviews["WORK-601"]["ready_to_merge_enabled"] is True
+    assert reviews["WORK-602"]["ready_to_merge_enabled"] is False
+    assert "multiple open MRs" in reviews["WORK-602"]["merge_request_selection_reason"]
+    assert reviews["WORK-603"]["selected_merge_request"]["number"] == 5
+    assert reviews["WORK-604"]["ready_to_merge_enabled"] is False
+    assert reviews["WORK-604"]["error"] == "GitLab returned HTTP 503: unavailable."
+    assert reviews["WORK-604"]["merge_requests"][0]["number"] == 6
+    assert reviews["WORK-604"]["merge_request_selection_reason"] == (
+        "Merge request state has not been retrieved."
+    )
+    assert reviews["WORK-605"]["selected_merge_request"] is None
+    assert reviews["WORK-605"]["ready_to_merge_enabled"] is False
 
 
 def test_detect_merge_requests_extracts_repository_and_number() -> None:
@@ -1064,6 +1166,164 @@ def test_detect_merge_requests_ignores_malformed_base_and_duplicate_links() -> N
         MergeRequestReference(repository="repository", number=42, url=link)
     ]
     assert detect_merge_requests(link, "not a url") == []
+
+
+def test_select_merge_request_disables_without_an_mr() -> None:
+    selection = select_merge_request([])
+
+    assert selection.selected is None
+    assert selection.enabled is False
+    assert selection.reason == "No merge requests were found in the Jira description."
+
+
+def test_select_merge_request_disables_when_multiple_mrs_are_open() -> None:
+    selection = select_merge_request(
+        [
+            (
+                MergeRequestReference("one", 1, "https://gitlab.example/one/-/merge_requests/1"),
+                GitLabMergeRequest("opened", "2026-08-30T10:00:00Z"),
+            ),
+            (
+                MergeRequestReference("two", 2, "https://gitlab.example/two/-/merge_requests/2"),
+                GitLabMergeRequest("opened", "2026-08-30T11:00:00Z"),
+            ),
+        ]
+    )
+
+    assert selection.selected is None
+    assert selection.enabled is False
+    assert "multiple open MRs" in selection.reason
+
+
+def test_select_merge_request_prefers_one_open_mr_over_closed_mrs() -> None:
+    selected = MergeRequestReference("open", 2, "https://gitlab.example/open/-/merge_requests/2")
+    selection = select_merge_request(
+        [
+            (
+                MergeRequestReference(
+                    "closed", 1, "https://gitlab.example/closed/-/merge_requests/1"
+                ),
+                GitLabMergeRequest("closed", "2026-08-30T12:00:00Z"),
+            ),
+            (selected, GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")),
+        ]
+    )
+
+    assert selection.enabled is True
+    assert selection.selected is not None
+    assert selection.selected["url"] == selected.url
+    assert selection.reason == "Selected the only open MR; closed MRs were ignored."
+
+
+def test_select_merge_request_uses_most_recent_closed_mr() -> None:
+    selected = MergeRequestReference("newer", 2, "https://gitlab.example/newer/-/merge_requests/2")
+    selection = select_merge_request(
+        [
+            (
+                MergeRequestReference(
+                    "older", 1, "https://gitlab.example/older/-/merge_requests/1"
+                ),
+                GitLabMergeRequest("closed", "2026-08-30T10:00:00Z"),
+            ),
+            (selected, GitLabMergeRequest("merged", "2026-08-30T11:00:00+00:00")),
+        ]
+    )
+
+    assert selection.enabled is True
+    assert selection.selected is not None
+    assert selection.selected["url"] == selected.url
+    assert selection.reason == "All MRs are closed; selected the most recently updated MR."
+
+
+def test_select_merge_request_rejects_unknown_state_and_invalid_updated_at() -> None:
+    reference = MergeRequestReference("repo", 1, "https://gitlab.example/repo/-/merge_requests/1")
+
+    for merge_request in (
+        GitLabMergeRequest("unknown", "2026-08-30T10:00:00Z"),
+        GitLabMergeRequest("closed", "not-a-timestamp"),
+    ):
+        try:
+            select_merge_request([(reference, merge_request)])
+        except JiraError as exc:
+            assert "merge request repo!1" in str(exc)
+        else:
+            raise AssertionError("Expected malformed merge request data to fail")
+
+
+def test_select_merge_request_disables_tied_closed_mrs() -> None:
+    selection = select_merge_request(
+        [
+            (
+                MergeRequestReference("one", 1, "https://gitlab.example/one/-/merge_requests/1"),
+                GitLabMergeRequest("closed", "2026-08-30T10:00:00Z"),
+            ),
+            (
+                MergeRequestReference("two", 2, "https://gitlab.example/two/-/merge_requests/2"),
+                GitLabMergeRequest("closed", "2026-08-30T10:00:00Z"),
+            ),
+        ]
+    )
+
+    assert selection.enabled is False
+    assert "tied" in selection.reason
+
+
+def test_gitlab_client_retrieves_merge_request_state_and_updated_at() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"state": "opened", "updated_at": "2026-08-30T10:00:00Z"},
+        )
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example/gitlab",
+        gitlab_token="gitlab-secret",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    result = gitlab.get_merge_request("group/repository", 42)
+    gitlab.close()
+
+    assert result == GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+    assert requests[0].url.raw_path == (
+        b"/gitlab/api/v4/projects/group%2Frepository/merge_requests/42"
+    )
+    assert requests[0].headers["PRIVATE-TOKEN"] == "gitlab-secret"
+
+
+def test_gitlab_client_reports_missing_fields_and_api_errors() -> None:
+    responses = [
+        httpx.Response(200, json={"updated_at": "2026-08-30T10:00:00Z"}),
+        httpx.Response(200, json={"state": "closed"}),
+        httpx.Response(503, json={"message": "GitLab unavailable"}),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return responses.pop(0)
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    for expected in ("without a valid state", "without a valid updated_at", "HTTP 503"):
+        try:
+            gitlab.get_merge_request("group/repository", 42)
+        except GitLabError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError("Expected GitLab response failure")
+    gitlab.close()
 
 
 def test_parse_gitlab_base_url_rejects_boundary_whitespace() -> None:
@@ -1402,7 +1662,11 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
 
         def get_issue(self, key: str) -> JiraIssue:
             calls.append(("get", key))
-            return JiraIssue(key=key, status_name="Awaiting Review")
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/509",
+                status_name="Awaiting Review",
+            )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(("transition", key, target_status, current_status))
@@ -1413,6 +1677,17 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
 
         def close(self) -> None:
             calls.append(("close",))
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 509)
+            return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def close(self) -> None:
+            pass
 
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
@@ -1427,11 +1702,13 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
             )
             db.add(config)
         config.ready_to_merge_status = "Merge Queue"
+        config.gitlab_base_url = "https://gitlab.example"
         db.commit()
         result = ready_to_merge_review(
             "work-509",
             db,
             jira_client_factory=FakeJiraClient,
+            gitlab_client_factory=FakeGitLabClient,
         )
         config.ready_to_merge_status = "Ready to Merge"
         db.commit()
@@ -1454,7 +1731,11 @@ def test_ready_to_merge_review_skips_transition_when_already_ready() -> None:
 
         def get_issue(self, key: str) -> JiraIssue:
             calls.append(f"get:{key}")
-            return JiraIssue(key=key, status_name="Ready to Merge")
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/510",
+                status_name="Ready to Merge",
+            )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             del key, target_status, current_status
@@ -1465,6 +1746,17 @@ def test_ready_to_merge_review_skips_transition_when_already_ready() -> None:
 
         def close(self) -> None:
             calls.append("close")
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 510)
+            return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def close(self) -> None:
+            pass
 
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
@@ -1479,14 +1771,52 @@ def test_ready_to_merge_review_skips_transition_when_already_ready() -> None:
             )
             db.add(config)
         config.ready_to_merge_status = "Ready to Merge"
+        config.gitlab_base_url = "https://gitlab.example"
         result = ready_to_merge_review(
             "WORK-510",
             db,
             jira_client_factory=FakeJiraClient,
+            gitlab_client_factory=FakeGitLabClient,
         )
 
     assert result.status_name == "Ready to Merge"
     assert calls == ["get:WORK-510", "comment:WORK-510:Tested and reviewed.", "close"]
+
+
+def test_ready_to_merge_review_refuses_without_an_unambiguous_mr() -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(f"get:{key}")
+            return JiraIssue(key=key, description="No merge request", status_name="In Review")
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            del key, target_status, current_status
+            raise AssertionError("an issue without a selected MR must not be transitioned")
+
+        def add_comment(self, key: str, comment: str) -> None:
+            del key, comment
+            raise AssertionError("an issue without a selected MR must not be commented")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.gitlab_base_url = ""
+        try:
+            ready_to_merge_review("WORK-512", db, jira_client_factory=FakeJiraClient)
+        except JiraError as exc:
+            assert str(exc) == "No merge requests were found in the Jira description."
+        else:
+            raise AssertionError("Expected Ready to Merge to require a selected MR")
+
+    assert calls == ["get:WORK-512", "close"]
 
 
 def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(monkeypatch) -> None:
@@ -1498,7 +1828,11 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
 
         def get_issue(self, key: str) -> JiraIssue:
             calls.append(("get", key))
-            return JiraIssue(key=key, status_name="Awaiting Review")
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/511",
+                status_name="Awaiting Review",
+            )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(("transition", key, target_status, current_status))
@@ -1510,7 +1844,19 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
         def close(self) -> None:
             calls.append(("close",))
 
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 511)
+            return GitLabMergeRequest(state="opened", updated_at="2026-08-30T10:00:00Z")
+
+        def close(self) -> None:
+            pass
+
     monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", FakeGitLabClient)
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
         if config is None:
@@ -1524,6 +1870,7 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
             )
             db.add(config)
         config.ready_to_merge_status = "Merge Queue"
+        config.gitlab_base_url = "https://gitlab.example"
         db.commit()
 
     response = client.post("/api/reviews/work-511/ready-to-merge")
@@ -1560,6 +1907,9 @@ def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
     assert "reviewActionState" in app_source
     assert "reviewActionErrors" in app_source
     assert "review.merge_requests" in app_source
+    assert "review.selected_merge_request" in app_source
+    assert "review.ready_to_merge_enabled" in app_source
+    assert "merge_request_selection_reason" in app_source
     assert "Detected merge requests" in app_source
     assert ':key="mergeRequest.url"' in app_source
 
