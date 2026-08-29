@@ -16,6 +16,13 @@ from .models import Category, JiraConfig, Ticket
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 
+def jira_issue_url(config: JiraConfig | None, issue_key: str | None) -> str | None:
+    if config is None or not issue_key or not config.browser_base_url.strip():
+        return None
+    browser_base_url = config.browser_base_url.strip().rstrip("/")
+    return f"{browser_base_url}/browse/{quote(issue_key, safe='')}"
+
+
 def ticket_list_context(db: Session) -> dict[str, object]:
     tickets = list(
         db.scalars(
@@ -34,10 +41,12 @@ def ticket_list_context(db: Session) -> dict[str, object]:
             and ticket.planned_date <= today
         )
     ]
+    config = db.get(JiraConfig, 1)
     return {
         "tickets": tickets,
         "today_tickets": today_tickets,
-        "jira_config": db.get(JiraConfig, 1),
+        "jira_config": config,
+        "jira_issue_url": lambda issue_key: jira_issue_url(config, issue_key),
         "today": today,
     }
 
@@ -89,10 +98,15 @@ def render_fragment(request: Request, template_name: str, context: Mapping[str, 
 
 
 def render_ticket(request: Request, ticket: Ticket, db: Session) -> str:
+    config = db.get(JiraConfig, 1)
     return render_fragment(
         request,
         "ticket.html",
-        {"ticket": ticket, "jira_config": db.get(JiraConfig, 1)},
+        {
+            "ticket": ticket,
+            "jira_config": config,
+            "jira_issue_url": lambda issue_key: jira_issue_url(config, issue_key),
+        },
     )
 
 

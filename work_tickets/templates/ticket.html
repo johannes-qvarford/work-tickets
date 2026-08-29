@@ -35,15 +35,16 @@
         draggable="true"
       >⠿</span>{% endif %}
       {% if ticket.jira_issue_key %}
-      {% if jira_config %}
+      {% set jira_url = jira_issue_url(ticket.jira_issue_key) %}
+      {% if jira_url %}
       <a
         class="badge"
-        href="{{ (jira_config.browser_base_url or jira_config.base_url) }}/browse/{{ ticket.jira_issue_key }}"
+        href="{{ jira_url }}"
         target="_blank"
         rel="noopener noreferrer"
-      >{{ ticket.jira_issue_key }}</a>
+      >({{ ticket.jira_issue_key }})</a>
       {% else %}
-      <span class="badge">{{ ticket.jira_issue_key }}</span>
+      <span class="badge">({{ ticket.jira_issue_key }})</span>
       {% endif %}
     {% else %}
       <span class="badge">LOCAL</span>
@@ -175,6 +176,10 @@
           <details class="subtask-details">
             <summary>
               <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">
+                {% set subtask_jira_url = jira_issue_url(subtask.jira_issue_key) %}
+                {% if subtask.jira_issue_key %}
+                {% if subtask_jira_url %}<a class="badge" href="{{ subtask_jira_url }}" target="_blank" rel="noopener noreferrer">({{ subtask.jira_issue_key }})</a>{% else %}<span class="badge">({{ subtask.jira_issue_key }})</span>{% endif %}
+                {% endif %}
                 <strong>{{ subtask.summary }}</strong>
                 <div class="subtask-meta">
                   {% if subtask.planned_date %}<time datetime="{{ subtask.planned_date }}">{{ subtask.planned_date }}</time>{% else %}Unscheduled{% endif %}
@@ -206,6 +211,10 @@
           {% else %}
           <div class="subtask-details">
             <div class="subtask-info completed">
+              {% set subtask_jira_url = jira_issue_url(subtask.jira_issue_key) %}
+              {% if subtask.jira_issue_key %}
+              {% if subtask_jira_url %}<a class="badge" href="{{ subtask_jira_url }}" target="_blank" rel="noopener noreferrer">({{ subtask.jira_issue_key }})</a>{% else %}<span class="badge">({{ subtask.jira_issue_key }})</span>{% endif %}
+              {% endif %}
               <strong>{{ subtask.summary }}</strong>
               <div class="subtask-meta">{% if subtask.planned_date %}<time datetime="{{ subtask.planned_date }}">{{ subtask.planned_date }}</time>{% else %}Unscheduled{% endif %} · Done</div>
             </div>

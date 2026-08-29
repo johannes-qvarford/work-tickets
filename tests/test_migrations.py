@@ -95,7 +95,7 @@ def test_existing_homegrown_tracking_is_converted_without_losing_data(tmp_path) 
             text("SELECT base_url, browser_base_url, project_key FROM jira_config WHERE id = 1")
         ).one() == (
             "https://api.example.test",
-            "https://api.example.test",
+            "",
             "WORK",
         )
         assert connection.execute(
@@ -137,7 +137,7 @@ def test_untracked_pre_migration_schema_is_upgraded_without_losing_data(tmp_path
             text("SELECT base_url, browser_base_url, project_key FROM jira_config WHERE id = 1")
         ).one() == (
             "https://api.example.test",
-            "https://api.example.test",
+            "",
             "WORK",
         )
         assert connection.execute(

@@ -20,12 +20,13 @@
           </div>
         </div>
         <div class="ticket-actions" aria-label="Ticket actions">
-          {% if ticket.jira_issue_key and jira_config %}<a
+          {% set jira_url = jira_issue_url(ticket.jira_issue_key) %}
+          {% if jira_url %}<a
   class="badge"
-  href="{{ (jira_config.browser_base_url or jira_config.base_url) }}/browse/{{ ticket.jira_issue_key }}"
+  href="{{ jira_url }}"
   target="_blank"
   rel="noopener noreferrer"
->{{ ticket.jira_issue_key }}</a>{% elif ticket.jira_issue_key %}<span class="badge">{{ ticket.jira_issue_key }}</span>{% else %}<span class="badge">LOCAL</span>{% endif %}
+>({{ ticket.jira_issue_key }})</a>{% elif ticket.jira_issue_key %}<span class="badge">({{ ticket.jira_issue_key }})</span>{% else %}<span class="badge">LOCAL</span>{% endif %}
           <form method="post" action="/tickets/{{ ticket.id }}/complete">
             <button
               class="compact-control completion-control"
