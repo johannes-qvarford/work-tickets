@@ -28,7 +28,10 @@ from work_tickets.jira import (  # noqa: E402
     JiraIssueWithSubtasks,
 )
 from work_tickets.jira_service import (  # noqa: E402
+    MergeRequestReference,
     canonicalize_jira_key,
+    detect_merge_requests,
+    parse_gitlab_base_url,
     ready_to_merge_review,
     save_jira_issue,
     transition_jira_issue,
@@ -918,7 +921,7 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
             return JiraIssue(
                 key=key,
                 summary="Updated local review",
-                description="Review details",
+                description="Review details: https://gitlab.example/group/repository/-/merge_requests/1234.",
                 issue_type_name="Story",
                 status_name="Awaiting Review",
             )
@@ -943,6 +946,7 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
         config.project_key = "WORK"
         config.issue_type = "Story"
         config.in_review_status = "Awaiting Review"
+        config.gitlab_base_url = "https://gitlab.example"
         local_ticket = Ticket(summary="Local ticket", jira_issue_key="work-501", position=0)
         db.add(local_ticket)
         db.commit()
@@ -958,10 +962,226 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
     assert reviews[0]["summary"] == "Updated local review"
     assert reviews[0]["local_ticket"]["summary"] == "Local ticket"
     assert reviews[0]["error"] is None
+    assert reviews[0]["merge_requests"] == [
+        {
+            "repository": "repository",
+            "number": 1234,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/1234",
+        }
+    ]
     assert reviews[1]["key"] == "WORK-502"
     assert reviews[1]["summary"] == "Remote-only review"
     assert reviews[1]["local_ticket"] is None
     assert reviews[1]["error"] == "Jira returned HTTP 503."
+
+
+def test_detect_merge_requests_extracts_repository_and_number() -> None:
+    assert detect_merge_requests(
+        "See https://gitlab.example/group1/group2/repository/-/merge_requests/1234.",
+        "https://gitlab.example",
+    ) == [
+        MergeRequestReference(
+            repository="repository",
+            number=1234,
+            url="https://gitlab.example/group1/group2/repository/-/merge_requests/1234",
+        )
+    ]
+
+
+def test_detect_merge_requests_accepts_adf_link_attributes_and_multiple_links() -> None:
+    description = {
+        "type": "doc",
+        "content": [
+            {
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Review this MR",
+                        "marks": [
+                            {
+                                "type": "link",
+                                "attrs": {
+                                    "href": "https://gitlab.example/team/service/-/merge_requests/12"
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "type": "text",
+                        "text": (" and https://gitlab.example/team/other/-/merge_requests/34"),
+                    },
+                ],
+            }
+        ],
+    }
+
+    assert detect_merge_requests(description, "https://gitlab.example/") == [
+        MergeRequestReference(
+            repository="service",
+            number=12,
+            url="https://gitlab.example/team/service/-/merge_requests/12",
+        ),
+        MergeRequestReference(
+            repository="other",
+            number=34,
+            url="https://gitlab.example/team/other/-/merge_requests/34",
+        ),
+    ]
+
+
+def test_detect_merge_requests_requires_configured_origin_and_base_path() -> None:
+    description = " ".join(
+        (
+            "https://gitlab.example/gitlab/team/repository/-/merge_requests/1,",
+            "https://gitlab.example/gitlab-other/team/repository/-/merge_requests/2",
+            "https://gitlab.example.evil/gitlab/team/repository/-/merge_requests/3",
+            "https://gitlab.example/gitlab/../team/repository/-/merge_requests/7",
+            "https://gitlab.example/gitlab/team/repository/-/merge_requests/4extra",
+            "https://gitlab.example/gitlab/team/repository/-/merge_requests/5/notes",
+            "https://gitlab.example/gitlab/team/repository/-/merge_requests/6",
+        )
+    )
+
+    assert detect_merge_requests(description, "https://gitlab.example/gitlab/") == [
+        MergeRequestReference(
+            repository="repository",
+            number=1,
+            url="https://gitlab.example/gitlab/team/repository/-/merge_requests/1",
+        ),
+        MergeRequestReference(
+            repository="repository",
+            number=6,
+            url="https://gitlab.example/gitlab/team/repository/-/merge_requests/6",
+        ),
+    ]
+
+
+def test_detect_merge_requests_ignores_malformed_base_and_duplicate_links() -> None:
+    link = "https://gitlab.example/team/repository/-/merge_requests/42"
+
+    assert detect_merge_requests(f"{link} {link}", "https://gitlab.example") == [
+        MergeRequestReference(repository="repository", number=42, url=link)
+    ]
+    assert detect_merge_requests(link, "not a url") == []
+
+
+def test_parse_gitlab_base_url_rejects_boundary_whitespace() -> None:
+    for value in (
+        " https://gitlab.example/group",
+        "https://gitlab.example/group ",
+        "\thttps://gitlab.example/group",
+        "https://gitlab.example/group\n",
+    ):
+        assert parse_gitlab_base_url(value) is None
+
+
+def test_detect_merge_requests_rejects_encoded_whitespace_and_control_path_values() -> None:
+    description = " ".join(
+        (
+            "https://gitlab.example/team/%20repository/-/merge_requests/1",
+            "https://gitlab.example/team/%00repository/-/merge_requests/2",
+            "https://gitlab.example/team/%0Arepository/-/merge_requests/3",
+        )
+    )
+
+    assert detect_merge_requests(description, "https://gitlab.example") == []
+
+
+def test_parse_gitlab_base_url_accepts_valid_urls() -> None:
+    assert parse_gitlab_base_url("https://gitlab.example/group/") == (
+        "https",
+        "gitlab.example",
+        443,
+        "/group",
+    )
+    assert parse_gitlab_base_url("http://gitlab.example:8080/group") == (
+        "http",
+        "gitlab.example",
+        8080,
+        "/group",
+    )
+
+
+def test_detect_merge_requests_distinguishes_same_basename_in_different_groups() -> None:
+    assert detect_merge_requests(
+        " ".join(
+            (
+                "https://gitlab.example/team-a/repository/-/merge_requests/42",
+                "https://gitlab.example/team-b/repository/-/merge_requests/42",
+                "https://gitlab.example/team-a/repository/-/merge_requests/42",
+            )
+        ),
+        "https://gitlab.example",
+    ) == [
+        MergeRequestReference(
+            repository="repository",
+            number=42,
+            url="https://gitlab.example/team-a/repository/-/merge_requests/42",
+        ),
+        MergeRequestReference(
+            repository="repository",
+            number=42,
+            url="https://gitlab.example/team-b/repository/-/merge_requests/42",
+        ),
+    ]
+
+
+def test_api_rejects_unsafe_gitlab_base_urls_without_persisting_or_exposing_them() -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://jira.example.test",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+            )
+            db.add(config)
+        config.gitlab_base_url = "https://previous.gitlab.example/group"
+        config.gitlab_token = "previous-gitlab-secret"
+        db.commit()
+
+    invalid_urls = (
+        "https://user:password@gitlab.example.test",
+        "https://gitlab.example.test:not-a-port",
+        "https://gitlab.example.test:",
+        "https://gitlab.example.test/group?project=work",
+        "https://gitlab.example.test/group#merge-requests",
+        "https://gitlab.example.test/group/../other",
+        "https://gitlab.example.test/group with-space",
+        " https://gitlab.example.test/group",
+        "https://gitlab.example.test/group ",
+        "https://gitlab.example.test/group/%20path",
+        "https://gitlab.example.test/group/%00path",
+    )
+    for invalid_url in invalid_urls:
+        response = client.put(
+            "/api/settings/jira",
+            json={
+                "base_url": "https://jira.example.test",
+                "email": "person@example.test",
+                "api_token": "test-token",
+                "project_key": "WORK",
+                "issue_type": "Task",
+                "gitlab_base_url": invalid_url,
+                "gitlab_token": "new-gitlab-secret",
+            },
+        )
+
+        assert response.status_code == 422
+        assert "state" not in response.json()
+        with SessionLocal() as db:
+            config = db.get(JiraConfig, 1)
+            assert config is not None
+            assert config.gitlab_base_url == "https://previous.gitlab.example/group"
+            assert config.gitlab_token == "previous-gitlab-secret"
+
+    state = client.get("/api/state").json()
+    assert state["jira_config"]["gitlab_base_url"] == "https://previous.gitlab.example/group"
+    assert "gitlab_token" not in state["jira_config"]
 
 
 def test_jira_client_searches_issues_with_paging_fields() -> None:
@@ -1339,6 +1559,9 @@ def test_reviews_frontend_has_navigation_refresh_and_item_error_state() -> None:
     assert "ready-to-merge" in app_source
     assert "reviewActionState" in app_source
     assert "reviewActionErrors" in app_source
+    assert "review.merge_requests" in app_source
+    assert "Detected merge requests" in app_source
+    assert ':key="mergeRequest.url"' in app_source
 
 
 def test_workflow_status_settings_are_present_in_frontend() -> None:

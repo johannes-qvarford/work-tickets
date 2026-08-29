@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
+from unicodedata import category
 from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import select
@@ -12,15 +14,31 @@ from .jira import JiraClient, JiraError, JiraIssue
 from .models import JiraConfig, Ticket
 
 _JIRA_ISSUE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]*-[A-Za-z0-9]+")
+_URL_CANDIDATE = re.compile(r"(?<![A-Za-z0-9_])https?://[^\s<>\"']+", re.IGNORECASE)
+_MERGE_REQUEST_PATH = re.compile(
+    r"(?P<repository_path>.+)/-/merge_requests/(?P<number>[1-9][0-9]*)/?$"
+)
+
+
+@dataclass(frozen=True)
+class MergeRequestReference:
+    repository: str
+    number: int
+    url: str
+
+
 __all__ = [
     "JiraClientFactory",
     "JiraError",
+    "MergeRequestReference",
     "canonicalize_jira_key",
+    "detect_merge_requests",
     "delete_linked_jira_issue",
     "fetch_reviews",
     "import_ticket_from_jira",
     "is_jira_issue_reference_candidate",
     "parse_jira_issue_reference",
+    "parse_gitlab_base_url",
     "reconcile_jira_subtasks",
     "save_jira_issue",
     "sync_subtask",
@@ -37,6 +55,135 @@ type JiraClientFactory = Callable[[JiraConfig], JiraClient]
 def canonicalize_jira_key(key: str) -> str:
     """Return the stable representation used for stored and runtime Jira keys."""
     return key.strip().upper()
+
+
+def detect_merge_requests(
+    description: str | Mapping[str, object] | None,
+    gitlab_base_url: str,
+) -> list[MergeRequestReference]:
+    """Find GitLab merge request links in a Jira description.
+
+    Jira Cloud descriptions are converted to plain text by ``JiraClient``, but
+    accepting the raw ADF shape here also preserves links whose visible text is
+    not the URL. Only links with the same HTTP origin and a path beneath the
+    configured GitLab base path are considered.
+    """
+    base = parse_gitlab_base_url(gitlab_base_url)
+    if base is None:
+        return []
+
+    found: list[MergeRequestReference] = []
+    seen: set[tuple[str, int]] = set()
+    for value in _description_values(description):
+        for match in _URL_CANDIDATE.finditer(value):
+            candidate = match.group(0).rstrip(".,;:!?)]}")
+            reference = _parse_merge_request_url(candidate, base)
+            if reference is None:
+                continue
+            reference_value, repository_path = reference
+            identity = (repository_path, reference_value.number)
+            if identity not in seen:
+                seen.add(identity)
+                found.append(reference_value)
+    return found
+
+
+def _description_values(value: object) -> list[str]:
+    """Return searchable text and link attributes from plain text or ADF."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        values: list[str] = []
+        for child in value.values():
+            values.extend(_description_values(child))
+        return values
+    if isinstance(value, list):
+        values = []
+        for child in value:
+            values.extend(_description_values(child))
+        return values
+    return []
+
+
+def parse_gitlab_base_url(value: str) -> tuple[str, str, int, str] | None:
+    """Parse a GitLab base URL using the same safe rules as link detection."""
+    parsed_url = _parse_gitlab_url(value)
+    if parsed_url is None:
+        return None
+    scheme, hostname, port, path = parsed_url
+    return scheme, hostname, port, path.rstrip("/") or "/"
+
+
+def _parse_gitlab_url(value: str) -> tuple[str, str, int, str] | None:
+    """Parse an absolute GitLab URL without accepting unsafe URL components."""
+    if not value or _contains_whitespace_or_control(value):
+        return None
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (AttributeError, ValueError):
+        return None
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not hostname
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or "?" in value
+        or "#" in value
+        or parsed.netloc.endswith(":")
+    ):
+        return None
+    scheme = parsed.scheme.lower()
+    path = unquote(parsed.path)
+    if _contains_whitespace_or_control(path):
+        return None
+    if any(segment in {".", ".."} for segment in path.split("/")):
+        return None
+    return scheme, hostname.lower().rstrip("."), _effective_port(scheme, port), path
+
+
+def _contains_whitespace_or_control(value: str) -> bool:
+    return any(character.isspace() or category(character) == "Cc" for character in value)
+
+
+def _parse_merge_request_url(
+    value: str,
+    base: tuple[str, str, int, str],
+) -> tuple[MergeRequestReference, str] | None:
+    parsed_url = _parse_gitlab_url(value)
+    if parsed_url is None:
+        return None
+    if parsed_url[:3] != base[:3]:
+        return None
+
+    base_path = base[3]
+    path = parsed_url[3]
+    if base_path == "/":
+        relative_path = path.removeprefix("/")
+    elif path.startswith(f"{base_path}/"):
+        relative_path = path[len(base_path) + 1 :]
+    else:
+        return None
+    match = _MERGE_REQUEST_PATH.fullmatch(relative_path)
+    if match is None:
+        return None
+    repository_path = match.group("repository_path")
+    if any(not segment for segment in repository_path.split("/")):
+        return None
+    repository = repository_path.rsplit("/", 1)[-1]
+    if not repository:
+        return None
+    return MergeRequestReference(
+        repository=repository,
+        number=int(match.group("number")),
+        url=value,
+    ), repository_path
+
+
+def _effective_port(scheme: str, port: int | None) -> int:
+    return port if port is not None else {"http": 80, "https": 443}[scheme]
 
 
 def fetch_reviews(
@@ -65,13 +212,13 @@ def fetch_reviews(
         search_results = jira.search_issues(jql)
         reviews: list[dict[str, object]] = []
         for search_result in search_results:
-            review = _review_data(search_result, local_tickets_by_key)
+            review = _review_data(search_result, local_tickets_by_key, config.gitlab_base_url)
             try:
                 issue = jira.get_issue(search_result.key)
             except JiraError as exc:
                 review["error"] = str(exc)
             else:
-                review.update(_review_data(issue, local_tickets_by_key))
+                review.update(_review_data(issue, local_tickets_by_key, config.gitlab_base_url))
             reviews.append(review)
     finally:
         jira.close()
@@ -139,12 +286,18 @@ def _jql_value(value: str) -> str:
 def _review_data(
     issue: JiraIssue,
     local_tickets_by_key: dict[str, Ticket],
+    gitlab_base_url: str,
 ) -> dict[str, object]:
     local_ticket = local_tickets_by_key.get(canonicalize_jira_key(issue.key))
+    description = issue.description_adf if issue.description_adf is not None else issue.description
+    merge_requests = [
+        asdict(reference) for reference in detect_merge_requests(description, gitlab_base_url)
+    ]
     return {
         "key": issue.key,
         "summary": issue.summary or issue.key,
         "description": issue.description or "",
+        "merge_requests": merge_requests,
         "issue_type_name": issue.issue_type_name,
         "status_name": issue.status_name,
         "local_ticket": (
