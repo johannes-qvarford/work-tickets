@@ -196,7 +196,6 @@ function moveTicketBy(offset: number) {
     <template #content>
       <div class="ticket-title">
         <div>
-          <span class="ticket-marker">{{ ticket.local_completed ? "✓" : "○" }}</span>
           <strong>{{ ticket.summary }}</strong>
           <a v-if="jiraIssueUrl(ticket.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(ticket.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ ticket.jira_issue_key }})</a>
           <span v-else-if="ticket.jira_issue_key" class="jira-key">({{ ticket.jira_issue_key }})</span>
