@@ -27,6 +27,7 @@ __all__ = [
     "sync_ticket",
     "sync_ticket_from_jira",
     "transition_jira_issue",
+    "ready_to_merge_review",
 ]
 
 
@@ -100,6 +101,33 @@ def transition_jira_issue(
             target_status,
             current_status=current.status_name,
         )
+    finally:
+        jira.close()
+
+
+def ready_to_merge_review(
+    issue_key: str,
+    db: Session,
+    *,
+    jira_client_factory: JiraClientFactory = JiraClient,
+) -> JiraIssue:
+    """Mark a review ready to merge and record that it was tested and reviewed."""
+    config = db.get(JiraConfig, 1)
+    if config is None:
+        raise JiraError("Jira is not configured. Configure Jira before completing a review.")
+
+    canonical_key = canonicalize_jira_key(issue_key)
+    jira = jira_client_factory(config)
+    try:
+        current = jira.get_issue(canonical_key)
+        if current.status_name != config.ready_to_merge_status:
+            current = jira.transition_issue(
+                canonical_key,
+                config.ready_to_merge_status,
+                current_status=current.status_name,
+            )
+        jira.add_comment(canonical_key, "Tested and reviewed.")
+        return current
     finally:
         jira.close()
 

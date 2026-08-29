@@ -69,6 +69,9 @@ class JiraApiConventions:
     def description_payload(self, description: str) -> str | dict[str, Any]:
         return self._adf(description) if self.uses_adf_descriptions else description
 
+    def comment_payload(self, comment: str) -> str | dict[str, Any]:
+        return self._adf(comment) if self.uses_adf_descriptions else comment
+
     @staticmethod
     def _adf(description: str) -> dict[str, Any]:
         paragraphs = description.splitlines() or [""]
@@ -187,6 +190,14 @@ class JiraClient:
             "DELETE",
             self._api_path(f"issue/{quote(key, safe='')}"),
             expect_json=False,
+        )
+
+    def add_comment(self, key: str, comment: str) -> None:
+        """Add a plain-text comment to a Jira issue."""
+        self._request(
+            "POST",
+            self._api_path(f"issue/{quote(key, safe='')}/comment"),
+            json={"body": self._conventions.comment_payload(comment)},
         )
 
     def get_issue(self, key: str) -> JiraIssue:

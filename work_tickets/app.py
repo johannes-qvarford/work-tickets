@@ -133,6 +133,25 @@ def api_reviews(db: Session = Depends(get_db)) -> Response:
     return JSONResponse({"ok": True, **reviews})
 
 
+@app.post("/api/reviews/{issue_key}/ready-to-merge")
+def api_ready_to_merge_review(issue_key: str, db: Session = Depends(get_db)) -> Response:
+    try:
+        issue = jira_service.ready_to_merge_review(
+            issue_key,
+            db,
+            jira_client_factory=JiraClient,
+        )
+    except jira_service.JiraError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": "Review marked ready to merge.",
+            "review": {"key": issue.key, "status_name": issue.status_name},
+        }
+    )
+
+
 @app.websocket("/api/tickets/{ticket_id}/refine")
 async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
     await websocket.accept()
