@@ -4,7 +4,7 @@
 - [x] Button on ticket for removing due date (unfocus)
 - [x] For synced tickets: Label on ticket like (SCRUM-1234) with clickable link that takes you to the browser link of the ticket in a separate tab. Same for subtasks.
 - [x] No need for the Overview section - it can be removed.
-- [ ] Button to switch between showing Focus and Queue. Should be located in same section as "Filter by category". Should be preserved across refreshes.
+- [x] Button to switch between showing Focus and Queue. Should be located in same section as "Filter by category". Should be preserved across refreshes.
 - [ ] Be able to rearrange tickets and subtasks within a ticket by dragging. When syncing to Jira, order is preserved for subtask creation but is not synced to jira beyond that point.
 - [ ] Git hook for verification. Both installation command, and installing it yourself.
 - [ ] Remove legacy frontend support and legacy-only related resources and code.
