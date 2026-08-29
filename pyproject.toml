@@ -7,30 +7,17 @@ dependencies = [
     "alembic>=1.17.2",
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
-    "jinja2>=3.1.6",
-    "python-multipart>=0.0.20",
     "sqlalchemy>=2.0.52",
     "uvicorn[standard]>=0.52.0",
 ]
 
 [dependency-groups]
 dev = [
-    "djlint==1.44.2",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.4",
 ]
-
-[tool.djlint]
-profile = "jinja"
-indent = 2
-max_line_length = 100
-max_attribute_length = 100
-single_attribute_per_line = true
-no_function_formatting = true
-ignore_blocks = "if,for"
-ignore = "H030,J018,T028"
 
 [tool.ruff]
 line-length = 100

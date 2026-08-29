@@ -4,8 +4,7 @@
 
 `work-tickets` is a local-only, single-user personal ticket workflow application.
 The backend uses FastAPI, SQLite, SQLAlchemy, and uv. The main interface is a Vue 3,
-PrimeVue, and Vite single-page application in `frontend/`. The previous Jinja2 interface
-is retained at `/legacy` for compatibility.
+PrimeVue, and Vite single-page application in `frontend/`.
 
 ## Development commands
 
@@ -35,7 +34,6 @@ Run all checks:
 ```sh
 uv run ruff check .
 uv run ruff format --check .
-uv run djlint --check work_tickets/templates/index.html
 uv run mypy work_tickets
 uv run pytest
 npm run check --prefix frontend
@@ -50,8 +48,7 @@ npm run build --prefix frontend
 - Use SQLAlchemy models for persistence; do not commit `work-tickets.db`.
 - Keep Vue and TypeScript frontend code under `frontend/` and rebuild `work_tickets/static/`
   after frontend changes; the generated static assets are packaged with the Python wheel.
-- Use the FastAPI JSON endpoints under `/api` for SPA data and mutations. Keep the existing
-  form endpoints and `/legacy` Jinja templates available for compatibility.
+- Use the FastAPI JSON endpoints under `/api` for SPA data and mutations.
 - Keep local-only workflow fields separate from future Jira-owned fields.
 - OpenCode integration is intentionally deferred.
 - Run the complete local checks before committing changes.
