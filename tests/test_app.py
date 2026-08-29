@@ -746,14 +746,30 @@ def test_ticket_date_fields_offer_today_quick_actions() -> None:
 
     for form in (create_form, edit_form, subtask_edit_form, new_subtask_form):
         assert form.count("data-today-date") == 1
+        assert form.count("data-clear-date") == 1
         assert form.index('name="planned_date"') < form.index("data-today-date")
+        assert form.index("data-today-date") < form.index("data-clear-date")
         assert 'type="button"' in form
         assert 'aria-label="Set planned date to today"' in form
+        assert 'aria-label="Remove ' in form
     assert 'value="2026-08-28"' in edit_form
     assert 'value="2026-08-27"' in subtask_edit_form
+    assert 'data-clear-date aria-label="Remove planned date"' in edit_form
+    assert 'data-clear-date aria-label="Remove subtask planned date"' in subtask_edit_form
+    assert 'data-clear-date aria-label="Remove planned date" disabled' in create_form
+    clear_new_subtask_date = 'data-clear-date aria-label="Remove new subtask planned date" disabled'
+    assert clear_new_subtask_date in new_subtask_form
     assert "function localDateValue()" in page.text
     assert "input.value = localDateValue();" in page.text
+    assert 'if (button.matches("[data-today-date]")) input.value = localDateValue();' in page.text
+    assert 'else input.value = "";' in page.text
+    assert 'input.dispatchEvent(new Event("input", { bubbles: true }));' in page.text
     assert 'input.dispatchEvent(new Event("change", { bubbles: true }));' in page.text
+    assert "clearButton.disabled = !input?.value;" in page.text
+    reset_state = (
+        'form.reset();\n             updateDateControl(form.querySelector(".date-control"));'
+    )
+    assert reset_state in page.text
 
 
 def test_edit_cannot_change_a_ticket_category() -> None:
@@ -3140,3 +3156,31 @@ def test_spa_subtask_dates_are_created_and_updated() -> None:
         persisted = db.get(Ticket, subtask_id)
         assert persisted is not None
         assert persisted.planned_date == date(2026, 9, 1)
+
+
+def test_spa_new_subtask_without_planned_date_is_persisted_unset() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="SPA unset date parent", position=212)
+        db.add(parent)
+        db.commit()
+        parent_id = parent.id
+
+    response = client.post(
+        f"/api/tickets/{parent_id}/subtasks",
+        json={
+            "summary": "SPA unset date child",
+            "description": "",
+            "planned_date": None,
+        },
+    )
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        created = db.scalar(
+            select(Ticket).where(
+                Ticket.parent_id == parent_id,
+                Ticket.summary == "SPA unset date child",
+            )
+        )
+        assert created is not None
+        assert created.planned_date is None
