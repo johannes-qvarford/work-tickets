@@ -48,6 +48,21 @@ npm run check --prefix frontend
 npm run build --prefix frontend
 ```
 
+Install the repository's verification hook once per checkout. The command can be run
+from the repository root or any of its subdirectories:
+
+```sh
+git -C "$(git rev-parse --show-toplevel)" config core.hooksPath .githooks
+```
+
+The hook runs the complete check suite above before each commit and stops at the first
+failing command. Verify the installation with:
+
+```sh
+git config --get core.hooksPath
+test -x "$(git rev-parse --show-toplevel)/.githooks/pre-commit"
+```
+
 Format the Jinja template with:
 
 ```sh

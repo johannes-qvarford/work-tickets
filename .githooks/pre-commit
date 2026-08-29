@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+run_check() {
+    printf '\n[pre-commit] %s\n' "$*"
+    "$@"
+}
+
+run_check uv run ruff check .
+run_check uv run ruff format --check .
+run_check uv run djlint --check work_tickets/templates/index.html
+run_check uv run mypy work_tickets
+run_check uv run pytest
+run_check npm run check --prefix frontend
+run_check npm run build --prefix frontend
+
+printf '\n[pre-commit] All checks passed.\n'
