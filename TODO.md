@@ -10,7 +10,7 @@
 
   The ticket state should remain clear from the existing styling and controls without an additional marker beside the title.
 
-- [ ] Make the ticket drag handle larger and move it to the leftmost side of the ticket, before the title.
+- [x] Make the ticket drag handle larger and move it to the leftmost side of the ticket, before the title.
 
 - [ ] Fix the ticket drag insertion edge case.
 
