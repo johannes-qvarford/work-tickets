@@ -20,7 +20,7 @@ h3 { margin: 0; font-size: 1.15rem; }
 .ticket-section { padding: 28px; border-radius: 16px; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
 .muted { color: #93a4ba; }
-.ticket-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 390px), 1fr)); gap: 14px; }
+.ticket-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .ticket-card { border: 1px solid #2a405d; background: #142238; transition: transform .2s, border-color .2s; }
 .ticket-card:hover { transform: translateY(-2px); border-color: #4d7197; }
 .ticket-card.completed { opacity: .68; }
