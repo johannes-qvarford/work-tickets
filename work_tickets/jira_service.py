@@ -298,6 +298,7 @@ def _merge_request_dict(
         **asdict(reference),
         "state": merge_request.state,
         "updated_at": merge_request.updated_at,
+        "draft": merge_request.draft,
     }
 
 
@@ -479,6 +480,11 @@ def ready_to_merge_review(
             selection,
             gitlab,
         )
+        _mark_selected_merge_request_ready(
+            config.gitlab_base_url,
+            selection,
+            gitlab,
+        )
         if current.status_name != config.ready_to_merge_status:
             current = jira.transition_issue(
                 canonical_key,
@@ -520,6 +526,40 @@ def _approve_selected_merge_request(
         ).approved:
             raise JiraError(
                 f"GitLab did not approve merge request {reference.repository}!{reference.number}."
+            )
+    except GitLabError as exc:
+        raise JiraError(str(exc)) from exc
+
+
+def _mark_selected_merge_request_ready(
+    gitlab_base_url: str,
+    selection: MergeRequestSelection,
+    gitlab_client: GitLabClient | None,
+) -> None:
+    """Remove the draft flag from the MR selected after resolving all links."""
+    if selection.selected is None or gitlab_client is None:
+        raise JiraError("GitLab merge request details could not be retrieved.")
+
+    selected_url = selection.selected.get("url")
+    if not isinstance(selected_url, str):
+        raise JiraError("The selected GitLab merge request has an invalid URL.")
+    draft = selection.selected.get("draft")
+    if not isinstance(draft, bool):
+        raise JiraError("The selected GitLab merge request has an invalid draft state.")
+    if not draft:
+        return
+
+    base = parse_gitlab_base_url(gitlab_base_url)
+    parsed = _parse_merge_request_url(selected_url, base) if base is not None else None
+    if parsed is None:
+        raise JiraError("Could not determine the GitLab project for the selected merge request.")
+    reference, project_path = parsed
+    try:
+        gitlab_client.mark_merge_request_ready(project_path, reference.number)
+        if gitlab_client.get_merge_request(project_path, reference.number).draft:
+            raise JiraError(
+                f"GitLab did not mark merge request {reference.repository}!{reference.number} "
+                "as ready."
             )
     except GitLabError as exc:
         raise JiraError(str(exc)) from exc

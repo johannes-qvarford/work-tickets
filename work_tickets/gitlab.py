@@ -17,6 +17,7 @@ class GitLabError(Exception):
 class GitLabMergeRequest:
     state: str
     updated_at: str
+    draft: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,13 @@ class GitLabClient:
             raise GitLabError(
                 f"GitLab returned merge request {project_path}!{number} without a valid updated_at."
             )
-        return GitLabMergeRequest(state=state, updated_at=updated_at)
+        draft = response.get("draft")
+        if not isinstance(draft, bool):
+            raise GitLabError(
+                f"GitLab returned merge request {project_path}!{number} without a valid "
+                "draft state."
+            )
+        return GitLabMergeRequest(state=state, updated_at=updated_at, draft=draft)
 
     def get_merge_request_approval_state(
         self, project_path: str, number: int
@@ -85,6 +92,16 @@ class GitLabClient:
             "POST",
             f"{self._api_prefix}/projects/{quote(project_path, safe='')}/merge_requests/"
             f"{number}/approve",
+            expect_json=False,
+        )
+
+    def mark_merge_request_ready(self, project_path: str, number: int) -> None:
+        """Remove the draft flag using GitLab's ``/ready`` quick action."""
+        self._request(
+            "POST",
+            f"{self._api_prefix}/projects/{quote(project_path, safe='')}/merge_requests/"
+            f"{number}/notes",
+            json={"body": "/ready"},
             expect_json=False,
         )
 
