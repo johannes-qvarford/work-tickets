@@ -21,7 +21,7 @@ uv run uvicorn work_tickets.app:app --reload
 Then open <http://127.0.0.1:8000>. The root route serves the Vue/PrimeVue single-page
 application. It provides separate hash-routed pages for tickets, ticket creation,
 categories, and application settings. The previous Jinja interface remains available at
-`/legacy` while integrations are migrated.
+`/legacy` for compatibility.
 
 The frontend source is in `frontend/`. Install Node dependencies and build the packaged
 static assets after frontend changes:
@@ -44,6 +44,8 @@ uv run ruff format --check .
 uv run djlint --check work_tickets/templates/index.html
 uv run mypy work_tickets
 uv run pytest
+npm run check --prefix frontend
+npm run build --prefix frontend
 ```
 
 Format the Jinja template with:

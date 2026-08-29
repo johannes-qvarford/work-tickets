@@ -10,6 +10,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
@@ -29,3 +35,9 @@ jobs:
         run: uv run mypy work_tickets
       - name: Test
         run: uv run pytest
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Check frontend types
+        run: npm run check --prefix frontend
+      - name: Build frontend assets
+        run: npm run build --prefix frontend
