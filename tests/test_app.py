@@ -82,6 +82,12 @@ def test_packaged_spa_assets_are_served() -> None:
 
 
 def test_ticket_and_subtask_api_mutations_persist_state() -> None:
+    with SessionLocal() as db:
+        category = Category(name="API update category")
+        db.add(category)
+        db.commit()
+        category_id = category.id
+
     create_response = client.post(
         "/api/tickets",
         json={
@@ -104,6 +110,7 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
             "description": "Updated details",
             "notes": "Updated local notes",
             "planned_date": "2026-08-25",
+            "category_id": category_id,
         },
     )
     subtask_response = client.post(
@@ -147,6 +154,7 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
         assert ticket.summary == "API updated ticket"
         assert ticket.notes == "Updated local notes"
         assert ticket.planned_date == date(2026, 8, 25)
+        assert ticket.category_id == category_id
         assert subtask.summary == "API updated subtask"
         assert subtask.notes is None
         assert subtask.planned_date == date(2026, 8, 27)

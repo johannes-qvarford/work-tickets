@@ -148,6 +148,7 @@ def update_ticket(
     description: str,
     notes: str,
     planned_date: str,
+    category_id: int | None,
     db: Session,
     jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
 ) -> Response:
@@ -169,11 +170,14 @@ def update_ticket(
     planned_date_value = _parse_date(planned_date)
     if planned_date and planned_date_value is None:
         return mutation_response(request, "error", "Ticket planned date is invalid.", 422)
+    if category_id is not None and db.get(Category, category_id) is None:
+        return mutation_response(request, "error", "Ticket category was not found.", 422)
 
     ticket.summary = summary_value
     ticket.description = description
     ticket.notes = notes
     ticket.planned_date = planned_date_value
+    ticket.category_id = category_id
     if ticket.jira_issue_key:
         from .jira_service import sync_ticket
 

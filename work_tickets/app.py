@@ -151,6 +151,7 @@ def api_update_ticket(
         payload.description,
         payload.notes,
         payload.planned_date.isoformat() if payload.planned_date else "",
+        payload.category_id,
         db,
         jira_client_factory=JiraClient,
     )
