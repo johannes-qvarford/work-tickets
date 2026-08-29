@@ -100,7 +100,7 @@
 
   Extract the MR number and repository name. Omit repository groups from the displayed repository name. Detection may later be replaced with a Jira custom field.
 
-- [ ] Select an unambiguous MR for each ticket.
+- [x] Select an unambiguous MR for each ticket.
 
   If multiple MRs are found and more than one remains open, disable `Ready to Merge` and document that the action requires one unambiguous MR.
 
