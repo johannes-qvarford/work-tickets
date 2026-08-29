@@ -836,6 +836,409 @@ def test_completion_rejects_missing_and_subtask_targets() -> None:
         assert subtask is not None and subtask.local_completed is False
 
 
+def test_completion_keeps_done_tickets_below_active_and_uncompletion_prioritizes() -> None:
+    with SessionLocal() as db:
+        first = Ticket(summary="Completion order first", position=0)
+        second = Ticket(summary="Completion order second", position=1)
+        already_done = Ticket(summary="Completion order done", position=2, local_completed=True)
+        db.add_all([first, second, already_done])
+        db.commit()
+        first_id = first.id
+        second_id = second.id
+        done_id = already_done.id
+
+    state = client.get("/api/state").json()
+    relevant_ids = {
+        first_id,
+        second_id,
+        done_id,
+    }
+    assert [ticket["id"] for ticket in state["tickets"] if ticket["id"] in relevant_ids] == [
+        first_id,
+        second_id,
+        done_id,
+    ]
+
+    response = client.post(f"/api/tickets/{second_id}/complete")
+    assert response.status_code == 200
+    assert [
+        ticket["id"]
+        for ticket in response.json()["state"]["tickets"]
+        if ticket["id"] in relevant_ids
+    ] == [first_id, done_id, second_id]
+
+    response = client.post(f"/api/tickets/{second_id}/complete")
+    assert response.status_code == 200
+    assert [
+        ticket["id"]
+        for ticket in response.json()["state"]["tickets"]
+        if ticket["id"] in relevant_ids
+    ] == [second_id, first_id, done_id]
+
+    with SessionLocal() as db:
+        updated = db.get(Ticket, second_id)
+        assert updated is not None
+        assert updated.local_completed is False
+        assert updated.position == 0
+
+
+def test_done_tickets_cannot_be_edited_or_reordered() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Locked completed ticket", position=0, local_completed=True)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    update_response = client.put(
+        f"/api/tickets/{ticket_id}",
+        json={"summary": "Changed", "description": "Changed", "planned_date": None},
+    )
+    move_response = client.post(
+        f"/api/tickets/{ticket_id}/move",
+        params={"target_index": 0},
+    )
+
+    assert update_response.status_code == 400
+    assert update_response.json() == {
+        "ok": False,
+        "message": "Done tickets can only be marked active.",
+    }
+    assert move_response.status_code == 400
+    assert move_response.json() == {
+        "ok": False,
+        "message": "Done tickets cannot be reordered.",
+    }
+    with SessionLocal() as db:
+        unchanged = db.get(Ticket, ticket_id)
+        assert unchanged is not None
+        assert unchanged.summary == "Locked completed ticket"
+
+
+def test_completed_items_have_no_edit_or_reorder_controls_in_legacy_view() -> None:
+    with SessionLocal() as db:
+        ticket = Ticket(summary="Locked view ticket", position=0, local_completed=True)
+        subtask = Ticket(
+            summary="Locked view subtask",
+            position=0,
+            parent=ticket,
+            local_completed=True,
+        )
+        db.add_all([ticket, subtask])
+        db.commit()
+        ticket_id = ticket.id
+        subtask_id = subtask.id
+
+    page = client.get("/legacy")
+    ticket_start = page.text.index(f'id="ticket-{ticket_id}"')
+    ticket_block = page.text[ticket_start : page.text.index("</article>", ticket_start)]
+
+    assert f'action="/tickets/{ticket_id}/complete"' in ticket_block
+    assert f'action="/tickets/{ticket_id}"' not in ticket_block
+    assert f'action="/tickets/{ticket_id}/move-up"' not in ticket_block
+    assert 'title="Drag to reorder"' not in ticket_block
+    assert f'action="/subtasks/{subtask_id}/complete"' in ticket_block
+    assert f'action="/subtasks/{subtask_id}"' not in ticket_block
+    assert f'action="/subtasks/{subtask_id}/move-up"' not in ticket_block
+    assert f'action="/subtasks/{subtask_id}/delete"' not in ticket_block
+    assert f'action="/tickets/{ticket_id}/sync"' not in ticket_block
+    assert f'action="/tickets/{ticket_id}/sync-from-jira"' not in ticket_block
+
+
+def test_completed_items_reject_delete_and_sync_in_api_and_legacy_paths(monkeypatch) -> None:
+    class UnexpectedJiraClient:
+        def __init__(self, config) -> None:
+            raise AssertionError("completed items must not construct a Jira client")
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", UnexpectedJiraClient)
+    with SessionLocal() as db:
+        parent = Ticket(
+            summary="Protected completed ticket",
+            position=0,
+            local_completed=True,
+            jira_issue_key="WORK-300",
+        )
+        subtask = Ticket(
+            summary="Protected completed subtask",
+            position=0,
+            parent=parent,
+            local_completed=True,
+            jira_issue_key="WORK-301",
+        )
+        db.add_all([parent, subtask])
+        db.commit()
+        parent_id = parent.id
+        subtask_id = subtask.id
+
+    for path in (
+        f"/api/tickets/{parent_id}/sync",
+        f"/api/tickets/{parent_id}/sync-from-jira",
+    ):
+        response = client.post(path)
+        assert response.status_code in {400, 422}
+        assert response.json()["ok"] is False
+
+    response = client.delete(f"/api/tickets/{parent_id}")
+    assert response.status_code == 400
+    assert response.json()["ok"] is False
+
+    for path in (
+        f"/api/subtasks/{subtask_id}",
+        f"/tickets/{parent_id}/sync",
+        f"/tickets/{parent_id}/sync-from-jira",
+        f"/tickets/{parent_id}/delete",
+        f"/subtasks/{subtask_id}/delete",
+    ):
+        response = (
+            client.delete(path)
+            if path.startswith("/api/")
+            else client.post(path, follow_redirects=False)
+        )
+        assert response.status_code in {303, 400, 422}
+
+    with SessionLocal() as db:
+        unchanged_parent = db.get(Ticket, parent_id)
+        unchanged_subtask = db.get(Ticket, subtask_id)
+        assert (
+            unchanged_parent is not None
+            and unchanged_parent.summary == "Protected completed ticket"
+        )
+        assert unchanged_parent.jira_issue_key == "WORK-300"
+        assert (
+            unchanged_subtask is not None
+            and unchanged_subtask.summary == "Protected completed subtask"
+        )
+        assert unchanged_subtask.jira_issue_key == "WORK-301"
+
+
+def test_completed_parent_rejects_subtask_creation_in_api_and_legacy() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="No children after done", position=0, local_completed=True)
+        db.add(parent)
+        db.commit()
+        parent_id = parent.id
+
+    api_response = client.post(
+        f"/api/tickets/{parent_id}/subtasks",
+        json={"summary": "Must be rejected", "description": ""},
+    )
+    legacy_response = client.post(
+        f"/tickets/{parent_id}/subtasks",
+        data={"summary": "Must also be rejected"},
+        follow_redirects=False,
+    )
+
+    assert api_response.status_code == 400
+    assert api_response.json() == {
+        "ok": False,
+        "message": "Done tickets cannot have subtasks added.",
+    }
+    assert legacy_response.status_code == 303
+    assert (
+        "Done%20tickets%20cannot%20have%20subtasks%20added" in legacy_response.headers["location"]
+    )
+    with SessionLocal() as db:
+        assert db.scalar(select(Ticket).where(Ticket.parent_id == parent_id)) is None
+
+
+def test_active_parent_cannot_delete_completed_subtasks_as_a_cascade() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Parent with protected child", position=0)
+        child = Ticket(
+            summary="Completed child that must survive",
+            position=0,
+            parent=parent,
+            local_completed=True,
+        )
+        db.add_all([parent, child])
+        db.commit()
+        parent_id = parent.id
+        child_id = child.id
+
+    api_response = client.delete(f"/api/tickets/{parent_id}")
+    legacy_response = client.post(f"/tickets/{parent_id}/delete", follow_redirects=False)
+
+    assert api_response.status_code == 400
+    assert api_response.json() == {
+        "ok": False,
+        "message": "Tickets with done subtasks can only be deleted after they are active.",
+    }
+    assert legacy_response.status_code == 303
+    assert "done%20subtasks%20can%20only%20be%20deleted" in legacy_response.headers["location"]
+    with SessionLocal() as db:
+        assert db.get(Ticket, parent_id) is not None
+        assert db.get(Ticket, child_id) is not None
+
+
+def test_new_active_items_append_before_done_and_normalize_active_positions() -> None:
+    with SessionLocal() as db:
+        first = Ticket(summary="Existing first", position=10)
+        second = Ticket(summary="Existing second", position=50)
+        done = Ticket(summary="Existing done", position=2, local_completed=True)
+        parent = Ticket(summary="Subtask parent", position=20)
+        child_first = Ticket(summary="Child first", position=10, parent=parent)
+        child_second = Ticket(summary="Child second", position=50, parent=parent)
+        child_done = Ticket(summary="Child done", position=2, parent=parent, local_completed=True)
+        db.add_all([first, second, done, parent, child_first, child_second, child_done])
+        db.commit()
+        parent_id = parent.id
+        done_id = done.id
+        child_done_id = child_done.id
+
+    ticket_response = client.post(
+        "/api/tickets",
+        json={"summary": "New active ticket", "description": ""},
+    )
+    subtask_response = client.post(
+        f"/api/tickets/{parent_id}/subtasks",
+        json={"summary": "New active child", "description": ""},
+    )
+
+    assert ticket_response.status_code == 200
+    assert isinstance(ticket_response.json()["created_id"], int)
+    assert subtask_response.status_code == 200
+    with SessionLocal() as db:
+        tickets = list(
+            db.scalars(
+                select(Ticket)
+                .where(
+                    Ticket.parent_id.is_(None),
+                    Ticket.summary.in_(
+                        ["Existing first", "Existing second", "New active ticket", "Existing done"]
+                    ),
+                )
+                .order_by(Ticket.local_completed, Ticket.position, Ticket.id)
+            )
+        )
+        assert [ticket.summary for ticket in tickets] == [
+            "Existing first",
+            "Existing second",
+            "New active ticket",
+            "Existing done",
+        ]
+        active_tickets = list(
+            db.scalars(
+                select(Ticket)
+                .where(Ticket.parent_id.is_(None), Ticket.local_completed.is_(False))
+                .order_by(Ticket.position, Ticket.id)
+            )
+        )
+        assert [ticket.position for ticket in active_tickets] == list(range(len(active_tickets)))
+        assert db.get(Ticket, done_id).position == 2
+
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [subtask.summary for subtask in parent.subtasks] == [
+            "Child first",
+            "Child second",
+            "New active child",
+            "Child done",
+        ]
+        assert [subtask.position for subtask in parent.subtasks[:3]] == [0, 1, 2]
+        assert db.get(Ticket, child_done_id).position == 2
+
+
+def test_api_move_indices_use_only_unfinished_siblings() -> None:
+    with SessionLocal() as db:
+        first = Ticket(summary="Move first", position=10)
+        target = Ticket(summary="Move target", position=50)
+        done = Ticket(summary="Move done", position=1, local_completed=True)
+        parent = Ticket(summary="Move child parent", position=10)
+        child_first = Ticket(summary="Move child first", position=10, parent=parent)
+        child_target = Ticket(summary="Move child target", position=50, parent=parent)
+        child_done = Ticket(
+            summary="Move child done", position=1, parent=parent, local_completed=True
+        )
+        db.add_all([first, target, done, parent, child_first, child_target, child_done])
+        db.commit()
+        target_id = target.id
+        child_target_id = child_target.id
+        parent_id = parent.id
+
+    ticket_response = client.post(f"/api/tickets/{target_id}/move", params={"target_index": 0})
+    child_response = client.post(
+        f"/api/subtasks/{child_target_id}/move", params={"target_index": 0}
+    )
+
+    assert ticket_response.status_code == 200
+    assert child_response.status_code == 200
+    with SessionLocal() as db:
+        top_level = list(
+            db.scalars(
+                select(Ticket)
+                .where(Ticket.parent_id.is_(None), Ticket.id.in_([first.id, target.id, done.id]))
+                .order_by(Ticket.local_completed, Ticket.position, Ticket.id)
+            )
+        )
+        assert [ticket.id for ticket in top_level] == [target_id, first.id, done.id]
+        active_tickets = list(
+            db.scalars(
+                select(Ticket)
+                .where(Ticket.parent_id.is_(None), Ticket.local_completed.is_(False))
+                .order_by(Ticket.position, Ticket.id)
+            )
+        )
+        assert [ticket.position for ticket in active_tickets] == list(range(len(active_tickets)))
+        assert db.get(Ticket, done.id).position == 1
+
+        parent = db.get(Ticket, parent_id)
+        assert parent is not None
+        assert [subtask.id for subtask in parent.subtasks] == [
+            child_target_id,
+            child_first.id,
+            child_done.id,
+        ]
+        assert [subtask.position for subtask in parent.subtasks[:2]] == [0, 1]
+        assert db.get(Ticket, child_done.id).position == 1
+
+
+def test_subtask_completion_and_locking_use_the_same_priority_rules() -> None:
+    with SessionLocal() as db:
+        parent = Ticket(summary="Subtask completion parent", position=0)
+        first = Ticket(summary="Subtask active first", position=0, parent=parent)
+        second = Ticket(summary="Subtask active second", position=1, parent=parent)
+        done = Ticket(summary="Subtask done", position=2, parent=parent, local_completed=True)
+        db.add_all([parent, first, second, done])
+        db.commit()
+        first_id = first.id
+        second_id = second.id
+        done_id = done.id
+        relevant_ids = {first_id, second_id, done_id}
+
+    response = client.post(f"/api/subtasks/{second_id}/complete")
+    assert response.status_code == 200
+    state = response.json()["state"]
+    subtasks = next(ticket["subtasks"] for ticket in state["tickets"] if ticket["id"] == parent.id)
+    assert [subtask["id"] for subtask in subtasks if subtask["id"] in relevant_ids] == [
+        first_id,
+        done_id,
+        second_id,
+    ]
+
+    locked_update = client.put(
+        f"/api/subtasks/{second_id}",
+        json={"summary": "Changed", "description": "", "planned_date": None},
+    )
+    locked_move = client.post(
+        f"/api/subtasks/{second_id}/move",
+        params={"target_index": 0},
+    )
+    assert locked_update.status_code == 400
+    assert locked_move.status_code == 400
+
+    response = client.post(f"/api/subtasks/{second_id}/complete")
+    assert response.status_code == 200
+    subtasks = next(
+        ticket["subtasks"]
+        for ticket in response.json()["state"]["tickets"]
+        if ticket["id"] == parent.id
+    )
+    assert [subtask["id"] for subtask in subtasks if subtask["id"] in relevant_ids] == [
+        second_id,
+        first_id,
+        done_id,
+    ]
+
+
 def test_jira_client_creates_issue_and_refreshes_status() -> None:
     requests: list[httpx.Request] = []
 
@@ -1145,7 +1548,14 @@ def test_sync_parent_partial_failure_keeps_completed_remote_links(monkeypatch) -
     monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
     with SessionLocal() as db:
         parent = Ticket(summary="Partial parent", position=304)
-        completed = Ticket(summary="Completed child", position=0, parent=parent)
+        completed = Ticket(
+            summary="Completed child",
+            position=0,
+            parent=parent,
+            local_completed=True,
+            jira_issue_key="WORK-72",
+            jira_status_name="Done",
+        )
         failing = Ticket(summary="Fails remotely", position=1, parent=parent)
         db.add_all([parent, completed, failing])
         config = db.get(JiraConfig, 1)
@@ -1175,7 +1585,6 @@ def test_sync_parent_partial_failure_keeps_completed_remote_links(monkeypatch) -
     assert "Retry%20the%20parent%20sync%20to%20continue" in response.headers["location"]
     assert calls == [
         ("create-parent", "Partial parent"),
-        ("create-child", "Completed child"),
         ("create-child", "Fails remotely"),
     ]
     with SessionLocal() as db:
@@ -1183,7 +1592,9 @@ def test_sync_parent_partial_failure_keeps_completed_remote_links(monkeypatch) -
         completed = db.get(Ticket, completed_id)
         failing = db.get(Ticket, failing_id)
         assert parent is not None and parent.jira_issue_key == "WORK-70"
-        assert completed is not None and completed.jira_issue_key == "WORK-71"
+        assert completed is not None and completed.jira_issue_key == "WORK-72"
+        assert completed.local_completed is True
+        assert completed.jira_status_name == "Done"
         assert failing is not None and failing.jira_issue_key is None
 
 
@@ -1228,7 +1639,7 @@ def test_sync_from_jira_reconciles_children_without_touching_local_fields(monkey
             description="Old parent details",
             planned_date=date(2026, 10, 1),
             position=305,
-            local_completed=True,
+            local_completed=False,
             jira_issue_key="WORK-80",
             category=category,
         )
@@ -1291,20 +1702,22 @@ def test_sync_from_jira_reconciles_children_without_touching_local_fields(monkey
         assert parent.description == "Remote parent details"
         assert parent.category_id == category_id
         assert parent.planned_date == date(2026, 10, 1)
-        assert parent.local_completed is True
+        assert parent.local_completed is False
         assert existing is not None
-        assert existing.summary == "Remote existing child"
-        assert existing.description == "Updated child details"
+        assert existing.summary == "Old existing child"
+        assert existing.description == "Old child details"
         assert existing.position == 4
         assert existing.local_completed is True
-        assert stale is None
+        assert stale is not None
+        assert stale.summary == "Stale linked child"
+        assert stale.jira_issue_key == "WORK-83"
         assert local_only is not None
         assert local_only.jira_issue_key is None
         assert local_only.position == 6
         created = db.scalar(select(Ticket).where(Ticket.jira_issue_key == "WORK-82"))
         assert created is not None
         assert created.parent_id == parent_id
-        assert created.position == 7
+        assert created.position == 0
         assert created.planned_date is None
         assert created.local_completed is False
 
@@ -1372,7 +1785,7 @@ def test_sync_from_jira_deletes_linked_children_when_remote_has_none_and_keeps_l
         assert retained is not None
         assert retained.parent_id == parent_id
         assert retained.jira_issue_key is None
-        assert retained.position == 20
+        assert retained.position == 0
 
 
 def test_sync_from_jira_rejects_duplicate_remote_children_without_mutating_local_data(
@@ -1586,7 +1999,7 @@ def test_sync_from_jira_updates_parent_and_existing_or_new_subtasks(monkeypatch)
             description="Local details",
             planned_date=date(2026, 9, 2),
             position=302,
-            local_completed=True,
+            local_completed=False,
             jira_issue_key="WORK-40",
             category=category,
         )
@@ -1626,16 +2039,16 @@ def test_sync_from_jira_updates_parent_and_existing_or_new_subtasks(monkeypatch)
         assert parent is not None and parent.summary == "Remote parent"
         assert parent.category_id == category.id
         assert parent.planned_date == date(2026, 9, 2)
-        assert parent.local_completed is True
-        assert existing is not None and existing.summary == "Remote existing child"
-        assert existing.description == "Remote child details"
-        assert existing.jira_status_name == "Done"
+        assert parent.local_completed is False
+        assert existing is not None and existing.summary == "Local child"
+        assert existing.description == ""
+        assert existing.jira_status_name is None
         assert existing.position == 7
         new = db.scalar(select(Ticket).where(Ticket.jira_issue_key == "WORK-42"))
         assert new is not None
         assert new.parent_id == parent_id
         assert new.summary == "Remote new child"
-        assert new.position == 8
+        assert new.position == 0
 
 
 def test_jira_client_creates_subtask_and_fetches_parent_subtasks() -> None:
@@ -1869,7 +2282,7 @@ def test_sync_without_configuration_shows_error() -> None:
     assert "Jira%20is%20not%20configured" in response.headers["location"]
 
 
-def test_sync_from_jira_updates_owned_fields_and_preserves_local_fields(monkeypatch) -> None:
+def test_sync_from_jira_rejects_completed_ticket_without_mutating_local_data(monkeypatch) -> None:
     class FakeJiraClient:
         def __init__(self, config) -> None:
             assert config.project_key == "WORK"
@@ -1925,19 +2338,18 @@ def test_sync_from_jira_updates_owned_fields_and_preserves_local_fields(monkeypa
 
     response = client.post(f"/tickets/{ticket_id}/sync-from-jira", follow_redirects=False)
     assert response.status_code == 303
-    assert "synced%20from%20Jira" in response.headers["location"]
+    assert "Done%20tickets%20can%20only%20be%20marked%20active" in response.headers["location"]
     with SessionLocal() as db:
         synced = db.get(Ticket, ticket_id)
         assert synced is not None
-        assert synced.summary == "Changed in Jira"
-        assert synced.description == "Remote description"
-        assert synced.jira_status_name == "Done"
+        assert synced.summary == "Old local summary"
+        assert synced.description == "Old local description"
+        assert synced.jira_status_name == "Open"
         assert synced.jira_issue_key == "WORK-10"
         assert synced.category_id == category.id
         assert synced.planned_date == date(2026, 9, 1)
         assert synced.local_completed is True
         assert synced.position == 42
-        assert synced.synced_at is not None
 
 
 def test_sync_from_jira_requires_a_linked_ticket() -> None:
@@ -2027,7 +2439,7 @@ def test_create_subtasks_in_edit_section_persists_fields_and_orders_them() -> No
     assert "Delete this subtask?" in page.text
 
 
-def test_edit_subtask_persists_fields_without_changing_relationship_or_order() -> None:
+def test_edit_completed_subtask_is_rejected_without_mutation() -> None:
     with SessionLocal() as db:
         parent = Ticket(summary="Edit parent", position=211)
         subtask = Ticket(
@@ -2054,22 +2466,21 @@ def test_edit_subtask_persists_fields_without_changing_relationship_or_order() -
     )
 
     assert response.status_code == 303
-    assert "Subtask%20Updated%20subtask%20updated" in response.headers["location"]
+    assert "Done%20subtasks%20can%20only%20be%20marked%20active" in response.headers["location"]
     with SessionLocal() as db:
         parent = db.get(Ticket, parent_id)
         subtask = db.get(Ticket, subtask_id)
         assert parent is not None
         assert subtask is not None
-        assert subtask.summary == "Updated subtask"
-        assert subtask.description == "Updated details"
-        assert subtask.planned_date == date(2026, 9, 3)
+        assert subtask.summary == "Original subtask"
+        assert subtask.description == "Original details"
+        assert subtask.planned_date == date(2026, 8, 24)
         assert subtask.parent_id == parent_id
         assert subtask.position == 7
         assert subtask.local_completed is True
 
     page = client.get("/legacy")
-    assert f'action="/subtasks/{subtask_id}"' in page.text
-    assert 'name="summary" value="Updated subtask"' in page.text
+    assert f'action="/subtasks/{subtask_id}"' not in page.text
     assert f'action="/subtasks/{subtask_id}/sync"' not in page.text
 
 
@@ -2130,7 +2541,7 @@ def test_edit_subtask_rejects_missing_ids_and_top_level_tickets() -> None:
     )
 
 
-def test_edit_synced_subtask_updates_only_that_jira_issue(monkeypatch) -> None:
+def test_edit_completed_synced_subtask_is_rejected_without_touching_jira(monkeypatch) -> None:
     calls: list[tuple[str, str, str]] = []
 
     class FakeJiraClient:
@@ -2172,9 +2583,9 @@ def test_edit_synced_subtask_updates_only_that_jira_issue(monkeypatch) -> None:
             planned_date=date(2026, 9, 4),
             position=3,
             parent=parent,
-            local_completed=True,
             jira_issue_key="WORK-61",
             jira_status_name="To Do",
+            local_completed=True,
         )
         db.add_all([parent, subtask])
         db.commit()
@@ -2192,7 +2603,8 @@ def test_edit_synced_subtask_updates_only_that_jira_issue(monkeypatch) -> None:
     )
 
     assert response.status_code == 303
-    assert calls == [("WORK-61", "Edited locally", "Edited details")]
+    assert "Done%20subtasks%20can%20only%20be%20marked%20active" in response.headers["location"]
+    assert calls == []
     with SessionLocal() as db:
         parent = db.get(Ticket, parent_id)
         subtask = db.get(Ticket, subtask_id)
@@ -2200,14 +2612,14 @@ def test_edit_synced_subtask_updates_only_that_jira_issue(monkeypatch) -> None:
         assert subtask is not None
         assert parent.summary == "Synced edit parent"
         assert parent.jira_issue_key == "WORK-60"
-        assert subtask.summary == "Remote updated subtask"
-        assert subtask.description == "Remote updated details"
-        assert subtask.planned_date == date(2026, 9, 5)
+        assert subtask.summary == "Local subtask"
+        assert subtask.description == "Local details"
+        assert subtask.planned_date == date(2026, 9, 4)
         assert subtask.parent_id == parent_id
         assert subtask.position == 3
         assert subtask.local_completed is True
         assert subtask.jira_issue_key == "WORK-61"
-        assert subtask.jira_status_name == "In Progress"
+        assert subtask.jira_status_name == "To Do"
 
 
 def test_create_subtask_validates_summary_and_planned_date() -> None:

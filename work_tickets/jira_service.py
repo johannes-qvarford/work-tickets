@@ -5,7 +5,7 @@ from collections.abc import Callable
 from datetime import date, datetime
 from urllib.parse import unquote, urlsplit
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .jira import JiraClient, JiraError, JiraIssue
@@ -75,6 +75,8 @@ def delete_linked_jira_issue(
     jira_client_factory: JiraClientFactory = JiraClient,
 ) -> str | None:
     """Try to remove a linked Jira issue and return a user-facing failure, if any."""
+    if ticket.local_completed:
+        return "done items can only be marked active"
     if not ticket.jira_issue_key:
         return None
     issue_key = ticket.jira_issue_key
@@ -104,6 +106,8 @@ def sync_ticket(
         raise JiraError(
             "Only top-level tickets can sync to Jira; sync the parent to include all subtasks."
         )
+    if ticket.local_completed:
+        raise JiraError("Done tickets can only be marked active.")
     config = db.get(JiraConfig, 1)
     if config is None:
         raise JiraError("Jira is not configured. Configure Jira before syncing.")
@@ -117,6 +121,8 @@ def sync_ticket(
         save_jira_issue(ticket, issue, synced_at)
         db.commit()
         for subtask in list(ticket.subtasks):
+            if subtask.local_completed:
+                continue
             try:
                 if subtask.jira_issue_key:
                     subtask_issue = jira.update_issue(
@@ -145,6 +151,8 @@ def sync_subtask(
 ) -> None:
     if subtask.parent_id is None:
         raise JiraError("Only subtasks can use the subtask edit sync path.")
+    if subtask.local_completed:
+        raise JiraError("Done subtasks can only be marked active.")
     if not subtask.jira_issue_key:
         raise JiraError("Subtask has not been synced to Jira yet.")
     config = db.get(JiraConfig, 1)
@@ -199,17 +207,27 @@ def import_ticket_from_jira(
         raise JiraError(f"A local ticket is already linked to Jira issue {existing_issue_key}.")
 
     synced_at = datetime.utcnow()
-    count = db.scalar(select(func.count()).select_from(Ticket)) or 0
+    existing_tickets = list(
+        db.scalars(
+            select(Ticket)
+            .where(Ticket.parent_id.is_(None))
+            .order_by(Ticket.local_completed, Ticket.position, Ticket.created_at, Ticket.id)
+        )
+    )
     ticket = Ticket(
         summary=synced.issue.summary,
         description=synced.issue.description or "",
         planned_date=planned_date,
         category_id=category_id,
-        position=count,
+        position=0,
         jira_issue_key=synced.issue.key,
         jira_status_name=synced.issue.status_name,
         synced_at=synced_at,
     )
+    active_tickets = [candidate for candidate in existing_tickets if not candidate.local_completed]
+    active_tickets.append(ticket)
+    for position, active_ticket in enumerate(active_tickets):
+        active_ticket.position = position
     db.add(ticket)
     for position, subtask in enumerate(synced.subtasks):
         db.add(
@@ -237,6 +255,8 @@ def sync_ticket_from_jira(
         raise JiraError(
             "Only top-level tickets can sync from Jira; sync the parent to include all subtasks."
         )
+    if ticket.local_completed:
+        raise JiraError("Done tickets can only be marked active.")
     if not ticket.jira_issue_key:
         raise JiraError("Ticket has not been synced to Jira yet.")
     config = db.get(JiraConfig, 1)
@@ -286,18 +306,26 @@ def reconcile_jira_subtasks(
     retained_subtasks: list[Ticket] = []
     for subtask in local_subtasks:
         if subtask.jira_issue_key and subtask.jira_issue_key not in remote_subtasks_by_key:
-            db.delete(subtask)
+            if subtask.local_completed:
+                retained_subtasks.append(subtask)
+            else:
+                db.delete(subtask)
         else:
             retained_subtasks.append(subtask)
 
-    next_position = max((subtask.position for subtask in retained_subtasks), default=-1) + 1
+    active_subtasks = [subtask for subtask in retained_subtasks if not subtask.local_completed]
     for issue in remote_subtasks_by_key.values():
         matching_subtask = local_subtasks_by_key.get(issue.key)
         if matching_subtask is None:
-            matching_subtask = Ticket(parent=ticket, position=next_position)
-            next_position += 1
+            matching_subtask = Ticket(parent=ticket, position=len(active_subtasks))
+            active_subtasks.append(matching_subtask)
             db.add(matching_subtask)
+        elif matching_subtask.local_completed:
+            continue
         save_jira_issue(matching_subtask, issue, synced_at, clear_missing_fields=True)
+    for position, subtask in enumerate(active_subtasks):
+        subtask.position = position
+    # Completed subtasks are intentionally excluded: parent sync must not mutate them.
 
 
 def save_jira_issue(

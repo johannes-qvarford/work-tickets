@@ -28,12 +28,12 @@
       </div>
     </div>
     <div class="ticket-actions" aria-label="Ticket actions">
-      <span
+      {% if not ticket.local_completed %}<span
         class="ticket-drag-handle"
         aria-hidden="true"
         title="Drag to reorder"
         draggable="true"
-      >⠿</span>
+      >⠿</span>{% endif %}
       {% if ticket.jira_issue_key %}
       {% if jira_config %}
       <a
@@ -42,7 +42,7 @@
         target="_blank"
         rel="noopener noreferrer"
       >{{ ticket.jira_issue_key }}</a>
-    {% else %}
+      {% else %}
       <span class="badge">{{ ticket.jira_issue_key }}</span>
       {% endif %}
     {% else %}
@@ -61,7 +61,7 @@
           </span>
         </button>
       </form>
-      <form
+      {% if not ticket.local_completed %}<form
         class="move-ticket-form"
         data-move-ticket
         method="post"
@@ -94,8 +94,8 @@
         >
           <span aria-hidden="true">↓</span><span class="sr-only">Move down</span>
         </button>
-      </form>
-      {% if ticket.jira_issue_key %}
+      </form>{% endif %}
+      {% if not ticket.local_completed and ticket.jira_issue_key %}
       <form method="post" action="/tickets/{{ ticket.id }}/sync-from-jira">
         <button
           class="compact-control"
@@ -107,7 +107,7 @@
           <span class="sr-only">Sync from Jira</span>
         </button>
       </form>
-    {% else %}
+      {% elif not ticket.local_completed %}
       <form method="post" action="/tickets/{{ ticket.id }}/sync">
         <button
           class="compact-control"
@@ -120,7 +120,7 @@
         </button>
       </form>
       {% endif %}
-      <form
+      {% if not ticket.local_completed %}<form
         method="post"
         action="/tickets/{{ ticket.id }}/delete"
         onsubmit="return confirm('Delete this ticket and all local subtasks?');"
@@ -133,12 +133,13 @@
         >
           <span aria-hidden="true">×</span><span class="sr-only">Delete</span>
         </button>
-      </form>
+      </form>{% endif %}
     </div>
   </div>
   <details class="ticket-details">
-    <summary>Edit ticket and subtasks</summary>
+    <summary>{% if ticket.local_completed %}View subtasks{% else %}Edit ticket and subtasks{% endif %}</summary>
     <div class="details-content">
+      {% if not ticket.local_completed %}
       <form
         class="edit-form"
         method="post"
@@ -160,14 +161,17 @@
         <div class="meta">Category: {{ ticket.category.name if ticket.category else 'Uncategorized' }}</div>
         <button type="submit">{% if ticket.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
       </form>
+      {% endif %}
       <div class="subtasks" data-subtasks>
         <div class="subtasks-heading">
           <h4>Subtasks</h4>
-          <span class="meta">{{ ticket.subtasks|length }} · Drag rows to reorder; use arrows with a keyboard</span>
+        <span class="meta">{{ ticket.subtasks|length }}{% if not ticket.local_completed %} · Drag rows to reorder; use arrows with a keyboard{% endif %}</span>
         </div>
+        {% set active_subtasks = ticket.subtasks|rejectattr("local_completed")|list %}
         {% for subtask in ticket.subtasks %}
-        <div class="subtask" data-subtask-id="{{ subtask.id }}" draggable="true">
-          <span class="subtask-drag-handle" aria-hidden="true" title="Drag to reorder">⠿</span>
+        <div class="subtask{% if subtask.local_completed %} completed{% endif %}" data-subtask-id="{{ subtask.id }}"{% if not subtask.local_completed %} draggable="true"{% endif %}>
+          {% if not subtask.local_completed %}<span class="subtask-drag-handle" aria-hidden="true" title="Drag to reorder">⠿</span>{% endif %}
+          {% if not subtask.local_completed %}
           <details class="subtask-details">
             <summary>
               <div class="{% if subtask.local_completed %}subtask-info completed{% else %}subtask-info{% endif %}">
@@ -199,6 +203,14 @@
               <button type="submit">{% if subtask.jira_issue_key %}Save and sync to Jira{% else %}Save changes{% endif %}</button>
             </form>
           </details>
+          {% else %}
+          <div class="subtask-details">
+            <div class="subtask-info completed">
+              <strong>{{ subtask.summary }}</strong>
+              <div class="subtask-meta">{% if subtask.planned_date %}<time datetime="{{ subtask.planned_date }}">{{ subtask.planned_date }}</time>{% else %}Unscheduled{% endif %} · Done</div>
+            </div>
+          </div>
+          {% endif %}
           <div class="subtask-actions" aria-label="Actions for {{ subtask.summary }}">
             <form method="post" action="/subtasks/{{ subtask.id }}/complete">
               <button
@@ -211,7 +223,7 @@
                 <span class="sr-only">{% if subtask.local_completed %}Mark as active{% else %}Mark as done{% endif %}</span>
               </button>
             </form>
-            <form
+            {% if not subtask.local_completed %}<form
               class="move-subtask-form"
               data-move-subtask
               method="post"
@@ -221,7 +233,7 @@
                 class="compact-control"
                 type="submit"
                 data-move-direction="up"
-                {% if loop.first %}disabled{% endif %}
+                 {% if active_subtasks and subtask.id != active_subtasks[0].id %}{% else %}disabled{% endif %}
                 aria-label="Move up {{ subtask.summary }}"
                 title="Move up"
               >
@@ -238,14 +250,14 @@
                 class="compact-control"
                 type="submit"
                 data-move-direction="down"
-                {% if loop.last %}disabled{% endif %}
+                 {% if active_subtasks and subtask.id != active_subtasks[-1].id %}{% else %}disabled{% endif %}
                 aria-label="Move down {{ subtask.summary }}"
                 title="Move down"
               >
                 <span aria-hidden="true">↓</span><span class="sr-only">Move down</span>
               </button>
-            </form>
-            <form
+            </form>{% endif %}
+            {% if not subtask.local_completed %}<form
               method="post"
               action="/subtasks/{{ subtask.id }}/delete"
               onsubmit="return confirm('Delete this subtask?');"
@@ -258,11 +270,11 @@
               >
                 <span aria-hidden="true">×</span><span class="sr-only">Delete</span>
               </button>
-            </form>
+            </form>{% endif %}
           </div>
         </div>
       {% else %}<p class="muted">No subtasks yet.</p>{% endfor %}
-        <form
+        {% if not ticket.local_completed %}<form
           class="subtask-form"
           method="post"
           action="/tickets/{{ ticket.id }}/subtasks"
@@ -279,7 +291,7 @@
             <span class="field-label">Planned date</span><input type="date" name="planned_date">
           </label>
           <button type="submit">Add subtask</button>
-        </form>
+        </form>{% endif %}
       </div>
     </div>
   </details>

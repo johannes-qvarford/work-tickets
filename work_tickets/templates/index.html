@@ -342,7 +342,7 @@
         }
 
         function updateMoveControls(container) {
-          const subtasks = [...container.querySelectorAll(".subtask")];
+          const subtasks = [...container.querySelectorAll(".subtask:not(.completed)")];
           subtasks.forEach((subtask, index) => {
             const up = subtask.querySelector('[data-move-direction="up"]');
             const down = subtask.querySelector('[data-move-direction="down"]');
@@ -352,7 +352,7 @@
         }
 
         function updateTicketMoveControls(container) {
-          const tickets = [...container.querySelectorAll(".ticket[data-top-level-ticket]")];
+          const tickets = [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed)")];
           tickets.forEach((ticket, index) => {
             const up = ticket.querySelector('[data-move-direction="up"]');
             const down = ticket.querySelector('[data-move-direction="down"]');
@@ -546,7 +546,7 @@
 
         document.addEventListener("dragstart", (event) => {
           const subtask = event.target.closest?.(".subtask");
-          if (!subtask) return;
+          if (!subtask || subtask.classList.contains("completed")) return;
           const container = subtask.closest("[data-subtasks]");
           if (!container || !event.dataTransfer) return;
           event.dataTransfer.effectAllowed = "move";
@@ -565,7 +565,7 @@
         });
 
         document.addEventListener("dragover", (event) => {
-          const target = event.target.closest?.(".subtask");
+          const target = event.target.closest?.(".subtask:not(.completed)");
           const dragging = document.querySelector(".subtask.dragging");
           if (!target || !dragging || target === dragging) return;
           const container = target.closest("[data-subtasks]");
@@ -579,7 +579,7 @@
         });
 
         document.addEventListener("dragover", (event) => {
-          const target = event.target.closest?.(".ticket[data-top-level-ticket]");
+          const target = event.target.closest?.(".ticket[data-top-level-ticket]:not(.completed)");
           const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
           if (!target || !dragging || target === dragging) return;
           const container = target.closest("[data-tickets]");
@@ -599,7 +599,7 @@
           const container = target.closest("[data-subtasks]");
           if (!container || container !== dragging.closest("[data-subtasks]")) return;
           event.preventDefault();
-          const rows = [...container.querySelectorAll(".subtask")];
+          const rows = [...container.querySelectorAll(".subtask:not(.completed)")];
           const targetRowIndex = rows.indexOf(target);
           const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
           let targetIndex = targetRowIndex + (afterTarget ? 1 : 0);
@@ -609,13 +609,13 @@
         });
 
         document.addEventListener("drop", (event) => {
-          const target = event.target.closest?.(".ticket[data-top-level-ticket]");
+          const target = event.target.closest?.(".ticket[data-top-level-ticket]:not(.completed)");
           const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
           if (!target || !dragging || target === dragging) return;
           const container = target.closest("[data-tickets]");
           if (!container || container !== dragging.closest("[data-tickets]")) return;
           event.preventDefault();
-          const rows = [...container.querySelectorAll(".ticket[data-top-level-ticket]")];
+          const rows = [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed)")];
           const targetRowIndex = rows.indexOf(target);
           const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
           let targetIndex = targetRowIndex + (afterTarget ? 1 : 0);
@@ -653,6 +653,8 @@
 
         categoryFilter?.addEventListener("change", applyCategoryFilter);
         applyCategoryFilter();
+        document.querySelectorAll("[data-subtasks]").forEach(updateMoveControls);
+        document.querySelectorAll("[data-tickets]").forEach(updateTicketMoveControls);
       })();
     </script>
   </body>

@@ -44,9 +44,10 @@
     <h2>All tickets</h2>
     <p class="muted">Drag tickets to reorder; use arrows with a keyboard.</p>
     <div class="ticket-list" data-tickets>
+      {% set active_tickets = tickets|rejectattr("local_completed")|list %}
       {% for ticket in tickets %}
-      {% set is_first_ticket = loop.first %}
-      {% set is_last_ticket = loop.last %}
+      {% set is_first_ticket = active_tickets and ticket.id == active_tickets[0].id %}
+      {% set is_last_ticket = active_tickets and ticket.id == active_tickets[-1].id %}
       {% include "ticket.html" %}
       {% else %}<div class="empty">No tickets yet.</div>{% endfor %}
       <div class="empty" data-filter-empty hidden>No tickets in this category.</div>
