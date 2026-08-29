@@ -4,14 +4,14 @@ from collections.abc import Generator
 from datetime import date
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from . import jira_service, tickets, web
+from . import jira_service, refine, tickets, web
 from .jira import JiraClient
 from .models import (
     Category,
@@ -117,6 +117,22 @@ def _service_json_response(response: Response, db: Session) -> Response:
 @app.get("/api/state")
 def api_state(db: Session = Depends(get_db)) -> dict[str, object]:
     return _api_state(db)
+
+
+@app.websocket("/api/tickets/{ticket_id}/refine")
+async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
+    await websocket.accept()
+    with SessionLocal() as db:
+        ticket = db.get(Ticket, ticket_id)
+        config = db.get(JiraConfig, 1)
+        try:
+            prompt = refine.refine_prompt(ticket, config) if ticket is not None else None
+            if prompt is None:
+                raise refine.RefineError("Ticket was not found.")
+        except refine.RefineError as exc:
+            await refine.send_error(websocket, str(exc))
+            return
+    await refine.run_refine(websocket, prompt)
 
 
 @app.get("/", response_class=HTMLResponse)
