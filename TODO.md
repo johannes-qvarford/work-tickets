@@ -12,7 +12,7 @@
 
 - [x] Make the ticket drag handle larger and move it to the leftmost side of the ticket, before the title.
 
-- [ ] Fix the ticket drag insertion edge case.
+- [x] Fix the ticket drag insertion edge case.
 
   Moving the item at position 2 before the item at position 1 should continue to work. Moving the item at position 1 after the item at position 2 must also swap the items correctly. The insertion index must account for removing the dragged item before calculating the final position.
 
