@@ -49,6 +49,7 @@ class Ticket(Base):
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("tickets.id"), nullable=True)
     summary: Mapped[str] = mapped_column(String(240))
     description: Mapped[str] = mapped_column(Text, default="")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     planned_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
     local_completed: Mapped[bool] = mapped_column(default=False)

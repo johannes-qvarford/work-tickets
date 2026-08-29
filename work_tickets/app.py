@@ -27,6 +27,7 @@ app.mount(
 class TicketPayload(BaseModel):
     summary: str = ""
     description: str = ""
+    notes: str = ""
     planned_date: date | None = None
     category_id: int | None = None
     jira_reference: str = ""
@@ -114,6 +115,7 @@ def api_create_ticket(
         request,
         payload.summary,
         payload.description,
+        payload.notes,
         payload.planned_date.isoformat() if payload.planned_date else "",
         str(payload.category_id) if payload.category_id is not None else "",
         db,
@@ -147,6 +149,7 @@ def api_update_ticket(
         request,
         payload.summary,
         payload.description,
+        payload.notes,
         payload.planned_date.isoformat() if payload.planned_date else "",
         db,
         jira_client_factory=JiraClient,
