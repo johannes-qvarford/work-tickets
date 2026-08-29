@@ -1,10 +1,19 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import Button from "primevue/button";
 import Card from "primevue/card";
 import DatePicker from "primevue/datepicker";
 import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
+import {
+  clearSubtaskDragState,
+  clearSubtaskDragOverState,
+  dragOverSubtaskId,
+  dragOverSubtaskParentId,
+  draggingSubtaskId,
+  draggingSubtaskParentId,
+  dropTargetIndex,
+} from "../reordering";
 
 export interface Ticket {
   id: number;
@@ -21,7 +30,16 @@ export interface Ticket {
   subtasks: Ticket[];
 }
 
-const props = defineProps<{ ticket: Ticket; categoryName: string; browserBaseUrl: string }>();
+const props = defineProps<{
+  ticket: Ticket;
+  categoryName: string;
+  browserBaseUrl: string;
+  reorderable?: boolean;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
+  draggingTicketId?: number | null;
+  dragOverTicketId?: number | null;
+}>();
 const emit = defineEmits<{
   toggle: [];
   sync: [];
@@ -31,9 +49,18 @@ const emit = defineEmits<{
   toggleSubtask: [id: number];
   removeSubtask: [id: number];
   addSubtask: [ticket: Ticket, draft: { summary: string; description: string; planned_date: string }];
+  moveTicket: [id: number, offset: number];
+  ticketDragStart: [id: number];
+  ticketDragEnd: [];
+  ticketDragOver: [id: number];
+  ticketDrop: [id: number, afterTarget: boolean];
+  moveSubtask: [id: number, targetIndex: number];
 }>();
 const expanded = ref(false);
 const draftSubtask = ref({ summary: "", description: "", planned_date: "" });
+const activeSubtasks = computed(() => props.ticket.subtasks.filter((subtask) => !subtask.local_completed));
+
+const ticketCanDrag = computed(() => Boolean(props.reorderable && !props.ticket.local_completed));
 
 function todayValue() {
   const today = new Date();
@@ -50,42 +77,154 @@ function saveDraftSubtask() {
   emit("addSubtask", props.ticket, draftSubtask.value);
   draftSubtask.value = { summary: "", description: "", planned_date: "" };
 }
+
+function onTicketDragStart(event: DragEvent) {
+  if (!ticketCanDrag.value || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-work-tickets-ticket", String(props.ticket.id));
+  emit("ticketDragStart", props.ticket.id);
+}
+
+function isTicketDrag(event: DragEvent) {
+  return event.dataTransfer?.types.includes("application/x-work-tickets-ticket") ?? false;
+}
+
+function onTicketDragOver(event: DragEvent) {
+  if (isSubtaskDrag(event)) {
+    clearSubtaskDragOverState();
+    return;
+  }
+  if (!ticketCanDrag.value || !isTicketDrag(event) || props.draggingTicketId === props.ticket.id) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.dataTransfer!.dropEffect = "move";
+  emit("ticketDragOver", props.ticket.id);
+}
+
+function onTicketDrop(event: DragEvent) {
+  if (isSubtaskDrag(event)) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearSubtaskDragState();
+    return;
+  }
+  if (!isTicketDrag(event)) return;
+  if (!ticketCanDrag.value || props.draggingTicketId === null || props.draggingTicketId === undefined || props.draggingTicketId === props.ticket.id) {
+    event.preventDefault();
+    event.stopPropagation();
+    emit("ticketDragEnd");
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const target = event.currentTarget as HTMLElement;
+  const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+  emit("ticketDrop", props.ticket.id, afterTarget);
+}
+
+function onSubtaskDragStart(event: DragEvent, subtask: Ticket) {
+  if (subtask.local_completed || !event.dataTransfer) {
+    event.preventDefault();
+    return;
+  }
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-work-tickets-subtask", String(subtask.id));
+  draggingSubtaskParentId.value = props.ticket.id;
+  draggingSubtaskId.value = subtask.id;
+  dragOverSubtaskParentId.value = null;
+  dragOverSubtaskId.value = null;
+}
+
+function isSubtaskDrag(event: DragEvent) {
+  return event.dataTransfer?.types.includes("application/x-work-tickets-subtask") ?? false;
+}
+
+function onSubtaskDragOver(event: DragEvent, subtask: Ticket) {
+  if (!isSubtaskDrag(event)) return;
+  if (subtask.local_completed || draggingSubtaskParentId.value !== props.ticket.id || draggingSubtaskId.value === subtask.id) {
+    clearSubtaskDragOverState();
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  event.dataTransfer!.dropEffect = "move";
+  dragOverSubtaskParentId.value = props.ticket.id;
+  dragOverSubtaskId.value = subtask.id;
+}
+
+function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
+  if (!isSubtaskDrag(event)) return;
+  if (subtask.local_completed || draggingSubtaskParentId.value !== props.ticket.id || draggingSubtaskId.value === subtask.id) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearSubtaskDragState();
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  const target = event.currentTarget as HTMLElement;
+  const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+  const sourceId = draggingSubtaskId.value;
+  const targetIndex = sourceId === null ? null : dropTargetIndex(activeSubtasks.value, sourceId, subtask.id, afterTarget);
+  clearSubtaskDragState();
+  if (targetIndex !== null && sourceId !== null) {
+    emit("moveSubtask", sourceId, targetIndex);
+  }
+}
+
+function moveSubtaskBy(subtask: Ticket, offset: number) {
+  const currentIndex = activeSubtasks.value.findIndex((item) => item.id === subtask.id);
+  const targetIndex = currentIndex + offset;
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= activeSubtasks.value.length) return;
+  emit("moveSubtask", subtask.id, targetIndex);
+}
+
+function moveTicketBy(offset: number) {
+  emit("moveTicket", props.ticket.id, offset);
+}
 </script>
 
 <template>
-  <Card :class="['ticket-card', ticket.local_completed && 'completed']">
+  <Card
+    :class="['ticket-card', ticket.local_completed && 'completed', draggingTicketId === ticket.id && 'dragging', dragOverTicketId === ticket.id && 'drag-over']"
+    @dragover="onTicketDragOver"
+    @drop="onTicketDrop"
+  >
     <template #content>
       <div class="ticket-title">
         <div>
           <span class="ticket-marker">{{ ticket.local_completed ? "✓" : "○" }}</span>
-           <strong>{{ ticket.summary }}</strong>
-           <a v-if="jiraIssueUrl(ticket.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(ticket.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ ticket.jira_issue_key }})</a>
-           <span v-else-if="ticket.jira_issue_key" class="jira-key">({{ ticket.jira_issue_key }})</span>
+          <strong>{{ ticket.summary }}</strong>
+          <a v-if="jiraIssueUrl(ticket.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(ticket.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ ticket.jira_issue_key }})</a>
+          <span v-else-if="ticket.jira_issue_key" class="jira-key">({{ ticket.jira_issue_key }})</span>
           <div class="ticket-meta">
             {{ categoryName }} · {{ ticket.planned_date || "Unscheduled" }}
             <span v-if="ticket.jira_status_name"> · Jira: {{ ticket.jira_status_name }}</span>
           </div>
         </div>
         <div class="button-row">
-          <Button
-            :icon="ticket.local_completed ? 'pi pi-undo' : 'pi pi-check'"
-            text rounded
-            :aria-label="ticket.local_completed ? 'Mark active' : 'Mark done'"
-            @click="emit('toggle')"
-          />
+          <button
+            v-if="ticketCanDrag"
+            type="button"
+            class="drag-handle ticket-drag-handle"
+            draggable="true"
+            :aria-label="`Drag to reorder ${ticket.summary}`"
+            title="Drag to reorder"
+            @dragstart="onTicketDragStart"
+            @dragend="emit('ticketDragEnd')"
+          >⠿</button>
+          <Button v-if="reorderable && !ticket.local_completed" icon="pi pi-arrow-up" text rounded :disabled="!canMoveUp" :aria-label="`Move up ${ticket.summary}`" @click="moveTicketBy(-1)" />
+          <Button v-if="reorderable && !ticket.local_completed" icon="pi pi-arrow-down" text rounded :disabled="!canMoveDown" :aria-label="`Move down ${ticket.summary}`" @click="moveTicketBy(1)" />
+          <Button :icon="ticket.local_completed ? 'pi pi-undo' : 'pi pi-check'" text rounded :aria-label="ticket.local_completed ? 'Mark active' : 'Mark done'" @click="emit('toggle')" />
           <Button v-if="!ticket.local_completed && ticket.jira_issue_key" icon="pi pi-cloud-download" text rounded aria-label="Sync from Jira" @click="emit('sync')" />
           <Button v-else-if="!ticket.local_completed" icon="pi pi-sync" text rounded aria-label="Sync to Jira" @click="emit('sync')" />
           <Button v-if="!ticket.local_completed" icon="pi pi-trash" severity="danger" text rounded aria-label="Delete ticket" @click="emit('remove')" />
         </div>
       </div>
-      <Button
-        v-if="!ticket.local_completed || ticket.subtasks.length"
-        class="edit-toggle"
-        :label="expanded ? 'Hide details' : (ticket.local_completed ? 'View subtasks' : 'Edit ticket and subtasks')"
-        :icon="expanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"
-        text
-        @click="expanded = !expanded"
-      />
+      <Button v-if="!ticket.local_completed || ticket.subtasks.length" class="edit-toggle" :label="expanded ? 'Hide details' : (ticket.local_completed ? 'View subtasks' : 'Edit ticket and subtasks')" :icon="expanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" text @click="expanded = !expanded" />
       <div v-if="expanded" class="form details-form">
         <template v-if="!ticket.local_completed">
           <InputText v-model="ticket.summary" aria-label="Ticket summary" />
@@ -95,28 +234,36 @@ function saveDraftSubtask() {
           <Button label="Save ticket" @click="emit('save', ticket)" />
         </template>
         <span v-else class="ticket-meta">Done items can only be marked active.</span>
-         <h4>Subtasks ({{ ticket.subtasks.length }})</h4>
-         <div v-for="subtask in ticket.subtasks" :key="subtask.id" class="subtask-row">
+        <div class="subtasks-heading"><h4>Subtasks ({{ ticket.subtasks.length }})</h4><span class="ticket-meta">Active subtasks can be dragged; use arrows with a keyboard.</span></div>
+        <div class="subtask-list">
+          <div
+            v-for="subtask in ticket.subtasks"
+            :key="subtask.id"
+            :class="['subtask-row', subtask.local_completed && 'completed', draggingSubtaskParentId === ticket.id && draggingSubtaskId === subtask.id && 'dragging', dragOverSubtaskParentId === ticket.id && dragOverSubtaskId === subtask.id && 'drag-over']"
+            @dragover="onSubtaskDragOver($event, subtask)"
+            @drop="onSubtaskDrop($event, subtask)"
+          >
+            <button v-if="!subtask.local_completed" type="button" class="drag-handle subtask-drag-handle" draggable="true" :aria-label="`Drag to reorder ${subtask.summary}`" title="Drag to reorder" @dragstart="onSubtaskDragStart($event, subtask)" @dragend="clearSubtaskDragState">⠿</button>
             <a v-if="jiraIssueUrl(subtask.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(subtask.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ subtask.jira_issue_key }})</a>
             <span v-else-if="subtask.jira_issue_key" class="jira-key">({{ subtask.jira_issue_key }})</span>
             <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" />
             <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
-           <div v-if="!subtask.local_completed" class="date-control">
-             <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" />
-             <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" />
-           </div>
-           <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text @click="emit('toggleSubtask', subtask.id)" />
-           <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text @click="emit('removeSubtask', subtask.id)" />
-           <Button v-if="!subtask.local_completed" label="Save" text @click="emit('saveSubtask', subtask)" />
-         </div>
-         <div v-if="!ticket.local_completed" class="subtask-row">
-           <InputText v-model="draftSubtask.summary" placeholder="New subtask" />
-           <div class="date-control">
-             <InputText v-model="draftSubtask.planned_date" type="date" aria-label="New subtask planned date" />
-             <Button type="button" label="Today" text aria-label="Set new subtask planned date to today" @click="draftSubtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove new subtask planned date" :disabled="!draftSubtask.planned_date" @click="draftSubtask.planned_date = ''" />
-           </div>
-           <Button label="Add" icon="pi pi-plus" @click="saveDraftSubtask" />
-         </div>
+            <div v-if="!subtask.local_completed" class="date-control">
+              <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" />
+              <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" />
+            </div>
+            <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text :aria-label="subtask.local_completed ? 'Mark subtask active' : 'Mark subtask done'" @click="emit('toggleSubtask', subtask.id)" />
+            <Button v-if="!subtask.local_completed" icon="pi pi-arrow-up" text :disabled="activeSubtasks.indexOf(subtask) === 0" :aria-label="`Move up ${subtask.summary}`" @click="moveSubtaskBy(subtask, -1)" />
+            <Button v-if="!subtask.local_completed" icon="pi pi-arrow-down" text :disabled="activeSubtasks.indexOf(subtask) === activeSubtasks.length - 1" :aria-label="`Move down ${subtask.summary}`" @click="moveSubtaskBy(subtask, 1)" />
+            <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text aria-label="Delete subtask" @click="emit('removeSubtask', subtask.id)" />
+            <Button v-if="!subtask.local_completed" label="Save" text @click="emit('saveSubtask', subtask)" />
+          </div>
+        </div>
+        <div v-if="!ticket.local_completed" class="subtask-row">
+          <InputText v-model="draftSubtask.summary" placeholder="New subtask" />
+          <div class="date-control"><InputText v-model="draftSubtask.planned_date" type="date" aria-label="New subtask planned date" /><Button type="button" label="Today" text aria-label="Set new subtask planned date to today" @click="draftSubtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove new subtask planned date" :disabled="!draftSubtask.planned_date" @click="draftSubtask.planned_date = ''" /></div>
+          <Button label="Add" icon="pi pi-plus" @click="saveDraftSubtask" />
+        </div>
       </div>
     </template>
   </Card>

@@ -160,6 +160,70 @@ def test_ticket_view_toggle_defaults_to_focus_and_persists_with_category_filter(
     assert "const dueTickets = computed(() => visibleTickets.value.filter" in spa_source
 
 
+def test_spa_reordering_has_scoped_drag_targets_and_keyboard_fallbacks() -> None:
+    root = Path(__file__).parents[1]
+    app_source = (root / "frontend" / "src" / "App.vue").read_text()
+    card_source = (root / "frontend" / "src" / "components" / "TicketCard.vue").read_text()
+    helper_source = (root / "frontend" / "src" / "reordering.ts").read_text()
+
+    assert "Drag active tickets to reorder; use the arrow controls with a keyboard." in app_source
+    assert "dropTargetIndex(state.value.tickets, sourceId, ticketId, afterTarget)" in app_source
+    assert "/api/tickets/${ticketId}/move?target_index=${targetIndex}" in app_source
+    assert "/api/subtasks/${subtaskId}/move?target_index=${targetIndex}" in app_source
+    assert 'setData("application/x-work-tickets-ticket"' in card_source
+    assert 'setData("application/x-work-tickets-subtask"' in card_source
+    assert '@dragover="onSubtaskDragOver($event, subtask)"' in card_source
+    assert '@drop="onSubtaskDrop($event, subtask)"' in card_source
+    assert "dragOverSubtaskParentId.value = props.ticket.id" in card_source
+    assert "export function clearSubtaskDragOverState()" in helper_source
+    assert "clearSubtaskDragOverState();" in card_source
+    assert 'emit("ticketDragEnd")' in card_source
+    assert 'draggable="true"' in card_source
+    assert "ticket.local_completed" in card_source
+    assert 'icon="pi pi-arrow-up"' in card_source
+    assert 'icon="pi pi-arrow-down"' in card_source
+    assert "const sourceId = draggingSubtaskId.value" in card_source
+    assert 'emit("moveSubtask", sourceId' in card_source
+    assert "if (!isSubtaskDrag(event)) return;" in card_source
+    assert "if (isSubtaskDrag(event))" in card_source
+    assert "items.filter((item) => !item.local_completed)" in helper_source
+    assert "sourceId === targetId" in helper_source
+
+
+def test_reordering_translates_filtered_ticket_moves_and_scopes_subtask_drags() -> None:
+    root = Path(__file__).parents[1]
+    app_source = (root / "frontend" / "src" / "App.vue").read_text()
+    card_source = (root / "frontend" / "src" / "components" / "TicketCard.vue").read_text()
+    helper_source = (root / "frontend" / "src" / "reordering.ts").read_text()
+    legacy_source = (root / "work_tickets" / "templates" / "index.html").read_text()
+
+    assert "const visibleActiveTickets = computed" in app_source
+    assert "displayedDropTargetIndex(state.value.tickets" in app_source
+    assert "offset > 0" in app_source
+    assert "export function displayedDropTargetIndex" in helper_source
+    assert "draggingSubtaskParentId" in helper_source
+    assert "dragOverSubtaskParentId" in helper_source
+    assert "draggingSubtaskParentId.value !== props.ticket.id" in card_source
+    assert "clearSubtaskDragState();" in card_source
+    assert "clearSubtaskDragOverState();" in card_source
+    assert "dragOverSubtaskParentId === ticket.id" in card_source
+    assert ".ticket[data-top-level-ticket]:not(.completed):not([hidden])" in legacy_source
+    assert "ticketDropTargetIndex(container, ticket, target, offset > 0)" in legacy_source
+    assert (
+        'droppedRow.classList.contains("completed") || dragging.classList.contains("completed")'
+        in legacy_source
+    )
+    assert (
+        'if (!target || !container || container !== dragging.closest("[data-subtasks]"))'
+        in legacy_source
+    )
+    assert (
+        'const droppedTicket = event.target.closest?.(".ticket[data-top-level-ticket]")'
+        in legacy_source
+    )
+    assert "clearDragState();" in legacy_source
+
+
 def test_ticket_controls_use_compact_accessible_actions() -> None:
     with SessionLocal() as db:
         ticket = Ticket(summary="Compact controls", planned_date=date.today(), position=0)
@@ -1264,6 +1328,22 @@ def test_api_move_indices_use_only_unfinished_siblings() -> None:
 
     assert ticket_response.status_code == 200
     assert child_response.status_code == 200
+    ticket_state = ticket_response.json()["state"]["tickets"]
+    assert [
+        ticket["id"] for ticket in ticket_state if ticket["id"] in {first.id, target_id, done.id}
+    ] == [
+        target_id,
+        first.id,
+        done.id,
+    ]
+    child_state = next(
+        ticket for ticket in child_response.json()["state"]["tickets"] if ticket["id"] == parent_id
+    )
+    assert [subtask["id"] for subtask in child_state["subtasks"]] == [
+        child_target_id,
+        child_first.id,
+        child_done.id,
+    ]
     with SessionLocal() as db:
         top_level = list(
             db.scalars(
@@ -1292,6 +1372,36 @@ def test_api_move_indices_use_only_unfinished_siblings() -> None:
         ]
         assert [subtask.position for subtask in parent.subtasks[:2]] == [0, 1]
         assert db.get(Ticket, child_done.id).position == 1
+
+
+def test_api_move_rejects_targets_in_the_done_region() -> None:
+    with SessionLocal() as db:
+        active_ticket = Ticket(summary="Boundary active ticket", position=0)
+        done_ticket = Ticket(summary="Boundary done ticket", position=1, local_completed=True)
+        parent = Ticket(summary="Boundary parent", position=2)
+        active_subtask = Ticket(summary="Boundary active subtask", position=0, parent=parent)
+        done_subtask = Ticket(
+            summary="Boundary done subtask", position=1, parent=parent, local_completed=True
+        )
+        db.add_all([active_ticket, done_ticket, parent, active_subtask, done_subtask])
+        db.commit()
+        active_ticket_id = active_ticket.id
+        active_subtask_id = active_subtask.id
+
+    ticket_response = client.post(
+        f"/api/tickets/{active_ticket_id}/move", params={"target_index": 999999}
+    )
+    subtask_response = client.post(
+        f"/api/subtasks/{active_subtask_id}/move", params={"target_index": 1}
+    )
+
+    assert ticket_response.status_code == 422
+    assert ticket_response.json() == {"ok": False, "message": "Ticket target position is invalid."}
+    assert subtask_response.status_code == 422
+    assert subtask_response.json() == {
+        "ok": False,
+        "message": "Subtask target position is invalid.",
+    }
 
 
 def test_subtask_completion_and_locking_use_the_same_priority_rules() -> None:

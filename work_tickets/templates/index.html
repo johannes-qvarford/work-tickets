@@ -384,12 +384,13 @@
             }
           });
 
-          if (categoryFilterStatus) {
-            const categoryName = categoryFilter?.selectedOptions[0]?.textContent ?? "this category";
-            categoryFilterStatus.textContent = selectedCategory
-              ? `Showing ${visibleTickets} of ${totalTickets} tickets in ${categoryName}.`
-              : `Showing all ${totalTickets} tickets.`;
-          }
+           if (categoryFilterStatus) {
+             const categoryName = categoryFilter?.selectedOptions[0]?.textContent ?? "this category";
+             categoryFilterStatus.textContent = selectedCategory
+               ? `Showing ${visibleTickets} of ${totalTickets} tickets in ${categoryName}.`
+               : `Showing all ${totalTickets} tickets.`;
+           }
+           document.querySelectorAll("[data-tickets]").forEach(updateTicketMoveControls);
         }
 
         function applyTicketView() {
@@ -421,7 +422,7 @@
         }
 
         function updateTicketMoveControls(container) {
-          const tickets = [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed)")];
+           const tickets = [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed):not([hidden])")];
           tickets.forEach((ticket, index) => {
             const up = ticket.querySelector('[data-move-direction="up"]');
             const down = ticket.querySelector('[data-move-direction="down"]');
@@ -430,11 +431,14 @@
           });
         }
 
-        function clearDragState(container) {
-          container?.querySelectorAll(".dragging, .drag-over").forEach((subtask) => {
-            subtask.classList.remove("dragging", "drag-over");
-          });
-        }
+         function clearDragState(container) {
+           const dragElements = container
+             ? container.querySelectorAll(".dragging, .drag-over")
+             : document.querySelectorAll(".dragging, .drag-over");
+           dragElements.forEach((subtask) => {
+             subtask.classList.remove("dragging", "drag-over");
+           });
+         }
 
         function applyOrder(container, order) {
           const byId = new Map(
@@ -535,15 +539,29 @@
           });
         }
 
-        async function submitTicketMove(form) {
-          const openDetails = openTicketDetails();
-          const buttons = document.querySelectorAll("[data-move-ticket] [data-move-direction]");
-          buttons.forEach((button) => (button.disabled = true));
-          try {
-            const response = await fetch(form.action, {
-              method: "POST",
-              headers: { Accept: "application/json" },
-            });
+         async function submitTicketMove(form) {
+           const openDetails = openTicketDetails();
+           const container = form.closest("[data-tickets]");
+           const ticket = form.closest(".ticket[data-top-level-ticket]");
+           const direction = form.querySelector("[data-move-direction]")?.dataset.moveDirection;
+           const offset = direction === "up" ? -1 : direction === "down" ? 1 : 0;
+           const displayedTickets = container
+             ? [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed):not([hidden])")]
+             : [];
+           const displayedIndex = ticket ? displayedTickets.indexOf(ticket) : -1;
+           const target = displayedTickets[displayedIndex + offset];
+           const targetIndex = container && ticket && offset && target
+             ? ticketDropTargetIndex(container, ticket, target, offset > 0)
+             : null;
+           if (targetIndex === null) return;
+           const buttons = document.querySelectorAll("[data-move-ticket] [data-move-direction]");
+           buttons.forEach((button) => (button.disabled = true));
+           try {
+             const response = await fetch(`/tickets/${ticket.dataset.ticketId}/move-to`, {
+               method: "POST",
+               headers: { Accept: "application/json" },
+               body: new URLSearchParams({ target_index: String(targetIndex) }),
+             });
             const result = await response.json();
             if (!response.ok || !result.ok) {
               throw new Error(result.message || "Unable to move ticket.");
@@ -562,8 +580,17 @@
             announceAction(error instanceof Error ? error.message : "Unable to move ticket.", "error");
           } finally {
             buttons.forEach((button) => (button.disabled = false));
-          }
-        }
+           }
+         }
+
+         function ticketDropTargetIndex(container, source, target, afterTarget) {
+           if (!source || !target || source === target || target.classList.contains("completed") || target.hidden) return null;
+           const active = [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed)")];
+           if (!active.includes(source) || !active.includes(target)) return null;
+           const remaining = active.filter((ticket) => ticket !== source);
+           const targetIndex = remaining.indexOf(target);
+           return targetIndex < 0 ? null : targetIndex + (afterTarget ? 1 : 0);
+         }
 
         async function submitDrag(container, subtask, targetIndex) {
           const buttons = container.querySelectorAll("[data-move-direction]");
@@ -655,7 +682,7 @@
         });
 
         document.addEventListener("dragover", (event) => {
-          const target = event.target.closest?.(".ticket[data-top-level-ticket]:not(.completed)");
+           const target = event.target.closest?.(".ticket[data-top-level-ticket]:not(.completed):not([hidden])");
           const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
           if (!target || !dragging || target === dragging) return;
           const container = target.closest("[data-tickets]");
@@ -668,13 +695,28 @@
           target.classList.add("drag-over");
         });
 
-        document.addEventListener("drop", (event) => {
-          const target = event.target.closest?.(".subtask");
-          const dragging = document.querySelector(".subtask.dragging");
-          if (!target || !dragging || target === dragging) return;
-          const container = target.closest("[data-subtasks]");
-          if (!container || container !== dragging.closest("[data-subtasks]")) return;
-          event.preventDefault();
+         document.addEventListener("drop", (event) => {
+           const target = event.target.closest?.(".subtask:not(.completed)");
+           const droppedRow = event.target.closest?.(".subtask");
+           const dragging = document.querySelector(".subtask.dragging");
+           if (!dragging) return;
+           if (!droppedRow || droppedRow === dragging) {
+             event.preventDefault();
+             clearDragState();
+             return;
+           }
+           const container = droppedRow.closest("[data-subtasks]");
+           if (droppedRow.classList.contains("completed") || dragging.classList.contains("completed")) {
+             event.preventDefault();
+             clearDragState();
+             return;
+           }
+           if (!target || !container || container !== dragging.closest("[data-subtasks]")) {
+             event.preventDefault();
+             clearDragState();
+             return;
+           }
+           event.preventDefault();
           const rows = [...container.querySelectorAll(".subtask:not(.completed)")];
           const targetRowIndex = rows.indexOf(target);
           const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
@@ -684,20 +726,31 @@
           submitDrag(container, dragging, targetIndex);
         });
 
-        document.addEventListener("drop", (event) => {
-          const target = event.target.closest?.(".ticket[data-top-level-ticket]:not(.completed)");
-          const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
-          if (!target || !dragging || target === dragging) return;
-          const container = target.closest("[data-tickets]");
-          if (!container || container !== dragging.closest("[data-tickets]")) return;
-          event.preventDefault();
-          const rows = [...container.querySelectorAll(".ticket[data-top-level-ticket]:not(.completed)")];
-          const targetRowIndex = rows.indexOf(target);
-          const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
-          let targetIndex = targetRowIndex + (afterTarget ? 1 : 0);
-          if (rows.indexOf(dragging) < targetIndex) targetIndex -= 1;
-          clearDragState(container);
-          submitTicketDrag(container, dragging, targetIndex);
+         document.addEventListener("drop", (event) => {
+           const target = event.target.closest?.(".ticket[data-top-level-ticket]:not(.completed):not([hidden])");
+           const droppedTicket = event.target.closest?.(".ticket[data-top-level-ticket]");
+           const dragging = document.querySelector(".ticket[data-top-level-ticket].dragging");
+           if (!dragging) return;
+           const container = droppedTicket?.closest("[data-tickets]");
+           if (
+             !target ||
+             !droppedTicket ||
+             droppedTicket === dragging ||
+             droppedTicket.classList.contains("completed") ||
+             dragging.classList.contains("completed") ||
+             droppedTicket.hidden ||
+             !container ||
+             container !== dragging.closest("[data-tickets]")
+           ) {
+             event.preventDefault();
+             clearDragState();
+             return;
+           }
+           event.preventDefault();
+           const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+           const targetIndex = ticketDropTargetIndex(container, dragging, target, afterTarget);
+           clearDragState(container);
+           if (targetIndex !== null) submitTicketDrag(container, dragging, targetIndex);
         });
 
         document.addEventListener("dragend", (event) => {
