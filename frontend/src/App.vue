@@ -9,6 +9,7 @@ import Select from "primevue/select";
 import Textarea from "primevue/textarea";
 import CategoryButtons, { type Category, type CategoryComponent } from "./components/CategoryButtons.vue";
 import ComponentSelect from "./components/ComponentSelect.vue";
+import RefineSessionCoordinator from "./components/RefineSessionCoordinator.vue";
 import TicketCard, { type Ticket } from "./components/TicketCard.vue";
 import { clearSubtaskDragState, displayedDropTargetIndex, dropTargetIndex } from "./reordering";
 
@@ -142,6 +143,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { page.val
       </nav>
     </header>
     <Message v-if="notice" :severity="notice.severity" closable @close="notice = null">{{ notice.text }}</Message>
+    <RefineSessionCoordinator :tickets="state.tickets" />
 
     <main v-if="page === 'tickets'">
       <Card class="filter-card"><template #content><div class="filter-row"><label for="category-filter">Filter by category</label><Select id="category-filter" v-model="categoryFilter" :options="[{ id: null, name: 'All categories' }, ...state.categories]" optionLabel="name" optionValue="id" placeholder="All categories" /><Button type="button" class="view-toggle" severity="secondary" :label="ticketView === 'focus' ? 'Show Queue' : 'Show Focus'" :aria-label="ticketView === 'focus' ? 'Switch to Queue' : 'Switch to Focus'" :aria-controls="ticketView === 'focus' ? 'focus-section' : 'queue-section'" @click="switchTicketView" /><span>{{ visibleTickets.length }} tickets</span></div></template></Card>

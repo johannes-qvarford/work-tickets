@@ -15,6 +15,7 @@ _JIRA_ISSUE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]*-[A-Za-z0-9]+")
 __all__ = [
     "JiraClientFactory",
     "JiraError",
+    "canonicalize_jira_key",
     "delete_linked_jira_issue",
     "import_ticket_from_jira",
     "is_jira_issue_reference_candidate",
@@ -30,11 +31,16 @@ __all__ = [
 type JiraClientFactory = Callable[[JiraConfig], JiraClient]
 
 
+def canonicalize_jira_key(key: str) -> str:
+    """Return the stable representation used for stored and runtime Jira keys."""
+    return key.strip().upper()
+
+
 def parse_jira_issue_reference(reference: str, browser_base_url: str) -> str:
     """Extract a normalized Jira issue key from a key or configured browser URL."""
     value = reference.strip()
     if _JIRA_ISSUE_KEY.fullmatch(value):
-        return value.upper()
+        return canonicalize_jira_key(value)
 
     try:
         parsed = urlsplit(value)
@@ -59,7 +65,7 @@ def parse_jira_issue_reference(reference: str, browser_base_url: str) -> str:
     key = path[len(browse_prefix) :].strip("/")
     if not _JIRA_ISSUE_KEY.fullmatch(key):
         raise JiraError("Enter a Jira issue key or a Jira browser URL ending in /browse/KEY.")
-    return key.upper()
+    return canonicalize_jira_key(key)
 
 
 def is_jira_issue_reference_candidate(value: str) -> bool:
@@ -79,7 +85,7 @@ def delete_linked_jira_issue(
         return "done items can only be marked active"
     if not ticket.jira_issue_key:
         return None
-    issue_key = ticket.jira_issue_key
+    issue_key = canonicalize_jira_key(ticket.jira_issue_key)
     config = db.get(JiraConfig, 1)
     if config is None:
         return f"linked Jira issue {issue_key} could not be deleted: Jira is not configured."
@@ -114,7 +120,9 @@ def sync_ticket(
     jira = jira_client_factory(config)
     try:
         if ticket.jira_issue_key:
-            issue = jira.update_issue(ticket.jira_issue_key, ticket.summary, ticket.description)
+            issue = jira.update_issue(
+                canonicalize_jira_key(ticket.jira_issue_key), ticket.summary, ticket.description
+            )
         else:
             issue = jira.create_issue(ticket.summary, ticket.description)
         synced_at = datetime.utcnow()
@@ -126,7 +134,9 @@ def sync_ticket(
             try:
                 if subtask.jira_issue_key:
                     subtask_issue = jira.update_issue(
-                        subtask.jira_issue_key, subtask.summary, subtask.description
+                        canonicalize_jira_key(subtask.jira_issue_key),
+                        subtask.summary,
+                        subtask.description,
                     )
                 else:
                     subtask_issue = jira.create_subtask(
@@ -160,7 +170,9 @@ def sync_subtask(
         raise JiraError("Jira is not configured. Configure Jira before syncing.")
     jira = jira_client_factory(config)
     try:
-        issue = jira.update_issue(subtask.jira_issue_key, subtask.summary, subtask.description)
+        issue = jira.update_issue(
+            canonicalize_jira_key(subtask.jira_issue_key), subtask.summary, subtask.description
+        )
         save_jira_issue(subtask, issue, datetime.utcnow())
         db.commit()
     finally:
@@ -181,7 +193,12 @@ def import_ticket_from_jira(
     if config is None:
         raise JiraError("Jira is not configured. Configure Jira before importing.")
     issue_key = parse_jira_issue_reference(reference, config.browser_base_url or config.base_url)
-    if db.scalar(select(Ticket.id).where(Ticket.jira_issue_key == issue_key)) is not None:
+    if any(
+        stored_key is not None and canonicalize_jira_key(stored_key) == issue_key
+        for stored_key in db.scalars(
+            select(Ticket.jira_issue_key).where(Ticket.jira_issue_key.is_not(None))
+        )
+    ):
         raise JiraError(f"A local ticket is already linked to Jira issue {issue_key}.")
 
     jira = jira_client_factory(config)
@@ -194,16 +211,24 @@ def import_ticket_from_jira(
 
     remote_subtask_keys: set[str] = set()
     for subtask in synced.subtasks:
-        if subtask.key == synced.issue.key:
+        subtask_key = canonicalize_jira_key(subtask.key)
+        if subtask_key == issue_key:
             raise JiraError(f"Jira returned the parent issue {issue_key} as its own subtask.")
-        if subtask.key in remote_subtask_keys:
-            raise JiraError(f"Jira returned duplicate subtask key {subtask.key}.")
+        if subtask_key in remote_subtask_keys:
+            raise JiraError(f"Jira returned duplicate subtask key {subtask_key}.")
         if not subtask.summary:
-            raise JiraError(f"Jira returned subtask {subtask.key} without a summary.")
-        remote_subtask_keys.add(subtask.key)
-    imported_issue_keys = {synced.issue.key, *remote_subtask_keys}
-    existing_issue_key = db.scalar(
-        select(Ticket.jira_issue_key).where(Ticket.jira_issue_key.in_(imported_issue_keys))
+            raise JiraError(f"Jira returned subtask {subtask_key} without a summary.")
+        remote_subtask_keys.add(subtask_key)
+    imported_issue_keys = {issue_key, *remote_subtask_keys}
+    existing_issue_key = next(
+        (
+            stored_key
+            for stored_key in db.scalars(
+                select(Ticket.jira_issue_key).where(Ticket.jira_issue_key.is_not(None))
+            )
+            if stored_key is not None and canonicalize_jira_key(stored_key) in imported_issue_keys
+        ),
+        None,
     )
     if existing_issue_key is not None:
         raise JiraError(f"A local ticket is already linked to Jira issue {existing_issue_key}.")
@@ -224,7 +249,7 @@ def import_ticket_from_jira(
         category_id=category_id,
         component=component,
         position=0,
-        jira_issue_key=synced.issue.key,
+        jira_issue_key=canonicalize_jira_key(synced.issue.key),
         jira_status_name=synced.issue.status_name,
         synced_at=synced_at,
     )
@@ -240,7 +265,7 @@ def import_ticket_from_jira(
                 summary=subtask.summary or "",
                 description=subtask.description or "",
                 position=position,
-                jira_issue_key=subtask.key,
+                jira_issue_key=canonicalize_jira_key(subtask.key),
                 jira_status_name=subtask.status_name,
                 synced_at=synced_at,
             )
@@ -268,7 +293,7 @@ def sync_ticket_from_jira(
         raise JiraError("Jira is not configured. Configure Jira before syncing.")
     jira = jira_client_factory(config)
     try:
-        synced = jira.get_issue_with_subtasks(ticket.jira_issue_key)
+        synced = jira.get_issue_with_subtasks(canonicalize_jira_key(ticket.jira_issue_key))
     finally:
         jira.close()
     if not synced.issue.summary:
@@ -276,13 +301,15 @@ def sync_ticket_from_jira(
 
     remote_subtasks_by_key: dict[str, JiraIssue] = {}
     for issue in synced.subtasks:
-        if issue.key == synced.issue.key:
-            raise JiraError(f"Jira returned the parent issue {issue.key} as its own subtask.")
-        if issue.key in remote_subtasks_by_key:
-            raise JiraError(f"Jira returned duplicate subtask key {issue.key}.")
+        issue_key = canonicalize_jira_key(issue.key)
+        parent_key = canonicalize_jira_key(synced.issue.key)
+        if issue_key == parent_key:
+            raise JiraError(f"Jira returned the parent issue {parent_key} as its own subtask.")
+        if issue_key in remote_subtasks_by_key:
+            raise JiraError(f"Jira returned duplicate subtask key {issue_key}.")
         if not issue.summary:
-            raise JiraError(f"Jira returned subtask {issue.key} without a summary.")
-        remote_subtasks_by_key[issue.key] = issue
+            raise JiraError(f"Jira returned subtask {issue_key} without a summary.")
+        remote_subtasks_by_key[issue_key] = issue
 
     synced_at = datetime.utcnow()
     save_jira_issue(ticket, synced.issue, synced_at, clear_missing_fields=True)
@@ -298,18 +325,28 @@ def reconcile_jira_subtasks(
     db: Session,
 ) -> None:
     """Make Jira-linked children match Jira while retaining local-only fields."""
+    normalized_remote_subtasks: dict[str, JiraIssue] = {}
+    for key, issue in remote_subtasks_by_key.items():
+        canonical_key = canonicalize_jira_key(key)
+        if canonical_key in normalized_remote_subtasks:
+            raise JiraError(f"Jira returned duplicate subtask key {canonical_key}.")
+        normalized_remote_subtasks[canonical_key] = issue
     local_subtasks = list(ticket.subtasks)
     local_subtasks_by_key: dict[str, Ticket] = {}
     for subtask in local_subtasks:
         if not subtask.jira_issue_key:
             continue
-        if subtask.jira_issue_key in local_subtasks_by_key:
+        key = canonicalize_jira_key(subtask.jira_issue_key)
+        if key in local_subtasks_by_key:
             raise JiraError(f"Local subtasks have duplicate Jira key {subtask.jira_issue_key}.")
-        local_subtasks_by_key[subtask.jira_issue_key] = subtask
+        local_subtasks_by_key[key] = subtask
 
     retained_subtasks: list[Ticket] = []
     for subtask in local_subtasks:
-        if subtask.jira_issue_key and subtask.jira_issue_key not in remote_subtasks_by_key:
+        if (
+            subtask.jira_issue_key
+            and canonicalize_jira_key(subtask.jira_issue_key) not in normalized_remote_subtasks
+        ):
             if subtask.local_completed:
                 retained_subtasks.append(subtask)
             else:
@@ -318,8 +355,8 @@ def reconcile_jira_subtasks(
             retained_subtasks.append(subtask)
 
     active_subtasks = [subtask for subtask in retained_subtasks if not subtask.local_completed]
-    for issue in remote_subtasks_by_key.values():
-        matching_subtask = local_subtasks_by_key.get(issue.key)
+    for key, issue in normalized_remote_subtasks.items():
+        matching_subtask = local_subtasks_by_key.get(key)
         if matching_subtask is None:
             matching_subtask = Ticket(parent=ticket, position=len(active_subtasks))
             active_subtasks.append(matching_subtask)
@@ -339,7 +376,7 @@ def save_jira_issue(
     *,
     clear_missing_fields: bool = False,
 ) -> None:
-    ticket.jira_issue_key = issue.key
+    ticket.jira_issue_key = canonicalize_jira_key(issue.key)
     if issue.summary is not None:
         ticket.summary = issue.summary
     elif clear_missing_fields:

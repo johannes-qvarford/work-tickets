@@ -1,10 +1,18 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Button from "primevue/button";
 import Dialog from "primevue/dialog";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import type { Ticket } from "./TicketCard.vue";
+import {
+  acquireRefineSession,
+  activeSessionMarker,
+  closeRefineSession,
+  hasActiveSession,
+  markActiveSession,
+  refineSessionIdentity,
+} from "../refineSessionLifecycle";
 
 const props = defineProps<{
   ticket: Ticket;
@@ -14,14 +22,25 @@ const props = defineProps<{
 const visible = ref(false);
 const terminalElement = ref<HTMLElement | null>(null);
 let terminal: Terminal | null = null;
-let socket: WebSocket | null = null;
+let unsubscribeOutput: (() => void) | null = null;
+let sessionLease: ReturnType<typeof acquireRefineSession> | null = null;
+
+function sessionIdentity() {
+  return refineSessionIdentity(props.ticket.id, props.ticket.jira_issue_key);
+}
 
 function socketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/api/tickets/${props.ticket.id}/refine`;
 }
 
+function sessionStorageValue() {
+  return activeSessionMarker();
+}
+
 async function openTerminal() {
+  if (visible.value) return;
+  markActiveSession(sessionIdentity());
   visible.value = true;
   await nextTick();
   if (!terminalElement.value) return;
@@ -29,21 +48,23 @@ async function openTerminal() {
   terminal = new Terminal({ convertEol: true, cursorBlink: true, scrollback: 5000 });
   terminal.open(terminalElement.value);
   terminal.write("Connecting to opencode...\r\n");
-  socket = new WebSocket(socketUrl());
-  socket.onmessage = (event) => terminal?.write(String(event.data));
-  socket.onerror = () => terminal?.write("\r\n[Refine connection failed]\r\n");
-  socket.onclose = () => {
-    socket = null;
-    terminal?.write("\r\n[Refine connection closed]\r\n");
-  };
+  sessionLease = acquireRefineSession(sessionIdentity(), socketUrl());
+  unsubscribeOutput = sessionLease.subscribe((output) => terminal?.write(output));
   terminal.onData((data) => {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(data);
+    sessionLease?.send(data);
   });
 }
 
+function releaseSession() {
+  unsubscribeOutput?.();
+  unsubscribeOutput = null;
+  sessionLease?.release();
+  sessionLease = null;
+}
+
 function closeTerminal() {
-  socket?.close();
-  socket = null;
+  closeRefineSession(sessionIdentity());
+  releaseSession();
   terminal?.dispose();
   terminal = null;
   visible.value = false;
@@ -52,7 +73,16 @@ function closeTerminal() {
 watch(visible, (isVisible) => {
   if (!isVisible) closeTerminal();
 });
-onBeforeUnmount(closeTerminal);
+onMounted(() => {
+  if (hasActiveSession(sessionStorageValue(), sessionIdentity())) {
+    void openTerminal();
+  }
+});
+onBeforeUnmount(() => {
+  releaseSession();
+  terminal?.dispose();
+  terminal = null;
+});
 </script>
 
 <template>

@@ -8,6 +8,7 @@ import Textarea from "primevue/textarea";
 import CategoryButtons, { type Category, type CategoryComponent } from "./CategoryButtons.vue";
 import ComponentSelect from "./ComponentSelect.vue";
 import RefineTerminal from "./RefineTerminal.vue";
+import { canonicalizeJiraKey } from "../refineSessionLifecycle";
 import {
   clearSubtaskDragState,
   clearSubtaskDragOverState,
@@ -73,7 +74,9 @@ function todayValue() {
 
 function jiraIssueUrl(issueKey: string | null) {
   const browserBaseUrl = props.browserBaseUrl.trim().replace(/\/+$/, "");
-  return browserBaseUrl && issueKey ? `${browserBaseUrl}/browse/${encodeURIComponent(issueKey)}` : null;
+  return browserBaseUrl && issueKey
+    ? `${browserBaseUrl}/browse/${encodeURIComponent(canonicalizeJiraKey(issueKey))}`
+    : null;
 }
 
 function saveDraftSubtask() {
