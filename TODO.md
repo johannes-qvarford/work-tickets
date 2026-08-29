@@ -1,25 +1,8 @@
-- [x] Eliminate the Pydantic warning that the generated Jira config form field name `validate` shadows a `BaseModel` attribute.
-- [x] Use a separate Jira browser URL for clickable issue links, such as https://johannesqvarford.atlassian.net/browse/SCRUM-5.
-- [x] Prevent changing a ticket's category after creation.
-- [x] Make ticket data compact: keep Done, Date, Sync, and subtask actions small and on existing rows.
-- [x] Format the HTML template with a Jinja-safe Python-backed formatter managed by uv.
-- [x] When syncing to Jira, sync all subtasks. Also, only allow syncing from/to Jira on the parent which also syncs all subtasks.
-- [x] Planned date and category should fit next to summary when creating ticket, while date should fit next to summary when editing a ticket.
-- [x] You should be able to edit a subtask like you can its' parent.
-- [x] Changing subtask order should not require page refresh.
-- [x] Adding and editing tickets and subtasks should not require page refresh.
-- [x] The UI width should be wider.
-- [x] instead of clicking up and down, you can draw a subtask up or down
-- [x] You can draw a ticket up or down in priority
-- [x] There should be a category filter
-- [x] "Jira returned HTTP 400." when syncing ticket to Jira with local ticket that has subtasks. The main ticket gets synced but not the subtask.
-- [x] Just make sure that to/from Jira syncing works, that parent and child is created if needed and that when syncing from jira, that missing children are created and extra children are removed
-- [x] Drawing tickets up and down doesn't work to change their priority. Nothing seems to be happen. Interact with the web browser if you want to verify that the code works.
-- [x] Import from Ticket name (like Scrum-XYZ) or browser url like {browser base}/browse/SCRUM-XYZ.
-- [x] Be able to delete tickets - if the linked Jira ticket could not be deleted, then print an error message about it, but delete the local ticket data still.
-- [x] SQL Migrations - make them idempotent and create an initial migration that creates the current schema.
-- [x] When syncing from Jira, extra subtasks that don't exist for the Jira ticket should be deleted locally.
-- [x] Refactor Jira Client(s) so that we can handle either Jira Cloud and Jira Server urls and conventions depending on the base url format - we may need to support v2 API and not just v3.
-- [x] Refactor app to be more modular.
-- [x] Use migration library that writes performed migrations into the db itself instead of homegrown solution.
-- [x] Convert app to an SPA using Vue and PrimeVue - one page for viewing tickets, one for creating a ticket + subtasks, one for editing categories, one for application-wide settings.
+- [x] No prompt for deleting items
+- [ ] Done items lose priority so they are placed below the item with the lowest priority that is still not done. Done items can't be changed except to become undone, at which point they become the most priorized. Done and unfinished items can't be intertwined - unfinished are always above done.
+- [ ] Quick option for chosing today as due date when creating/editing ticket (focus). Should share alloted space with date picker.
+- [ ] Button on ticket for removing due date (unfocus)
+- [ ] For synced tickets: Label on ticket like (SCRUM-1234) with clickable link that takes you to the browser link of the ticket in a separate tab. Same for subtasks.
+- [ ] No need for the Overview section - it can be removed.
+- [ ] Button to switch between showing Focus and Queue. Should be located in same section as "Filter by category". Should be preserved across refreshes.
+- [ ] Be able to rearrange tickets and subtasks within a ticket by dragging. When syncing to Jira, order is preserved for subtask creation but is not synced to jira beyond that point.
