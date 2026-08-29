@@ -8,6 +8,7 @@ import Message from "primevue/message";
 import Select from "primevue/select";
 import Textarea from "primevue/textarea";
 import TicketCard, { type Ticket } from "./components/TicketCard.vue";
+import { clearSubtaskDragState, displayedActiveItems, displayedDropTargetIndex, dropTargetIndex } from "./reordering";
 
 interface Category { id: number; name: string }
 interface JiraConfig { base_url: string; browser_base_url: string; email: string; project_key: string; issue_type: string; completed_statuses: string }
@@ -20,12 +21,15 @@ const categoryFilter = ref<number | null>(null);
 const ticketView = ref<TicketView>(loadTicketView());
 const notice = ref<{ severity: "success" | "error"; text: string } | null>(null);
 const busy = ref(false);
+const draggingTicketId = ref<number | null>(null);
+const dragOverTicketId = ref<number | null>(null);
 const newTicket = ref({ summary: "", description: "", planned_date: null as Date | null, category_id: null as number | null, jira_reference: "" });
 const newSubtasks = ref<Array<{ summary: string; description: string; planned_date: Date | null }>>([]);
 const newCategory = ref("");
 const settings = ref({ base_url: "", browser_base_url: "", email: "", api_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", validate: false });
 
 const visibleTickets = computed(() => categoryFilter.value === null ? state.value.tickets : state.value.tickets.filter((ticket) => ticket.category_id === categoryFilter.value));
+const visibleActiveTickets = computed(() => displayedActiveItems(visibleTickets.value, () => true));
 const dueTickets = computed(() => visibleTickets.value.filter((ticket) => !ticket.local_completed && ticket.planned_date && ticket.planned_date <= dateValue(todayDate())));
 
 function loadTicketView(): TicketView {
@@ -80,6 +84,34 @@ async function saveCategory() { await run(async () => { await request("/api/cate
 async function deleteCategory(id: number) { if (!confirm("Delete this category? Tickets become uncategorized.")) return; await run(() => request(`/api/categories/${id}`, { method: "DELETE" }), "Category deleted."); }
 async function saveSettings() { await run(async () => { const result = await request("/api/settings/jira", { method: "PUT", body: JSON.stringify(settings.value) }); settings.value.api_token = ""; if (result.state.jira_config) Object.assign(settings.value, result.state.jira_config); }, "Jira settings saved."); }
 async function sync(url: string) { await run(() => request(url, { method: "POST" }), "Jira sync complete."); }
+function canMoveTicket(ticketId: number, offset: number) {
+  const index = visibleActiveTickets.value.findIndex((ticket) => ticket.id === ticketId);
+  return index >= 0 && index + offset >= 0 && index + offset < visibleActiveTickets.value.length;
+}
+async function moveTicket(ticketId: number, targetIndex: number) { await run(() => request(`/api/tickets/${ticketId}/move?target_index=${targetIndex}`, { method: "POST" }), "Ticket order saved."); }
+async function moveSubtask(subtaskId: number, targetIndex: number) { await run(() => request(`/api/subtasks/${subtaskId}/move?target_index=${targetIndex}`, { method: "POST" }), "Subtask order saved."); }
+function moveTicketBy(ticketId: number, offset: number) {
+  const displayedIndex = visibleActiveTickets.value.findIndex((ticket) => ticket.id === ticketId);
+  const target = visibleActiveTickets.value[displayedIndex + offset];
+  if (!target || !canMoveTicket(ticketId, offset)) return;
+  const targetIndex = categoryFilter.value === null
+    ? dropTargetIndex(state.value.tickets, ticketId, target.id, offset > 0)
+    : displayedDropTargetIndex(state.value.tickets, ticketId, target.id, offset > 0, (ticket) => ticket.category_id === categoryFilter.value);
+  if (targetIndex !== null) void moveTicket(ticketId, targetIndex);
+}
+function startTicketDrag(ticketId: number) { draggingTicketId.value = ticketId; dragOverTicketId.value = null; }
+function endTicketDrag() { draggingTicketId.value = null; dragOverTicketId.value = null; }
+function clearDragState() { endTicketDrag(); clearSubtaskDragState(); }
+function overTicket(ticketId: number) { if (draggingTicketId.value !== null && draggingTicketId.value !== ticketId) dragOverTicketId.value = ticketId; }
+function dropTicket(ticketId: number, afterTarget: boolean) {
+  const sourceId = draggingTicketId.value;
+  endTicketDrag();
+  if (sourceId === null) return;
+  const targetIndex = categoryFilter.value === null
+    ? dropTargetIndex(state.value.tickets, sourceId, ticketId, afterTarget)
+    : displayedDropTargetIndex(state.value.tickets, sourceId, ticketId, afterTarget, (ticket) => ticket.category_id === categoryFilter.value);
+  if (targetIndex !== null) void moveTicket(sourceId, targetIndex);
+}
 function addDraftSubtask() { newSubtasks.value.push({ summary: "", description: "", planned_date: null }); }
 function removeDraftSubtask(index: number) { if (!confirm("Delete this subtask?")) return; newSubtasks.value.splice(index, 1); }
 function categoryName(id: number | null) { return state.value.categories.find((category) => category.id === id)?.name || "Uncategorized"; }
@@ -87,7 +119,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { page.val
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" @drop="clearDragState" @dragend="clearDragState">
     <header class="topbar">
       <div><span class="eyebrow">PERSONAL WORKFLOW</span><h1>Work tickets</h1><p>Keep momentum across the work that matters.</p></div>
       <nav aria-label="Main navigation">
@@ -101,8 +133,8 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { page.val
 
     <main v-if="page === 'tickets'">
        <Card class="filter-card"><template #content><div class="filter-row"><label for="category-filter">Filter by category</label><Select id="category-filter" v-model="categoryFilter" :options="[{ id: null, name: 'All categories' }, ...state.categories]" optionLabel="name" optionValue="id" placeholder="All categories" /><Button type="button" class="view-toggle" severity="secondary" :label="ticketView === 'focus' ? 'Show Queue' : 'Show Focus'" :aria-label="ticketView === 'focus' ? 'Switch to Queue' : 'Switch to Focus'" :aria-controls="ticketView === 'focus' ? 'focus-section' : 'queue-section'" @click="switchTicketView" /><span>{{ visibleTickets.length }} tickets</span></div></template></Card>
-       <section v-if="ticketView === 'focus'" id="focus-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">FOCUS</span><h2>Today</h2></div><span class="muted">Due today and overdue</span></div><div v-if="dueTickets.length" class="ticket-grid"><TicketCard v-for="ticket in dueTickets" :key="`due-${ticket.id}`" :ticket="ticket" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" /></div><div v-else class="empty-state"><i class="pi pi-check-circle"></i><strong>Nothing due right now</strong><span>Add the next useful thing when it arrives.</span></div></section>
-       <section v-if="ticketView === 'queue'" id="queue-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">QUEUE</span><h2>All tickets</h2></div><span class="muted">Drag-and-drop priority coming from the existing API</span></div><div v-if="visibleTickets.length" class="ticket-grid"><TicketCard v-for="ticket in visibleTickets" :key="ticket.id" :ticket="ticket" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" /></div><div v-else class="empty-state"><i class="pi pi-inbox"></i><strong>No tickets yet</strong><span>Create a ticket to start your queue.</span></div></section>
+        <section v-if="ticketView === 'focus'" id="focus-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">FOCUS</span><h2>Today</h2></div><span class="muted">Due today and overdue</span></div><div v-if="dueTickets.length" class="ticket-grid"><TicketCard v-for="ticket in dueTickets" :key="`due-${ticket.id}`" :ticket="ticket" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-check-circle"></i><strong>Nothing due right now</strong><span>Add the next useful thing when it arrives.</span></div></section>
+        <section v-if="ticketView === 'queue'" id="queue-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">QUEUE</span><h2>All tickets</h2></div><span class="muted">Drag active tickets to reorder; use the arrow controls with a keyboard.</span></div><div v-if="visibleTickets.length" class="ticket-grid"><TicketCard v-for="ticket in visibleTickets" :key="ticket.id" :ticket="ticket" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" :reorderable="true" :can-move-up="canMoveTicket(ticket.id, -1)" :can-move-down="canMoveTicket(ticket.id, 1)" :dragging-ticket-id="draggingTicketId" :drag-over-ticket-id="dragOverTicketId" @ticket-drag-start="startTicketDrag" @ticket-drag-end="endTicketDrag" @ticket-drag-over="overTicket" @ticket-drop="dropTicket" @move-ticket="moveTicketBy" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-inbox"></i><strong>No tickets yet</strong><span>Create a ticket to start your queue.</span></div></section>
     </main>
 
      <main v-else-if="page === 'create'" class="narrow"><section class="hero"><div><span class="eyebrow">BUILD</span><h2>Create a ticket</h2><p>Capture the outcome and break it into clear next steps.</p></div></section><Card><template #content><form class="form" @submit.prevent="createTicket"><label>Summary or Jira reference<InputText v-model="newTicket.summary" required placeholder="What needs doing? Or WORK-123" /></label><div class="two-col"><label>Planned date<div class="date-control"><DatePicker v-model="newTicket.planned_date" dateFormat="yy-mm-dd" showIcon aria-label="Planned date" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="newTicket.planned_date = todayDate()" /><Button type="button" label="Unfocus" text aria-label="Remove planned date" :disabled="!newTicket.planned_date" @click="newTicket.planned_date = null" /></div></label><label>Category<Select v-model="newTicket.category_id" :options="state.categories" optionLabel="name" optionValue="id" placeholder="No category" /></label></div><label>Description<Textarea v-model="newTicket.description" rows="5" autoResize /></label><label>Jira import URL (optional)<InputText v-model="newTicket.jira_reference" placeholder="https://your-site/browse/WORK-123" /></label><div class="subtask-builder"><div class="section-heading"><h3>Subtasks</h3><Button type="button" label="Add step" icon="pi pi-plus" text @click="addDraftSubtask" /></div><div v-for="(subtask, index) in newSubtasks" :key="index" class="draft-row"><InputText v-model="subtask.summary" :placeholder="`Step ${index + 1}`" /><div class="date-control"><DatePicker v-model="subtask.planned_date" dateFormat="yy-mm-dd" showIcon :aria-label="`Planned date for step ${index + 1}`" /><Button type="button" label="Today" text :aria-label="`Set planned date for step ${index + 1} to today`" @click="subtask.planned_date = todayDate()" /><Button type="button" label="Unfocus" text :aria-label="`Remove planned date for step ${index + 1}`" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" /></div><Button type="button" icon="pi pi-trash" severity="danger" text @click="removeDraftSubtask(index)" /></div></div><Button type="submit" label="Create ticket" icon="pi pi-check" :loading="busy" /></form></template></Card></main>
