@@ -61,32 +61,37 @@ function saveDraftSubtask() {
             :aria-label="ticket.local_completed ? 'Mark active' : 'Mark done'"
             @click="emit('toggle')"
           />
-          <Button v-if="ticket.jira_issue_key" icon="pi pi-cloud-download" text rounded aria-label="Sync from Jira" @click="emit('sync')" />
-          <Button v-else icon="pi pi-sync" text rounded aria-label="Sync to Jira" @click="emit('sync')" />
-          <Button icon="pi pi-trash" severity="danger" text rounded aria-label="Delete ticket" @click="emit('remove')" />
+          <Button v-if="!ticket.local_completed && ticket.jira_issue_key" icon="pi pi-cloud-download" text rounded aria-label="Sync from Jira" @click="emit('sync')" />
+          <Button v-else-if="!ticket.local_completed" icon="pi pi-sync" text rounded aria-label="Sync to Jira" @click="emit('sync')" />
+          <Button v-if="!ticket.local_completed" icon="pi pi-trash" severity="danger" text rounded aria-label="Delete ticket" @click="emit('remove')" />
         </div>
       </div>
       <Button
+        v-if="!ticket.local_completed || ticket.subtasks.length"
         class="edit-toggle"
-        :label="expanded ? 'Hide details' : 'Edit ticket and subtasks'"
+        :label="expanded ? 'Hide details' : (ticket.local_completed ? 'View subtasks' : 'Edit ticket and subtasks')"
         :icon="expanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"
         text
         @click="expanded = !expanded"
       />
       <div v-if="expanded" class="form details-form">
-        <InputText v-model="ticket.summary" aria-label="Ticket summary" />
-        <InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" />
-        <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" />
-        <span class="ticket-meta">Category: {{ categoryName }}</span>
-        <Button label="Save ticket" @click="emit('save', ticket)" />
+        <template v-if="!ticket.local_completed">
+          <InputText v-model="ticket.summary" aria-label="Ticket summary" />
+          <InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" />
+          <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" />
+          <span class="ticket-meta">Category: {{ categoryName }}</span>
+          <Button label="Save ticket" @click="emit('save', ticket)" />
+        </template>
+        <span v-else class="ticket-meta">Done items can only be marked active.</span>
         <h4>Subtasks ({{ ticket.subtasks.length }})</h4>
         <div v-for="subtask in ticket.subtasks" :key="subtask.id" class="subtask-row">
-          <InputText v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" />
+          <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" />
+          <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
           <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text @click="emit('toggleSubtask', subtask.id)" />
-          <Button icon="pi pi-trash" severity="danger" text @click="emit('removeSubtask', subtask.id)" />
-          <Button label="Save" text @click="emit('saveSubtask', subtask)" />
+          <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text @click="emit('removeSubtask', subtask.id)" />
+          <Button v-if="!subtask.local_completed" label="Save" text @click="emit('saveSubtask', subtask)" />
         </div>
-        <div class="subtask-row">
+        <div v-if="!ticket.local_completed" class="subtask-row">
           <InputText v-model="draftSubtask.summary" placeholder="New subtask" />
           <Button label="Add" icon="pi pi-plus" @click="saveDraftSubtask" />
         </div>

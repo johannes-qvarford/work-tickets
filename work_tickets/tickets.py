@@ -5,7 +5,7 @@ from datetime import date
 
 from fastapi import Request
 from fastapi.responses import RedirectResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .jira import JiraClient, JiraError
@@ -68,16 +68,17 @@ def create_ticket(
             f"Ticket {ticket.summary} imported from Jira.",
             200,
             tickets_html=render_ticket_lists(request, db),
+            created_id=ticket.id,
         )
 
-    count = db.scalar(select(func.count()).select_from(Ticket)) or 0
     ticket = Ticket(
         summary=summary_value,
         description=description,
         planned_date=planned_date_value,
         category_id=category_id_value,
-        position=count,
+        position=0,
     )
+    _append_unfinished(_top_level_tickets(db), ticket)
     db.add(ticket)
     db.commit()
     return mutation_response(
@@ -86,6 +87,7 @@ def create_ticket(
         f"Ticket {ticket.summary} added.",
         200,
         tickets_html=render_ticket_lists(request, db),
+        created_id=ticket.id,
     )
 
 
@@ -107,6 +109,13 @@ def create_subtask(
             "Subtasks can only be added to top-level tickets.",
             400,
         )
+    if parent.local_completed:
+        return mutation_response(
+            request,
+            "error",
+            "Done tickets cannot have subtasks added.",
+            400,
+        )
 
     summary_value = summary.strip()
     if not summary_value:
@@ -115,14 +124,14 @@ def create_subtask(
     if planned_date and planned_date_value is None:
         return mutation_response(request, "error", "Subtask planned date is invalid.", 422)
 
-    max_position = db.scalar(select(func.max(Ticket.position)).where(Ticket.parent_id == parent.id))
     subtask = Ticket(
         parent_id=parent.id,
         summary=summary_value,
         description=description,
         planned_date=planned_date_value,
-        position=(max_position if max_position is not None else -1) + 1,
+        position=0,
     )
+    _append_unfinished(_subtasks(db, parent.id), subtask)
     db.add(subtask)
     db.commit()
     return mutation_response(
@@ -147,6 +156,13 @@ def update_ticket(
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
         return mutation_response(request, "error", "Ticket was not found.", 404)
+    if ticket.local_completed:
+        return mutation_response(
+            request,
+            "error",
+            "Done tickets can only be marked active.",
+            400,
+        )
     summary_value = summary.strip()
     if not summary_value:
         return mutation_response(request, "error", "Ticket summary is required.", 422)
@@ -190,6 +206,13 @@ def update_subtask(
         return mutation_response(request, "error", "Subtask was not found.", 404)
     if subtask.parent_id is None:
         return mutation_response(request, "error", "Top-level tickets cannot be edited here.", 400)
+    if subtask.local_completed:
+        return mutation_response(
+            request,
+            "error",
+            "Done subtasks can only be marked active.",
+            400,
+        )
 
     summary_value = summary.strip()
     if not summary_value:
@@ -236,6 +259,8 @@ def delete_subtask(
         return _redirect_error("Subtask was not found.")
     if subtask.parent_id is None:
         return _redirect_error("Top-level tickets cannot be deleted here.")
+    if subtask.local_completed:
+        return _redirect_error("Done subtasks can only be marked active.")
     summary = subtask.summary
     from .jira_service import delete_linked_jira_issue
 
@@ -257,6 +282,12 @@ def delete_ticket(
         return _redirect_error("Ticket was not found.")
     if ticket.parent_id is not None:
         return _redirect_error("Subtasks cannot be deleted here.")
+    if ticket.local_completed:
+        return _redirect_error("Done tickets can only be marked active.")
+    if any(subtask.local_completed for subtask in ticket.subtasks):
+        return _redirect_error(
+            "Tickets with done subtasks can only be deleted after they are active."
+        )
     summary = ticket.summary
     from .jira_service import delete_linked_jira_issue
 
@@ -275,6 +306,7 @@ def complete_ticket(ticket_id: int, db: Session) -> RedirectResponse:
     if ticket.parent_id is not None:
         return _redirect_error("Only top-level tickets can be completed here.")
     ticket.local_completed = not ticket.local_completed
+    _prioritize_completion(ticket, db)
     db.commit()
     state = "done" if ticket.local_completed else "active"
     return _redirect_success(f"Ticket {ticket.summary} marked {state}.")
@@ -287,6 +319,7 @@ def complete_subtask(subtask_id: int, db: Session) -> RedirectResponse:
     if subtask.parent_id is None:
         return _redirect_error("Top-level tickets cannot be completed here.")
     subtask.local_completed = not subtask.local_completed
+    _prioritize_completion(subtask, db)
     db.commit()
     state = "done" if subtask.local_completed else "active"
     return _redirect_success(f"Subtask {subtask.summary} marked {state}.")
@@ -299,13 +332,16 @@ def move_subtask(subtask_id: int, offset: int, request: Request, db: Session) ->
     if subtask.parent_id is None:
         return move_response(request, "error", "Top-level tickets cannot be reordered here.", 400)
     siblings = _subtasks(db, subtask.parent_id)
+    if subtask.local_completed:
+        return move_response(request, "error", "Done subtasks cannot be reordered.", 400)
+    active_siblings = [sibling for sibling in siblings if not sibling.local_completed]
     current_index = next(
-        index for index, sibling in enumerate(siblings) if sibling.id == subtask.id
+        index for index, sibling in enumerate(active_siblings) if sibling.id == subtask.id
     )
     target_index = current_index + offset
     direction = "up" if offset < 0 else "down"
-    if target_index < 0 or target_index >= len(siblings):
-        _normalize_positions(siblings)
+    if target_index < 0 or target_index >= len(active_siblings):
+        _normalize_positions(active_siblings)
         db.commit()
         boundary = "top" if offset < 0 else "bottom"
         return move_response(
@@ -338,15 +374,21 @@ def move_subtask_to_index(
         return move_response(request, "error", "Subtask was not found.", 404)
     if subtask.parent_id is None:
         return move_response(request, "error", "Top-level tickets cannot be reordered here.", 400)
+    if subtask.local_completed:
+        return move_response(request, "error", "Done subtasks cannot be reordered.", 400)
     siblings = _subtasks(db, subtask.parent_id)
-    if target_index < 0 or target_index >= len(siblings):
+    active_siblings = [sibling for sibling in siblings if not sibling.local_completed]
+    if target_index < 0 or target_index >= len(active_siblings):
         return move_response(request, "error", "Subtask target position is invalid.", 422)
     current_index = next(
-        index for index, sibling in enumerate(siblings) if sibling.id == subtask.id
+        index for index, sibling in enumerate(active_siblings) if sibling.id == subtask.id
     )
-    siblings.pop(current_index)
-    siblings.insert(target_index, subtask)
-    _normalize_positions(siblings)
+    active_siblings.pop(current_index)
+    active_siblings.insert(target_index, subtask)
+    ordered_siblings = active_siblings + [
+        sibling for sibling in siblings if sibling.local_completed
+    ]
+    _normalize_positions(active_siblings)
     db.commit()
     return move_response(
         request,
@@ -354,7 +396,7 @@ def move_subtask_to_index(
         message or f"Subtask {subtask.summary} reordered.",
         200,
         subtask.parent_id,
-        [sibling.id for sibling in siblings],
+        [sibling.id for sibling in ordered_siblings],
     )
 
 
@@ -366,14 +408,17 @@ def move_ticket(ticket_id: int, offset: int, request: Request, db: Session) -> R
         return ticket_move_response(
             request, "error", "Subtasks cannot be reordered with top-level tickets.", 400
         )
+    if ticket.local_completed:
+        return ticket_move_response(request, "error", "Done tickets cannot be reordered.", 400)
     tickets = _top_level_tickets(db)
+    active_tickets = [candidate for candidate in tickets if not candidate.local_completed]
     current_index = next(
-        index for index, candidate in enumerate(tickets) if candidate.id == ticket.id
+        index for index, candidate in enumerate(active_tickets) if candidate.id == ticket.id
     )
     target_index = current_index + offset
     direction = "up" if offset < 0 else "down"
-    if target_index < 0 or target_index >= len(tickets):
-        _normalize_positions(tickets)
+    if target_index < 0 or target_index >= len(active_tickets):
+        _normalize_positions(active_tickets)
         db.commit()
         boundary = "top" if offset < 0 else "bottom"
         return ticket_move_response(
@@ -408,15 +453,21 @@ def move_ticket_to_index(
         return ticket_move_response(
             request, "error", "Subtasks cannot be reordered with top-level tickets.", 400
         )
+    if ticket.local_completed:
+        return ticket_move_response(request, "error", "Done tickets cannot be reordered.", 400)
     tickets = _top_level_tickets(db)
-    if target_index < 0 or target_index >= len(tickets):
+    active_tickets = [candidate for candidate in tickets if not candidate.local_completed]
+    if target_index < 0 or target_index >= len(active_tickets):
         return ticket_move_response(request, "error", "Ticket target position is invalid.", 422)
     current_index = next(
-        index for index, candidate in enumerate(tickets) if candidate.id == ticket.id
+        index for index, candidate in enumerate(active_tickets) if candidate.id == ticket.id
     )
-    tickets.pop(current_index)
-    tickets.insert(target_index, ticket)
-    _normalize_positions(tickets)
+    active_tickets.pop(current_index)
+    active_tickets.insert(target_index, ticket)
+    ordered_tickets = active_tickets + [
+        candidate for candidate in tickets if candidate.local_completed
+    ]
+    _normalize_positions(active_tickets)
     db.commit()
     return ticket_move_response(
         request,
@@ -424,7 +475,7 @@ def move_ticket_to_index(
         message or f"Ticket {ticket.summary} reordered.",
         200,
         db=db,
-        order=[candidate.id for candidate in tickets],
+        order=[candidate.id for candidate in ordered_tickets],
     )
 
 
@@ -433,7 +484,7 @@ def _top_level_tickets(db: Session) -> list[Ticket]:
         db.scalars(
             select(Ticket)
             .where(Ticket.parent_id.is_(None))
-            .order_by(Ticket.position, Ticket.created_at, Ticket.id)
+            .order_by(Ticket.local_completed, Ticket.position, Ticket.created_at, Ticket.id)
         )
     )
 
@@ -443,9 +494,34 @@ def _subtasks(db: Session, parent_id: int) -> list[Ticket]:
         db.scalars(
             select(Ticket)
             .where(Ticket.parent_id == parent_id)
-            .order_by(Ticket.position, Ticket.created_at, Ticket.id)
+            .order_by(Ticket.local_completed, Ticket.position, Ticket.created_at, Ticket.id)
         )
     )
+
+
+def _prioritize_completion(ticket: Ticket, db: Session) -> None:
+    if ticket.parent_id is None:
+        siblings = _top_level_tickets(db)
+    else:
+        siblings = _subtasks(db, ticket.parent_id)
+
+    active_siblings = [
+        sibling for sibling in siblings if sibling.id != ticket.id and not sibling.local_completed
+    ]
+    if ticket.local_completed:
+        done_siblings = [
+            sibling for sibling in siblings if sibling.id != ticket.id and sibling.local_completed
+        ]
+        _normalize_positions(active_siblings)
+        ticket.position = max((sibling.position for sibling in done_siblings), default=-1) + 1
+    else:
+        _normalize_positions([ticket, *active_siblings])
+
+
+def _append_unfinished(siblings: list[Ticket], ticket: Ticket) -> None:
+    active_siblings = [sibling for sibling in siblings if not sibling.local_completed]
+    active_siblings.append(ticket)
+    _normalize_positions(active_siblings)
 
 
 def _normalize_positions(siblings: list[Ticket]) -> None:

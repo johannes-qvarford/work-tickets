@@ -21,7 +21,7 @@ def ticket_list_context(db: Session) -> dict[str, object]:
         db.scalars(
             select(Ticket)
             .where(Ticket.parent_id.is_(None))
-            .order_by(Ticket.position, Ticket.created_at)
+            .order_by(Ticket.local_completed, Ticket.position, Ticket.created_at, Ticket.id)
         )
     )
     today = date.today()
@@ -113,6 +113,7 @@ def mutation_response(
     tickets_html: str | None = None,
     ticket_html: str | None = None,
     ticket_target: str | None = None,
+    created_id: int | None = None,
 ) -> Response:
     if (
         request.url.path.startswith("/api/")
@@ -123,6 +124,8 @@ def mutation_response(
             payload.update({"target": "ticket-lists", "html": tickets_html})
         elif ticket_html is not None:
             payload.update({"target": ticket_target, "html": ticket_html})
+        if created_id is not None:
+            payload["created_id"] = created_id
         return JSONResponse(payload, status_code=status_code)
     return redirect_with_message(kind, message)
 

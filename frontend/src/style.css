@@ -28,6 +28,7 @@ h3 { margin: 0; font-size: 1.15rem; }
 .ticket-title strong { display: block; font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
 .ticket-marker { color: #6ee7c2; margin-right: 9px; }
 .ticket-meta { color: #8fa2b9; font-size: .82rem; margin: 9px 0 0 25px; }
+.subtask-completed { flex: 1; text-decoration: line-through; }
 .button-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .ticket-title > .button-row { flex-shrink: 0; }
 .details-form { margin-top: 18px; }

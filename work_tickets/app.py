@@ -92,15 +92,22 @@ def _service_json_response(response: Response, db: Session) -> Response:
     if response.status_code >= 400:
         return response
     message = "Saved."
+    created_id: int | None = None
     if isinstance(response, JSONResponse):
         try:
             import json
 
             content = bytes(response.body).decode()
-            message = str(json.loads(content).get("message", message))
+            result = json.loads(content)
+            message = str(result.get("message", message))
+            if isinstance(result.get("created_id"), int):
+                created_id = result["created_id"]
         except (UnicodeDecodeError, ValueError):
             pass
-    return JSONResponse({"ok": True, "message": message, "state": _api_state(db)})
+    payload: dict[str, object] = {"ok": True, "message": message, "state": _api_state(db)}
+    if created_id is not None:
+        payload["created_id"] = created_id
+    return JSONResponse(payload)
 
 
 @app.get("/api/state")
@@ -191,12 +198,34 @@ def api_complete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> Resp
 
 @app.delete("/api/tickets/{ticket_id}")
 def api_delete_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Response:
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        return JSONResponse({"ok": False, "message": "Ticket was not found."}, status_code=404)
+    if ticket.local_completed:
+        return JSONResponse(
+            {"ok": False, "message": "Done tickets can only be marked active."}, status_code=400
+        )
+    if any(subtask.local_completed for subtask in ticket.subtasks):
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": "Tickets with done subtasks can only be deleted after they are active.",
+            },
+            status_code=400,
+        )
     response = tickets.delete_ticket(ticket_id, db, jira_client_factory=JiraClient)
     return JSONResponse({"ok": response.status_code < 400, "state": _api_state(db)})
 
 
 @app.delete("/api/subtasks/{subtask_id}")
 def api_delete_subtask(subtask_id: int, db: Session = Depends(get_db)) -> Response:
+    subtask = db.get(Ticket, subtask_id)
+    if subtask is None:
+        return JSONResponse({"ok": False, "message": "Subtask was not found."}, status_code=404)
+    if subtask.local_completed:
+        return JSONResponse(
+            {"ok": False, "message": "Done subtasks can only be marked active."}, status_code=400
+        )
     response = tickets.delete_subtask(subtask_id, db, jira_client_factory=JiraClient)
     return JSONResponse({"ok": response.status_code < 400, "state": _api_state(db)})
 

@@ -44,9 +44,8 @@ async function run(action: () => Promise<void>, success = "Saved.") {
 }
 async function createTicket() {
   await run(async () => {
-    await request("/api/tickets", { method: "POST", body: JSON.stringify({ ...newTicket.value, planned_date: dateValue(newTicket.value.planned_date) || null }) });
-    const created = state.value.tickets.at(-1);
-    if (created) for (const subtask of newSubtasks.value.filter((item) => item.summary.trim())) await request(`/api/tickets/${created.id}/subtasks`, { method: "POST", body: JSON.stringify({ ...subtask, planned_date: dateValue(subtask.planned_date) || null }) });
+    const result = await request("/api/tickets", { method: "POST", body: JSON.stringify({ ...newTicket.value, planned_date: dateValue(newTicket.value.planned_date) || null }) });
+    if (result.created_id) for (const subtask of newSubtasks.value.filter((item) => item.summary.trim())) await request(`/api/tickets/${result.created_id}/subtasks`, { method: "POST", body: JSON.stringify({ ...subtask, planned_date: dateValue(subtask.planned_date) || null }) });
     newTicket.value = { summary: "", description: "", planned_date: null, category_id: null, jira_reference: "" }; newSubtasks.value = [];
     go("tickets"); await load();
   }, "Ticket created.");
