@@ -82,7 +82,7 @@ function saveDraftSubtask() {
       <div v-if="expanded" class="form details-form">
         <template v-if="!ticket.local_completed">
           <InputText v-model="ticket.summary" aria-label="Ticket summary" />
-          <div class="date-control"><InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="ticket.planned_date = todayValue()" /></div>
+          <div class="date-control"><InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="ticket.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove planned date" :disabled="!ticket.planned_date" @click="ticket.planned_date = null" /></div>
           <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" />
           <span class="ticket-meta">Category: {{ categoryName }}</span>
           <Button label="Save ticket" @click="emit('save', ticket)" />
@@ -94,7 +94,7 @@ function saveDraftSubtask() {
            <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
            <div v-if="!subtask.local_completed" class="date-control">
              <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" />
-             <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" />
+             <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" />
            </div>
            <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text @click="emit('toggleSubtask', subtask.id)" />
            <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text @click="emit('removeSubtask', subtask.id)" />
@@ -104,7 +104,7 @@ function saveDraftSubtask() {
            <InputText v-model="draftSubtask.summary" placeholder="New subtask" />
            <div class="date-control">
              <InputText v-model="draftSubtask.planned_date" type="date" aria-label="New subtask planned date" />
-             <Button type="button" label="Today" text aria-label="Set new subtask planned date to today" @click="draftSubtask.planned_date = todayValue()" />
+             <Button type="button" label="Today" text aria-label="Set new subtask planned date to today" @click="draftSubtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove new subtask planned date" :disabled="!draftSubtask.planned_date" @click="draftSubtask.planned_date = ''" />
            </div>
            <Button label="Add" icon="pi pi-plus" @click="saveDraftSubtask" />
          </div>

@@ -187,7 +187,7 @@
                 <span class="field-label">Summary or Jira reference</span><input name="summary" placeholder="What needs doing? Or SCRUM-5 / its browser URL">
               </label>
               <label>
-                <span class="field-label">Planned date</span><span class="date-control"><input type="date" name="planned_date"><button class="secondary" type="button" data-today-date aria-label="Set planned date to today">Today</button>
+                <span class="field-label">Planned date</span><span class="date-control"><input type="date" name="planned_date"><button class="secondary" type="button" data-today-date aria-label="Set planned date to today">Today</button><button class="secondary" type="button" data-clear-date aria-label="Remove planned date" disabled>Unfocus</button>
                 </span>
               </label>
               <label>
@@ -301,15 +301,35 @@
           return `${today.getFullYear()}-${month}-${day}`;
         }
 
-        document.addEventListener("click", (event) => {
-          const button = event.target.closest?.("[data-today-date]");
-          if (!button) return;
-          const input = button.closest(".date-control")?.querySelector('input[type="date"]');
-          if (!input) return;
-          input.value = localDateValue();
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        });
+         function updateDateControl(control) {
+           const input = control?.querySelector('input[type="date"]');
+           const clearButton = control?.querySelector("[data-clear-date]");
+           if (clearButton) clearButton.disabled = !input?.value;
+         }
+
+         document.addEventListener("click", (event) => {
+           const button = event.target.closest?.("[data-today-date], [data-clear-date]");
+           if (!button) return;
+           const control = button.closest(".date-control");
+           const input = control?.querySelector('input[type="date"]');
+           if (!input) return;
+           if (button.matches("[data-today-date]")) input.value = localDateValue();
+           else input.value = "";
+           input.dispatchEvent(new Event("input", { bubbles: true }));
+           input.dispatchEvent(new Event("change", { bubbles: true }));
+         });
+
+         document.addEventListener("input", (event) => {
+           const input = event.target.closest?.('input[type="date"]');
+           if (input) updateDateControl(input.closest(".date-control"));
+         });
+
+         document.addEventListener("change", (event) => {
+           const input = event.target.closest?.('input[type="date"]');
+           if (input) updateDateControl(input.closest(".date-control"));
+         });
+
+         document.querySelectorAll(".date-control").forEach(updateDateControl);
 
         if (!window.fetch) return;
 
@@ -442,7 +462,10 @@
           targetElement.outerHTML = result.html;
           applyCategoryFilter();
           restoreTicketState(ticketId, ticketDetailsOpen, subtaskId, subtaskDetailsOpen);
-          if (form.action.endsWith("/tickets")) form.reset();
+           if (form.action.endsWith("/tickets")) {
+             form.reset();
+             updateDateControl(form.querySelector(".date-control"));
+           }
           announceAction(result.message);
         }
 
