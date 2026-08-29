@@ -62,7 +62,7 @@
 
   Validate that the configured root path exists when saving settings. Disable `Refine` when the ticket has no local component, and report an inline error when the root/component directory does not exist at launch time.
 
-- [ ] Make Refine sessions resumable.
+- [x] Make Refine sessions resumable.
 
   Maintain one session per item, keyed by its Jira key regardless of whether it belongs to a top-level ticket or a subtask. The terminal should reconnect to an existing session after a browser refresh while the server process is running.
 
