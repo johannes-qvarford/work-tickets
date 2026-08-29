@@ -61,8 +61,8 @@ onBeforeUnmount(closeTerminal);
     label="Refine"
     icon="pi pi-terminal"
     text
-    :disabled="!browserBaseUrl"
-    :title="browserBaseUrl ? 'Open Refine terminal' : 'Configure the Jira browser URL first'"
+    :disabled="!ticket.component || !browserBaseUrl"
+    :title="!ticket.component ? 'Assign a local component first' : (browserBaseUrl ? 'Open Refine terminal' : 'Configure the Jira browser URL first')"
     @click="openTerminal"
   />
   <Dialog v-model:visible="visible" modal :header="`Refine ${ticket.jira_issue_key || ticket.summary}`" :style="{ width: 'min(900px, 94vw)' }" @hide="closeTerminal">

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from .local_projects import is_safe_local_component_name
 from .models import JiraConfig, Ticket
 
 
@@ -27,6 +30,37 @@ def refine_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
         raise RefineError("The configured Jira browser URL is invalid.")
     path = f"{browser_url.path.rstrip('/')}/browse/{quote(ticket.jira_issue_key, safe='')}"
     return f"Refine {urlunsplit((browser_url.scheme, browser_url.netloc, path, '', ''))}"
+
+
+def refine_working_directory(ticket: Ticket, config: JiraConfig | None) -> Path:
+    if not ticket.component:
+        raise RefineError("Assign a local component before using Refine.")
+    if not is_safe_local_component_name(ticket.component):
+        raise RefineError("The ticket component is not a valid local project name.")
+    if config is None or not config.local_projects_directory:
+        raise RefineError("Configure the local projects directory before using Refine.")
+
+    try:
+        root = Path(config.local_projects_directory).expanduser()
+        if not root.is_dir():
+            raise RefineError("The configured local projects directory does not exist.")
+
+        resolved_root = root.resolve()
+        project = root / ticket.component
+        resolved_project = project.resolve()
+        try:
+            resolved_project.relative_to(resolved_root)
+        except ValueError as exc:
+            raise RefineError("The ticket component is not a valid local project name.") from exc
+        if not resolved_project.is_dir():
+            raise RefineError(
+                f"The local project directory for component '{ticket.component}' does not exist."
+            )
+    except RefineError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RefineError("The local project directory could not be resolved.") from exc
+    return resolved_project
 
 
 async def send_error(websocket: WebSocket, message: str) -> None:
@@ -71,7 +105,7 @@ async def _stop_process(process: asyncio.subprocess.Process) -> None:
         await process.wait()
 
 
-async def run_refine(websocket: WebSocket, prompt: str) -> None:
+async def run_refine(websocket: WebSocket, prompt: str, working_directory: Path) -> None:
     try:
         process = await asyncio.create_subprocess_exec(
             "opencode",
@@ -80,6 +114,8 @@ async def run_refine(websocket: WebSocket, prompt: str) -> None:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            cwd=str(working_directory),
+            env=os.environ.copy(),
         )
     except OSError as exc:
         await send_error(websocket, f"Could not start opencode: {exc.strerror or exc}")

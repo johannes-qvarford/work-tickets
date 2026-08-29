@@ -17,6 +17,7 @@ _REQUIRED_COLUMNS = {
         "id",
         "base_url",
         "browser_base_url",
+        "local_projects_directory",
         "email",
         "api_token",
         "project_key",
@@ -44,7 +45,7 @@ _REQUIRED_COLUMNS = {
 }
 _INITIAL_REQUIRED_COLUMNS = {
     "categories": _REQUIRED_COLUMNS["categories"],
-    "jira_config": _REQUIRED_COLUMNS["jira_config"],
+    "jira_config": _REQUIRED_COLUMNS["jira_config"] - {"local_projects_directory"},
     "tickets": _REQUIRED_COLUMNS["tickets"] - {"notes", "component"},
 }
 

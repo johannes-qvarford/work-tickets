@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from . import jira_service, refine, tickets, web
 from .jira import JiraClient
+from .local_projects import is_safe_local_component_name
 from .models import (
     Category,
     CategoryComponent,
@@ -63,6 +64,7 @@ class CategoryComponentPayload(BaseModel):
 class JiraConfigPayload(BaseModel):
     base_url: str
     browser_base_url: str = ""
+    local_projects_directory: str = ""
     email: str
     api_token: str = ""
     project_key: str = ""
@@ -126,13 +128,14 @@ async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
         ticket = db.get(Ticket, ticket_id)
         config = db.get(JiraConfig, 1)
         try:
-            prompt = refine.refine_prompt(ticket, config) if ticket is not None else None
-            if prompt is None:
+            if ticket is None:
                 raise refine.RefineError("Ticket was not found.")
+            prompt = refine.refine_prompt(ticket, config)
+            working_directory = refine.refine_working_directory(ticket, config)
         except refine.RefineError as exc:
             await refine.send_error(websocket, str(exc))
             return
-    await refine.run_refine(websocket, prompt)
+    await refine.run_refine(websocket, prompt, working_directory)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -326,14 +329,17 @@ def api_create_category(
 
 
 @app.post("/api/components")
-def api_create_component(
-    payload: ComponentPayload, db: Session = Depends(get_db)
-) -> dict[str, object]:
+def api_create_component(payload: ComponentPayload, db: Session = Depends(get_db)) -> Response:
     name = payload.name.strip()
+    if not is_safe_local_component_name(name):
+        return JSONResponse(
+            {"ok": False, "message": "Component name must be a safe local directory name."},
+            status_code=422,
+        )
     if name and db.scalar(select(Component).where(Component.name == name)) is None:
         db.add(Component(name=name))
         db.commit()
-    return {"ok": True, "state": _api_state(db)}
+    return JSONResponse({"ok": True, "state": _api_state(db)})
 
 
 @app.delete("/api/components/{component_id}")
@@ -358,6 +364,11 @@ def api_assign_component(
         return JSONResponse({"ok": False, "message": "Category was not found."}, status_code=404)
     if component is None:
         return JSONResponse({"ok": False, "message": "Component was not found."}, status_code=404)
+    if not is_safe_local_component_name(component.name):
+        return JSONResponse(
+            {"ok": False, "message": "Component name must be a safe local directory name."},
+            status_code=422,
+        )
     existing = db.get(CategoryComponent, (category_id, payload.component_id))
     if existing is None:
         position = db.scalar(
@@ -460,9 +471,26 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
     token = payload.api_token.strip() or (existing.api_token if existing is not None else "")
     normalized_base_url = payload.base_url.strip().rstrip("/")
     browser_base_url = payload.browser_base_url.strip().rstrip("/")
+    local_projects_directory = payload.local_projects_directory.strip()
+    if local_projects_directory:
+        try:
+            local_projects_path = Path(local_projects_directory).expanduser()
+            local_projects_directory_is_valid = local_projects_path.is_dir()
+        except (OSError, RuntimeError, ValueError):
+            local_projects_directory_is_valid = False
+        if not local_projects_directory_is_valid:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "Local projects directory must exist and be a directory.",
+                },
+                status_code=422,
+            )
+        local_projects_directory = str(local_projects_path)
     values = {
         "base_url": normalized_base_url,
         "browser_base_url": browser_base_url,
+        "local_projects_directory": local_projects_directory,
         "email": payload.email.strip(),
         "api_token": token,
         "project_key": payload.project_key.strip().upper(),

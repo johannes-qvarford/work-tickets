@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .jira import JiraClient, JiraError
+from .local_projects import is_safe_local_component_name
 from .models import Category, Component, JiraConfig, Ticket
 from .web import (
     move_response,
@@ -480,7 +481,7 @@ def _parse_date(value: str) -> date | None:
 
 def _validate_component(value: str | None, db: Session) -> str | None:
     normalized = value.strip() if value else ""
-    if not normalized:
+    if not normalized or not is_safe_local_component_name(normalized):
         return None
     component = db.scalar(select(Component).where(Component.name == normalized))
     return component.name if component is not None else None

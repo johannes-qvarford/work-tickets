@@ -74,6 +74,30 @@ def test_spa_state_api_serializes_tickets_categories_and_jira_config() -> None:
     assert "notes" not in parent["subtasks"][0]
 
 
+def test_spa_state_api_serializes_local_projects_directory(tmp_path) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://api.example.test",
+                browser_base_url="",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+                completed_statuses="Done",
+            )
+            db.add(config)
+        config.local_projects_directory = str(tmp_path)
+        db.commit()
+
+    response = client.get("/api/state")
+
+    assert response.status_code == 200
+    assert response.json()["jira_config"]["local_projects_directory"] == str(tmp_path)
+
+
 def test_packaged_spa_assets_are_served() -> None:
     page = client.get("/")
     asset_dir = Path(__file__).parents[1] / "work_tickets" / "static" / "assets"
@@ -317,6 +341,46 @@ def test_component_api_assigns_orders_and_deletes_without_changing_ticket_values
             is None
         )
         assert db.get(Component, first_id) is None
+
+
+def test_component_api_rejects_unsafe_directory_names() -> None:
+    for name in (
+        ".",
+        "..",
+        "../outside",
+        r"..\outside",
+        "bad/name",
+        "bad\x00name",
+        "bad\x7fname",
+        "bad\x80name",
+        "bad\x9fname",
+        "bad:name",
+    ):
+        response = client.post("/api/components", json={"name": name})
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "ok": False,
+            "message": "Component name must be a safe local directory name.",
+        }
+
+    with SessionLocal() as db:
+        category = Category(name="Unsafe component assignment category")
+        component = Component(name="unsafe:legacy-component")
+        db.add_all([category, component])
+        db.commit()
+        category_id = category.id
+        component_id = component.id
+
+    response = client.post(
+        f"/api/categories/{category_id}/components", json={"component_id": component_id}
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "Component name must be a safe local directory name.",
+    }
 
 
 def test_completion_api_updates_local_priority_and_state() -> None:
@@ -573,6 +637,116 @@ def test_api_saves_jira_config_and_preserves_blank_browser_url() -> None:
         assert config.project_key == "WORK"
 
 
+def test_api_saves_only_existing_local_projects_directory_and_rejects_missing_path(
+    tmp_path,
+) -> None:
+    existing_directory = tmp_path / "projects"
+    existing_directory.mkdir()
+    missing_directory = tmp_path / "missing"
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "browser_base_url": "",
+            "local_projects_directory": str(missing_directory),
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "Local projects directory must exist and be a directory.",
+    }
+
+    valid_response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "browser_base_url": "",
+            "local_projects_directory": str(existing_directory),
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+        },
+    )
+
+    assert valid_response.status_code == 200
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.local_projects_directory == str(existing_directory)
+
+
+def test_api_rejects_invalid_local_projects_directory_without_server_error(
+    monkeypatch, tmp_path
+) -> None:
+    payload = {
+        "base_url": "https://jira.example.test",
+        "browser_base_url": "",
+        "email": "person@example.test",
+        "api_token": "test-token",
+        "project_key": "WORK",
+        "issue_type": "Task",
+    }
+
+    invalid_response = client.put(
+        "/api/settings/jira",
+        json={**payload, "local_projects_directory": str(tmp_path / "invalid\x00path")},
+    )
+
+    assert invalid_response.status_code == 422
+    assert invalid_response.json() == {
+        "ok": False,
+        "message": "Local projects directory must exist and be a directory.",
+    }
+
+    def raise_os_error(self) -> bool:
+        del self
+        raise OSError("path is too long")
+
+    monkeypatch.setattr(Path, "is_dir", raise_os_error)
+    overlong_response = client.put(
+        "/api/settings/jira",
+        json={**payload, "local_projects_directory": str(tmp_path / ("x" * 300))},
+    )
+
+    assert overlong_response.status_code == 422
+    assert overlong_response.json() == {
+        "ok": False,
+        "message": "Local projects directory must exist and be a directory.",
+    }
+
+
+def test_api_rejects_local_projects_directory_when_expanduser_fails(monkeypatch, tmp_path) -> None:
+    payload = {
+        "base_url": "https://jira.example.test",
+        "browser_base_url": "",
+        "email": "person@example.test",
+        "api_token": "test-token",
+        "project_key": "WORK",
+        "issue_type": "Task",
+        "local_projects_directory": str(tmp_path),
+    }
+
+    def raise_runtime_error(self) -> Path:
+        del self
+        raise RuntimeError("home directory could not be determined")
+
+    monkeypatch.setattr(Path, "expanduser", raise_runtime_error)
+    response = client.put("/api/settings/jira", json=payload)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "Local projects directory must exist and be a directory.",
+    }
+
+
 def test_api_jira_config_validation_uses_jira_client(monkeypatch) -> None:
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -601,7 +775,7 @@ def test_api_jira_config_validation_uses_jira_client(monkeypatch) -> None:
     assert response.json()["message"] == "Jira connection validated and saved."
 
 
-def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch) -> None:
+def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_path) -> None:
     class FakeStream:
         async def read(self, size: int) -> bytes:
             del size
@@ -630,15 +804,17 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch) -> N
         def kill(self) -> None:
             self.returncode = -9
 
-    calls: list[tuple[object, ...]] = []
+    project_directory = tmp_path / "refine-component"
+    project_directory.mkdir()
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
-        calls.append(args)
-        assert kwargs == {
-            "stdin": asyncio.subprocess.PIPE,
-            "stdout": asyncio.subprocess.PIPE,
-            "stderr": asyncio.subprocess.STDOUT,
-        }
+        calls.append((args, kwargs))
+        assert kwargs["stdin"] == asyncio.subprocess.PIPE
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.STDOUT
+        assert kwargs["cwd"] == str(project_directory)
+        assert kwargs["env"] == os.environ
         return FakeProcess()
 
     monkeypatch.setattr(
@@ -659,10 +835,23 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch) -> N
             )
             db.add(config)
         config.browser_base_url = "https://jira.example.test/context"
-        parent = Ticket(summary="Refine parent", position=0, jira_issue_key="WORK-700")
-        child = Ticket(summary="Refine child", position=0, jira_issue_key="WORK-701", parent=parent)
+        config.local_projects_directory = str(tmp_path)
+        component = Component(name="refine-component")
+        parent = Ticket(
+            summary="Refine parent",
+            position=0,
+            jira_issue_key="WORK-700",
+            component=component.name,
+        )
+        child = Ticket(
+            summary="Refine child",
+            position=0,
+            jira_issue_key="WORK-701",
+            component=component.name,
+            parent=parent,
+        )
         unsynced = Ticket(summary="Not synced", position=1)
-        db.add_all([parent, child, unsynced])
+        db.add_all([component, parent, child, unsynced])
         db.commit()
         parent_id = parent.id
         child_id = child.id
@@ -677,7 +866,7 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch) -> N
             "\r\n[Refine error] Refine is available only for tickets synced to Jira.\r\n"
         )
 
-    assert calls == [
+    assert [call[0] for call in calls] == [
         ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-700"),
         ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-701"),
     ]
@@ -711,6 +900,176 @@ def test_refine_websocket_reports_malformed_browser_url() -> None:
         )
 
 
+def test_refine_websocket_reports_malformed_component_before_launch(tmp_path) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path)
+        ticket = Ticket(
+            summary="Malformed local component",
+            position=0,
+            jira_issue_key="WORK-702A",
+            component="../outside",
+        )
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The ticket component is not a valid local project name.\r\n"
+        )
+
+
+def test_refine_websocket_rejects_component_symlink_outside_root(tmp_path) -> None:
+    local_projects = tmp_path / "projects"
+    local_projects.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (local_projects / "linked-component").symlink_to(outside, target_is_directory=True)
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(local_projects)
+        ticket = Ticket(
+            summary="Symlinked local component",
+            position=0,
+            jira_issue_key="WORK-702C",
+            component="linked-component",
+        )
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The ticket component is not a valid local project name.\r\n"
+        )
+
+
+def test_refine_websocket_reports_working_directory_resolution_errors(
+    monkeypatch, tmp_path
+) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path)
+        ticket = Ticket(
+            summary="Unresolvable local component",
+            position=0,
+            jira_issue_key="WORK-702B",
+            component="unresolvable-component",
+        )
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    def raise_os_error(self, strict: bool = False) -> Path:
+        del self, strict
+        raise OSError("path cannot be resolved")
+
+    monkeypatch.setattr(Path, "resolve", raise_os_error)
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The local project directory could not be resolved.\r\n"
+        )
+
+
+def test_refine_websocket_reports_expanduser_runtime_errors(monkeypatch, tmp_path) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path)
+        ticket = Ticket(
+            summary="Malformed stored local root",
+            position=0,
+            jira_issue_key="WORK-702D",
+            component="runtime-error-component",
+        )
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    def raise_runtime_error(self) -> Path:
+        del self
+        raise RuntimeError("home directory could not be determined")
+
+    monkeypatch.setattr(Path, "expanduser", raise_runtime_error)
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The local project directory could not be resolved.\r\n"
+        )
+
+
+def test_refine_websocket_reports_missing_local_project_directory(tmp_path) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path)
+        component = Component(name="missing-refine-component")
+        ticket = Ticket(
+            summary="Missing local project",
+            position=0,
+            jira_issue_key="WORK-703",
+            component=component.name,
+        )
+        db.add_all([component, ticket])
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The local project directory for component "
+            "'missing-refine-component' does not exist.\r\n"
+        )
+
+
+def test_refine_websocket_reports_missing_local_projects_root(tmp_path) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path / "missing-root")
+        component = Component(name="missing-root-component")
+        ticket = Ticket(
+            summary="Missing local root",
+            position=0,
+            jira_issue_key="WORK-704",
+            component=component.name,
+        )
+        db.add_all([component, ticket])
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The configured local projects directory does not exist.\r\n"
+        )
+
+
+def test_refine_websocket_reports_missing_component_before_launch(tmp_path) -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path)
+        ticket = Ticket(summary="Missing local component", position=0, jira_issue_key="WORK-705")
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] Assign a local component before using Refine.\r\n"
+        )
+
+
 def test_refine_frontend_uses_xterm_and_only_renders_for_jira_keys() -> None:
     frontend_source = Path(__file__).parents[1] / "frontend" / "src"
     terminal_source = (frontend_source / "components" / "RefineTerminal.vue").read_text()
@@ -719,6 +1078,7 @@ def test_refine_frontend_uses_xterm_and_only_renders_for_jira_keys() -> None:
     assert 'from "@xterm/xterm"' in terminal_source
     assert "new WebSocket(socketUrl())" in terminal_source
     assert 'v-if="ticket.jira_issue_key"' in terminal_source
+    assert ':disabled="!ticket.component || !browserBaseUrl"' in terminal_source
     assert '<RefineTerminal :ticket="subtask"' in ticket_card_source
 
 
