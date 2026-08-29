@@ -1,3 +1,4 @@
+import asyncio
 import atexit
 import json
 import os
@@ -598,6 +599,127 @@ def test_api_jira_config_validation_uses_jira_client(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["message"] == "Jira connection validated and saved."
+
+
+def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch) -> None:
+    class FakeStream:
+        async def read(self, size: int) -> bytes:
+            del size
+            return b""
+
+    class FakeStdin:
+        def write(self, data: bytes) -> None:
+            del data
+
+        async def drain(self) -> None:
+            pass
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = FakeStdin()
+            self.stdout = FakeStream()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    calls: list[tuple[object, ...]] = []
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        calls.append(args)
+        assert kwargs == {
+            "stdin": asyncio.subprocess.PIPE,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.STDOUT,
+        }
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        "work_tickets.refine.asyncio.create_subprocess_exec", fake_create_subprocess_exec
+    )
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://api.example.test",
+                browser_base_url="",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+                completed_statuses="Done",
+            )
+            db.add(config)
+        config.browser_base_url = "https://jira.example.test/context"
+        parent = Ticket(summary="Refine parent", position=0, jira_issue_key="WORK-700")
+        child = Ticket(summary="Refine child", position=0, jira_issue_key="WORK-701", parent=parent)
+        unsynced = Ticket(summary="Not synced", position=1)
+        db.add_all([parent, child, unsynced])
+        db.commit()
+        parent_id = parent.id
+        child_id = child.id
+        unsynced_id = unsynced.id
+
+    with client.websocket_connect(f"/api/tickets/{parent_id}/refine") as websocket:
+        assert websocket.receive_text() == "\r\n[Refine exited with code 0]\r\n"
+    with client.websocket_connect(f"/api/tickets/{child_id}/refine") as websocket:
+        assert websocket.receive_text() == "\r\n[Refine exited with code 0]\r\n"
+    with client.websocket_connect(f"/api/tickets/{unsynced_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] Refine is available only for tickets synced to Jira.\r\n"
+        )
+
+    assert calls == [
+        ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-700"),
+        ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-701"),
+    ]
+
+
+def test_refine_websocket_reports_malformed_browser_url() -> None:
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://api.example.test",
+                browser_base_url="https://[invalid",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+                issue_type="Task",
+                completed_statuses="Done",
+            )
+            db.add(config)
+        else:
+            config.browser_base_url = "https://[invalid"
+        ticket = Ticket(summary="Malformed browser URL", position=0, jira_issue_key="WORK-702")
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] The configured Jira browser URL is invalid.\r\n"
+        )
+
+
+def test_refine_frontend_uses_xterm_and_only_renders_for_jira_keys() -> None:
+    frontend_source = Path(__file__).parents[1] / "frontend" / "src"
+    terminal_source = (frontend_source / "components" / "RefineTerminal.vue").read_text()
+    ticket_card_source = (frontend_source / "components" / "TicketCard.vue").read_text()
+
+    assert 'from "@xterm/xterm"' in terminal_source
+    assert "new WebSocket(socketUrl())" in terminal_source
+    assert 'v-if="ticket.jira_issue_key"' in terminal_source
+    assert '<RefineTerminal :ticket="subtask"' in ticket_card_source
 
 
 def test_api_imports_jira_issue_and_subtasks_with_local_fields(monkeypatch) -> None:

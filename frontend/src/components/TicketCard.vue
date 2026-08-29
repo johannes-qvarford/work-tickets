@@ -7,6 +7,7 @@ import InputText from "primevue/inputtext";
 import Textarea from "primevue/textarea";
 import CategoryButtons, { type Category, type CategoryComponent } from "./CategoryButtons.vue";
 import ComponentSelect from "./ComponentSelect.vue";
+import RefineTerminal from "./RefineTerminal.vue";
 import {
   clearSubtaskDragState,
   clearSubtaskDragOverState,
@@ -209,6 +210,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
         </div>
         <div class="button-row">
           <Button :icon="ticket.local_completed ? 'pi pi-undo' : 'pi pi-check'" text rounded :aria-label="ticket.local_completed ? 'Mark active' : 'Mark done'" @click="emit('toggle')" />
+          <RefineTerminal :ticket="ticket" :browser-base-url="browserBaseUrl" />
           <Button v-if="!ticket.local_completed && ticket.jira_issue_key" icon="pi pi-cloud-download" text rounded aria-label="Sync from Jira" @click="emit('sync')" />
           <Button v-else-if="!ticket.local_completed" icon="pi pi-sync" text rounded aria-label="Sync to Jira" @click="emit('sync')" />
           <Button v-if="!ticket.local_completed" icon="pi pi-trash" severity="danger" text rounded aria-label="Delete ticket" @click="emit('remove')" />
@@ -238,6 +240,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
             <button v-if="!subtask.local_completed" type="button" class="drag-handle subtask-drag-handle" draggable="true" :aria-label="`Drag to reorder ${subtask.summary}`" title="Drag to reorder" @dragstart="onSubtaskDragStart($event, subtask)" @dragend="clearSubtaskDragState">⠿</button>
             <a v-if="jiraIssueUrl(subtask.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(subtask.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ subtask.jira_issue_key }})</a>
             <span v-else-if="subtask.jira_issue_key" class="jira-key">({{ subtask.jira_issue_key }})</span>
+            <RefineTerminal :ticket="subtask" :browser-base-url="browserBaseUrl" />
             <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" />
             <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
             <div v-if="!subtask.local_completed" class="date-control">
