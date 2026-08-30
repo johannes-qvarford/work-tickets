@@ -124,6 +124,6 @@
 
   Add a Jira comment containing a link to the MR commit, using the short SHA as the visible text, for example `Merged with <linked short SHA>`, and transition the Jira issue to `Ready to Deploy`.
 
-- [ ] Support partial failures and retries in the Ready to Merge workflow.
+- [x] Support partial failures and retries in the Ready to Merge workflow.
 
   Show failures inline on the affected Reviews item and provide a retry button. Both the initial action and retries must check the current Jira/GitLab state and safely skip steps that have already succeeded.
