@@ -227,6 +227,42 @@ class JiraClient:
             json={"body": self._conventions.comment_payload(comment)},
         )
 
+    def get_comments(self, key: str) -> list[str]:
+        """Return canonical text bodies of all comments on an issue.
+
+        The workflow uses exact comment bodies as its idempotency key. Reading
+        comments before posting also handles a request that succeeded remotely
+        but failed before the client received its response.
+        """
+        comments: list[str] = []
+        start_at = 0
+        while True:
+            response = self._request_dict(
+                "GET",
+                self._api_path(f"issue/{quote(key, safe='')}/comment"),
+                params={"startAt": start_at, "maxResults": 100},
+            )
+            raw_comments = response.get("comments")
+            if not isinstance(raw_comments, list):
+                raise JiraError(f"Jira returned an unexpected comments response for issue {key}.")
+            for raw_comment in raw_comments:
+                if not isinstance(raw_comment, dict):
+                    raise JiraError(f"Jira returned an invalid comment for issue {key}.")
+                body = raw_comment.get("body")
+                comment = self._comment_text(body)
+                if comment is None:
+                    raise JiraError(
+                        f"Jira returned a comment without a usable body for issue {key}."
+                    )
+                comments.append(comment)
+
+            total = response.get("total")
+            if not raw_comments or (isinstance(total, int) and len(comments) >= total):
+                return comments
+            if not isinstance(total, int) and len(raw_comments) < 100:
+                return comments
+            start_at += len(raw_comments)
+
     def get_issue(self, key: str) -> JiraIssue:
         response = self._request_dict(
             "GET",
@@ -307,12 +343,23 @@ class JiraClient:
         if transition_id is None:
             raise JiraError(f"Jira issue {key} has no transition to status '{target_status}'.")
 
-        self._request(
-            "POST",
-            self._api_path(f"issue/{quote(key, safe='')}/transitions"),
-            expect_json=False,
-            json={"transition": {"id": transition_id}},
-        )
+        try:
+            self._request(
+                "POST",
+                self._api_path(f"issue/{quote(key, safe='')}/transitions"),
+                expect_json=False,
+                json={"transition": {"id": transition_id}},
+            )
+        except JiraError as exc:
+            # Jira may apply the transition before a network or gateway error is
+            # returned. Confirm the remote state before exposing the failure.
+            try:
+                confirmed = self.get_issue(key)
+            except JiraError as confirm_error:
+                raise exc from confirm_error
+            if confirmed.status_name == target_status:
+                return confirmed
+            raise
         return self.get_issue(key)
 
     def get_issue_with_subtasks(self, key: str) -> JiraIssueWithSubtasks:
@@ -410,6 +457,49 @@ class JiraClient:
             "listItem",
             "orderedList",
             "paragraph",
+        }:
+            return "\n".join(children)
+        return "".join(children)
+
+    @classmethod
+    def _comment_text(cls, comment: Any) -> str | None:
+        """Convert a Jira comment to the canonical text used for idempotency."""
+        if comment is None:
+            return None
+        if isinstance(comment, str):
+            return comment
+        if not isinstance(comment, dict):
+            return None
+
+        comment_type = comment.get("type")
+        if comment_type == "text":
+            text = comment.get("text")
+            if not isinstance(text, str):
+                return ""
+            marks = comment.get("marks")
+            if isinstance(marks, list):
+                for mark in marks:
+                    if not isinstance(mark, dict) or mark.get("type") != "link":
+                        continue
+                    attrs = mark.get("attrs")
+                    if isinstance(attrs, dict) and isinstance(attrs.get("href"), str):
+                        return f"[{text}|{attrs['href']}]"
+            return text
+        if comment_type == "hardBreak":
+            return "\n"
+
+        content = comment.get("content")
+        if not isinstance(content, list):
+            return ""
+        children = [cls._comment_text(item) or "" for item in content]
+        if comment_type in {
+            "blockquote",
+            "bulletList",
+            "codeBlock",
+            "doc",
+            "heading",
+            "listItem",
+            "orderedList",
         }:
             return "\n".join(children)
         return "".join(children)

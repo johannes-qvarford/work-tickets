@@ -35,6 +35,7 @@ class GitLabMergeRequestDiscussionNote:
     id: int
     resolvable: bool
     resolved: bool
+    body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -246,10 +247,12 @@ class GitLabClient:
             note_id = raw_note.get("id")
             resolvable = raw_note.get("resolvable")
             resolved = raw_note.get("resolved")
+            body = raw_note.get("body")
             if (
                 not _is_positive_integer(note_id)
                 or not isinstance(resolvable, bool)
                 or not isinstance(resolved, bool)
+                or (body is not None and not isinstance(body, str))
             ):
                 raise GitLabError(f"GitLab returned an invalid note in discussion {discussion_id}.")
             assert isinstance(note_id, int)
@@ -258,6 +261,7 @@ class GitLabClient:
                     id=note_id,
                     resolvable=resolvable,
                     resolved=resolved,
+                    body=body,
                 )
             )
         return GitLabMergeRequestDiscussion(id=discussion_id, notes=tuple(notes))

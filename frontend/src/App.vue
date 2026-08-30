@@ -12,6 +12,12 @@ import ComponentSelect from "./components/ComponentSelect.vue";
 import RefineSessionCoordinator from "./components/RefineSessionCoordinator.vue";
 import TicketCard, { type Ticket } from "./components/TicketCard.vue";
 import { clearSubtaskDragState, displayedDropTargetIndex, dropTargetIndex } from "./reordering";
+import {
+  beginReviewAction,
+  completeReviewAction,
+  failReviewAction,
+  reviewActionDisabled,
+} from "./reviewActionLifecycle";
 
 interface JiraConfig {
   base_url: string;
@@ -128,17 +134,13 @@ async function loadReviews() {
   }
 }
 async function readyToMerge(review: Review) {
-  reviewActionState.value[review.key] = "loading";
-  delete reviewActionErrors.value[review.key];
-  delete reviewActionSuccesses.value[review.key];
+  beginReviewAction(reviewActionState.value, reviewActionErrors.value, reviewActionSuccesses.value, review.key);
   try {
     const result = await request(`/api/reviews/${encodeURIComponent(review.key)}/ready-to-merge`, { method: "POST" });
     review.status_name = result.review?.status_name || review.status_name;
-    reviewActionState.value[review.key] = "success";
-    reviewActionSuccesses.value[review.key] = result.message || "Review completed and merge request merged successfully.";
+    completeReviewAction(reviewActionState.value, reviewActionSuccesses.value, review.key, result.message || "Review completed and merge request merged successfully.");
   } catch (error) {
-    delete reviewActionState.value[review.key];
-    reviewActionErrors.value[review.key] = error instanceof Error ? error.message : "Could not complete review.";
+    failReviewAction(reviewActionState.value, reviewActionErrors.value, review.key, error instanceof Error ? error.message : "Could not complete review.");
   }
 }
 async function run(action: () => Promise<void>, success = "Saved.") {
@@ -225,7 +227,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
        <Message v-if="reviewsError" severity="error">{{ reviewsError }}</Message>
        <Card v-else-if="reviewsLoading && !reviews.length"><template #content><div class="empty-state"><i class="pi pi-spin pi-spinner"></i><span>Loading reviews...</span></div></template></Card>
        <section v-else-if="reviews.length" class="review-list">
-            <Card v-for="review in reviews" :key="review.key" class="review-card"><template #content><div class="review-heading"><div><a v-if="reviewIssueUrl(review.key)" class="jira-key" :href="reviewIssueUrl(review.key) || undefined" target="_blank" rel="noopener noreferrer">{{ review.key }}</a><span v-else class="jira-key">{{ review.key }}</span><h3>{{ review.summary }}</h3></div><span class="review-status">{{ review.status_name || "In Review" }}</span></div><div class="ticket-meta">{{ review.issue_type_name || "Jira issue" }} · <span v-if="review.local_ticket">Local ticket: {{ review.local_ticket.summary }}</span><span v-else>Not in local tickets</span></div><Message v-if="review.error" severity="error" class="review-error">{{ review.error }}</Message><p v-if="review.description" class="review-description">{{ review.description }}</p><div v-if="review.merge_requests.length" class="merge-request-list"><span class="muted">Detected merge requests</span><a v-for="mergeRequest in review.merge_requests" :key="mergeRequest.url" :href="mergeRequest.url" target="_blank" rel="noopener noreferrer">{{ mergeRequest.repository }} !{{ mergeRequest.number }}<span class="merge-request-state">{{ mergeRequest.state }}</span></a></div><Message v-if="review.selected_merge_request" severity="success" class="selection-message">Selected MR: {{ review.selected_merge_request.repository }} !{{ review.selected_merge_request.number }}</Message><Message v-else severity="warn" class="selection-message">{{ review.merge_request_selection_reason }}</Message><div class="review-actions"><Button :label="reviewActionErrors[review.key] ? 'Retry Ready to Merge' : 'Ready to Merge'" icon="pi pi-check" :loading="reviewActionState[review.key] === 'loading'" :disabled="Boolean(review.error) || !review.ready_to_merge_enabled || reviewActionState[review.key] === 'loading'" @click="readyToMerge(review)" /><Message v-if="reviewActionSuccesses[review.key]" severity="success">{{ reviewActionSuccesses[review.key] }}</Message><Message v-if="reviewActionErrors[review.key]" severity="error">{{ reviewActionErrors[review.key] }}</Message></div></template></Card>
+             <Card v-for="review in reviews" :key="review.key" class="review-card"><template #content><div class="review-heading"><div><a v-if="reviewIssueUrl(review.key)" class="jira-key" :href="reviewIssueUrl(review.key) || undefined" target="_blank" rel="noopener noreferrer">{{ review.key }}</a><span v-else class="jira-key">{{ review.key }}</span><h3>{{ review.summary }}</h3></div><span class="review-status">{{ review.status_name || "In Review" }}</span></div><div class="ticket-meta">{{ review.issue_type_name || "Jira issue" }} · <span v-if="review.local_ticket">Local ticket: {{ review.local_ticket.summary }}</span><span v-else>Not in local tickets</span></div><Message v-if="review.error" severity="error" class="review-error">{{ review.error }}</Message><p v-if="review.description" class="review-description">{{ review.description }}</p><div v-if="review.merge_requests.length" class="merge-request-list"><span class="muted">Detected merge requests</span><a v-for="mergeRequest in review.merge_requests" :key="mergeRequest.url" :href="mergeRequest.url" target="_blank" rel="noopener noreferrer">{{ mergeRequest.repository }} !{{ mergeRequest.number }}<span class="merge-request-state">{{ mergeRequest.state }}</span></a></div><Message v-if="review.selected_merge_request" severity="success" class="selection-message">Selected MR: {{ review.selected_merge_request.repository }} !{{ review.selected_merge_request.number }}</Message><Message v-else severity="warn" class="selection-message">{{ review.merge_request_selection_reason }}</Message><div class="review-actions"><Button :label="reviewActionErrors[review.key] ? 'Retry Ready to Merge' : 'Ready to Merge'" icon="pi pi-check" :loading="reviewActionState[review.key] === 'loading'" :disabled="reviewActionDisabled(Boolean(review.error), review.ready_to_merge_enabled, reviewActionState[review.key])" @click="readyToMerge(review)" /><Message v-if="reviewActionSuccesses[review.key]" severity="success">{{ reviewActionSuccesses[review.key] }}</Message><Message v-if="reviewActionErrors[review.key]" severity="error" class="review-error">{{ reviewActionErrors[review.key] }}</Message></div></template></Card>
        </section>
        <Card v-else><template #content><div class="empty-state"><i class="pi pi-check-circle"></i><strong>No issues in review</strong><span>Nothing assigned to you is waiting for review.</span></div></template></Card>
      </main>
