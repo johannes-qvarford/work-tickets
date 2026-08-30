@@ -120,7 +120,7 @@
 
   Wait for the MR to reach the merged state, then show a success or failure notification.
 
-- [ ] Complete the Jira update after a successful MR merge.
+- [x] Complete the Jira update after a successful MR merge.
 
   Add a Jira comment containing a link to the MR commit, using the short SHA as the visible text, for example `Merged with <linked short SHA>`, and transition the Jira issue to `Ready to Deploy`.
 
