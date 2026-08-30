@@ -112,7 +112,7 @@
 
 - [x] Make the `Ready to Merge` action mark the selected MR as no longer a draft.
 
-- [ ] Resolve all unresolved discussion threads on the selected MR.
+- [x] Resolve all unresolved discussion threads on the selected MR.
 
   Add the comment `Approved 👑` to each unresolved MR thread and mark each thread as resolved.
 
