@@ -116,7 +116,7 @@
 
   Add the comment `Approved 👑` to each unresolved MR thread and mark each thread as resolved.
 
-- [ ] Merge the selected MR with squashing enabled.
+- [x] Merge the selected MR with squashing enabled.
 
   Wait for the MR to reach the merged state, then show a success or failure notification.
 
