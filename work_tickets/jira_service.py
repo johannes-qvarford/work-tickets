@@ -485,6 +485,11 @@ def ready_to_merge_review(
             selection,
             gitlab,
         )
+        _resolve_selected_merge_request_discussions(
+            config.gitlab_base_url,
+            selection,
+            gitlab,
+        )
         if current.status_name != config.ready_to_merge_status:
             current = jira.transition_issue(
                 canonical_key,
@@ -561,6 +566,53 @@ def _mark_selected_merge_request_ready(
                 f"GitLab did not mark merge request {reference.repository}!{reference.number} "
                 "as ready."
             )
+    except GitLabError as exc:
+        raise JiraError(str(exc)) from exc
+
+
+def _resolve_selected_merge_request_discussions(
+    gitlab_base_url: str,
+    selection: MergeRequestSelection,
+    gitlab_client: GitLabClient | None,
+) -> None:
+    """Comment on and resolve every currently unresolved discussion in the selected MR."""
+    if selection.selected is None or gitlab_client is None:
+        raise JiraError("GitLab merge request details could not be retrieved.")
+
+    selected_url = selection.selected.get("url")
+    if not isinstance(selected_url, str):
+        raise JiraError("The selected GitLab merge request has an invalid URL.")
+    base = parse_gitlab_base_url(gitlab_base_url)
+    parsed = _parse_merge_request_url(selected_url, base) if base is not None else None
+    if parsed is None:
+        raise JiraError("Could not determine the GitLab project for the selected merge request.")
+    reference, project_path = parsed
+
+    try:
+        discussions = gitlab_client.get_merge_request_discussions(project_path, reference.number)
+        for discussion in discussions:
+            unresolved_notes = tuple(
+                note for note in discussion.notes if note.resolvable and not note.resolved
+            )
+            if not unresolved_notes:
+                continue
+            try:
+                gitlab_client.add_merge_request_discussion_note(
+                    project_path,
+                    reference.number,
+                    discussion.id,
+                    "Approved 👑",
+                )
+                gitlab_client.resolve_merge_request_discussion(
+                    project_path,
+                    reference.number,
+                    discussion.id,
+                )
+            except GitLabError as exc:
+                raise JiraError(
+                    f"Could not resolve GitLab discussion {discussion.id} on "
+                    f"merge request {reference.repository}!{reference.number}: {exc}"
+                ) from exc
     except GitLabError as exc:
         raise JiraError(str(exc)) from exc
 
