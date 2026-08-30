@@ -66,6 +66,22 @@ class GitLabClient:
             "GET",
             f"{self._api_prefix}/projects/{quote(project_path, safe='')}/merge_requests/{number}",
         )
+        return self._merge_request_from_payload(response, project_path, number)
+
+    def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+        """Merge an MR with squash enabled and validate GitLab's response."""
+        response = self._request(
+            "POST",
+            f"{self._api_prefix}/projects/{quote(project_path, safe='')}/merge_requests/"
+            f"{number}/merge",
+            json={"squash": True},
+        )
+        return self._merge_request_from_payload(response, project_path, number)
+
+    @staticmethod
+    def _merge_request_from_payload(
+        response: dict[str, Any], project_path: str, number: int
+    ) -> GitLabMergeRequest:
         state = response.get("state")
         updated_at = response.get("updated_at")
         if not isinstance(state, str) or not state:

@@ -7,6 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -37,6 +38,9 @@ from work_tickets.jira import (  # noqa: E402
 )
 from work_tickets.jira_service import (  # noqa: E402
     MergeRequestReference,
+    MergeRequestSelection,
+    _merge_selected_merge_request,
+    _wait_for_merge,
     canonicalize_jira_key,
     detect_merge_requests,
     parse_gitlab_base_url,
@@ -1410,6 +1414,59 @@ def test_gitlab_client_marks_draft_merge_request_ready_and_rechecks_it() -> None
     assert json.loads(requests[1].content) == {"body": "/ready"}
 
 
+def test_gitlab_client_squash_merges_and_validates_merge_response() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"state": "merged", "updated_at": "2026-08-30T10:02:00Z", "draft": False},
+        )
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example",
+        gitlab_token="gitlab-secret",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    result = gitlab.merge_merge_request("group/repository", 42)
+    gitlab.close()
+
+    assert result == GitLabMergeRequest("merged", "2026-08-30T10:02:00Z", draft=False)
+    assert requests[0].method == "POST"
+    assert requests[0].url.raw_path == (
+        b"/api/v4/projects/group%2Frepository/merge_requests/42/merge"
+    )
+    assert json.loads(requests[0].content) == {"squash": True}
+
+
+def test_gitlab_client_rejects_invalid_squash_merge_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, json={"state": "merged", "draft": False})
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    try:
+        gitlab.merge_merge_request("group/repository", 42)
+    except GitLabError as exc:
+        assert "without a valid updated_at" in str(exc)
+    else:
+        raise AssertionError("Expected malformed squash merge response")
+    finally:
+        gitlab.close()
+
+
 def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> None:
     requests: list[httpx.Request] = []
     responses = [
@@ -1867,6 +1924,324 @@ def test_transition_service_treats_current_target_status_as_idempotent() -> None
     assert result == JiraIssue(key="WORK-507", status_name="Ready to Merge")
 
 
+def test_merge_selected_merge_request_treats_already_merged_as_success() -> None:
+    class FakeGitLabClient:
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            del project_path, number
+            raise AssertionError("an already merged MR must not be merged again")
+
+    selection = MergeRequestSelection(
+        selected={
+            "repository": "repository",
+            "number": 518,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/518",
+            "state": "merged",
+        },
+        enabled=True,
+        reason="All MRs are closed; selected the most recently updated MR.",
+    )
+
+    _merge_selected_merge_request("https://gitlab.example", selection, FakeGitLabClient())
+
+
+def test_wait_for_merge_polls_with_backoff_until_merged() -> None:
+    responses = iter(
+        (
+            GitLabMergeRequest("opened", "2026-08-30T10:01:00Z"),
+            GitLabMergeRequest("merged", "2026-08-30T10:02:00Z"),
+        )
+    )
+    delays: list[float] = []
+    now = [0.0]
+
+    class FakeGitLabClient:
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 519)
+            return next(responses)
+
+    def sleep(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    _wait_for_merge(
+        FakeGitLabClient(),
+        "group/repository",
+        MergeRequestReference(
+            "repository", 519, "https://gitlab.example/group/repository/-/merge_requests/519"
+        ),
+        GitLabMergeRequest("opened", "2026-08-30T10:00:00Z"),
+        timeout_seconds=10,
+        sleep=sleep,
+        monotonic=lambda: now[0],
+    )
+
+    assert delays == [0.5, 1.0]
+
+
+def test_wait_for_merge_times_out_with_bounded_backoff() -> None:
+    delays: list[float] = []
+    now = [0.0]
+
+    class FakeGitLabClient:
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            del project_path, number
+            return GitLabMergeRequest("opened", "2026-08-30T10:01:00Z")
+
+    def sleep(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    try:
+        _wait_for_merge(
+            FakeGitLabClient(),
+            "group/repository",
+            MergeRequestReference(
+                "repository", 520, "https://gitlab.example/group/repository/-/merge_requests/520"
+            ),
+            GitLabMergeRequest("opened", "2026-08-30T10:00:00Z"),
+            timeout_seconds=1,
+            sleep=sleep,
+            monotonic=lambda: now[0],
+        )
+    except JiraError as exc:
+        assert str(exc) == (
+            "Timed out waiting for GitLab merge request repository!520 to reach merged state."
+        )
+    else:
+        raise AssertionError("Expected merge polling to time out")
+
+    assert delays == [0.5, 0.5]
+
+
+def test_wait_for_merge_reports_terminal_failure_state() -> None:
+    class FakeGitLabClient:
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            del project_path, number
+            return GitLabMergeRequest("closed", "2026-08-30T10:01:00Z")
+
+    try:
+        _wait_for_merge(
+            FakeGitLabClient(),
+            "group/repository",
+            MergeRequestReference(
+                "repository", 521, "https://gitlab.example/group/repository/-/merge_requests/521"
+            ),
+            GitLabMergeRequest("opened", "2026-08-30T10:00:00Z"),
+            timeout_seconds=10,
+            sleep=lambda delay: None,
+            monotonic=lambda: 0.0,
+        )
+    except JiraError as exc:
+        assert str(exc) == (
+            "GitLab merge request repository!521 reached terminal state 'closed' "
+            "while waiting to merge."
+        )
+    else:
+        raise AssertionError("Expected terminal merge failure")
+
+
+@pytest.mark.parametrize(
+    "race",
+    (
+        "initially-merged",
+        "concurrent-before-approval",
+        "concurrent-before-draft",
+        "concurrent-before-discussions",
+        "concurrent-before-merge",
+    ),
+)
+def test_ready_to_merge_review_handles_merged_mr_without_later_mutations(race: str) -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append(f"jira-get:{key}")
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/522",
+                status_name="Awaiting Review",
+            )
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            calls.append(f"transition:{key}:{target_status}:{current_status}")
+            return JiraIssue(key=key, status_name=target_status)
+
+        def add_comment(self, key: str, comment: str) -> None:
+            calls.append(f"jira-comment:{key}:{comment}")
+
+        def close(self) -> None:
+            calls.append("jira-close")
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+            self.state = "merged" if race == "initially-merged" else "opened"
+            self.draft = race == "concurrent-before-draft"
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 522)
+            calls.append("mr-get")
+            return GitLabMergeRequest(self.state, "2026-08-30T10:00:00Z", draft=self.draft)
+
+        def merge_before_mutation(self) -> None:
+            self.state = "merged"
+            raise GitLabError("GitLab returned HTTP 405: merge request is already merged.")
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            del project_path, number
+            calls.append("approval-get")
+            return GitLabMergeRequestApprovalState(approved=race != "concurrent-before-approval")
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            del project_path, number
+            calls.append("approve")
+            if race == "concurrent-before-approval":
+                self.merge_before_mutation()
+
+        def mark_merge_request_ready(self, project_path: str, number: int) -> None:
+            del project_path, number
+            calls.append("mark-ready")
+            if race == "concurrent-before-draft":
+                self.merge_before_mutation()
+
+        def get_merge_request_discussions(
+            self, project_path: str, number: int
+        ) -> list[GitLabMergeRequestDiscussion]:
+            del project_path, number
+            calls.append("discussions-get")
+            if race == "concurrent-before-discussions":
+                return [
+                    GitLabMergeRequestDiscussion(
+                        "thread-1",
+                        (GitLabMergeRequestDiscussionNote(1, resolvable=True, resolved=False),),
+                    )
+                ]
+            return []
+
+        def add_merge_request_discussion_note(
+            self, project_path: str, number: int, discussion_id: str, body: str
+        ) -> None:
+            del project_path, number, discussion_id, body
+            calls.append("discussion-comment")
+            if race == "concurrent-before-discussions":
+                self.merge_before_mutation()
+
+        def resolve_merge_request_discussion(
+            self, project_path: str, number: int, discussion_id: str
+        ) -> None:
+            del project_path, number, discussion_id
+            calls.append("discussion-resolve")
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            del project_path, number
+            calls.append("merge")
+            if race == "concurrent-before-merge":
+                self.merge_before_mutation()
+            return GitLabMergeRequest("merged", "2026-08-30T10:01:00Z")
+
+        def close(self) -> None:
+            calls.append("gitlab-close")
+
+    with SessionLocal() as db:
+        existing_config = db.get(JiraConfig, 1)
+        if existing_config is not None:
+            db.delete(existing_config)
+            db.flush()
+        config = JiraConfig(
+            id=1,
+            base_url="https://jira.example.test",
+            browser_base_url="",
+            gitlab_base_url="https://gitlab.example",
+            email="person@example.test",
+            api_token="test-token",
+            gitlab_token="gitlab-token",
+            project_key="WORK",
+            issue_type="Task",
+            completed_statuses="Done",
+            in_review_status="Awaiting Review",
+            ready_to_merge_status="Merge Queue",
+            ready_to_deploy_status="Ready to Deploy",
+        )
+        db.add(config)
+        db.commit()
+        result = ready_to_merge_review(
+            "WORK-522",
+            db,
+            jira_client_factory=FakeJiraClient,
+            gitlab_client_factory=FakeGitLabClient,
+        )
+        config.ready_to_merge_status = "Ready to Merge"
+        db.commit()
+
+    assert result.status_name == "Merge Queue"
+    expected_calls = {
+        "initially-merged": [
+            "jira-get:WORK-522",
+            "mr-get",
+            "mr-get",
+        ],
+        "concurrent-before-approval": [
+            "jira-get:WORK-522",
+            "mr-get",
+            "mr-get",
+            "approval-get",
+            "approve",
+            "mr-get",
+        ],
+        "concurrent-before-draft": [
+            "jira-get:WORK-522",
+            "mr-get",
+            "mr-get",
+            "approval-get",
+            "mr-get",
+            "mark-ready",
+            "mr-get",
+        ],
+        "concurrent-before-discussions": [
+            "jira-get:WORK-522",
+            "mr-get",
+            "mr-get",
+            "approval-get",
+            "mr-get",
+            "mr-get",
+            "discussions-get",
+            "discussion-comment",
+            "mr-get",
+        ],
+        "concurrent-before-merge": [
+            "jira-get:WORK-522",
+            "mr-get",
+            "mr-get",
+            "approval-get",
+            "mr-get",
+            "mr-get",
+            "discussions-get",
+            "merge",
+            "mr-get",
+        ],
+    }
+    assert calls[: len(expected_calls[race])] == expected_calls[race]
+    assert calls[-4:] == [
+        "transition:WORK-522:Merge Queue:Awaiting Review",
+        "jira-comment:WORK-522:Tested and reviewed.",
+        "gitlab-close",
+        "jira-close",
+    ]
+    assert "discussion-resolve" not in calls
+    if race in {
+        "initially-merged",
+        "concurrent-before-approval",
+        "concurrent-before-draft",
+        "concurrent-before-discussions",
+    }:
+        assert "merge" not in calls
+
+
 def test_ready_to_merge_review_transitions_and_comments_once() -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -1905,6 +2280,10 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
         ) -> GitLabMergeRequestApprovalState:
             assert (project_path, number) == ("group/repository", 509)
             return GitLabMergeRequestApprovalState(approved=True)
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 509)
+            return GitLabMergeRequest(state="merged", updated_at="2026-08-30T10:01:00Z")
 
         def approve_merge_request(self, project_path: str, number: int) -> None:
             raise AssertionError("an approved MR must not be approved again")
@@ -1997,6 +2376,10 @@ def test_ready_to_merge_review_skips_transition_when_already_ready_and_no_discus
 
         def mark_merge_request_ready(self, project_path: str, number: int) -> None:
             raise AssertionError("a non-draft MR must not be marked ready again")
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 510)
+            return GitLabMergeRequest(state="merged", updated_at="2026-08-30T10:01:00Z")
 
         def get_merge_request_discussions(
             self, project_path: str, number: int
@@ -2113,6 +2496,10 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
             assert (project_path, number) == ("group/repository", 511)
             return GitLabMergeRequestApprovalState(approved=True)
 
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 511)
+            return GitLabMergeRequest(state="merged", updated_at="2026-08-30T10:01:00Z")
+
         def approve_merge_request(self, project_path: str, number: int) -> None:
             raise AssertionError("an approved MR must not be approved again")
 
@@ -2154,7 +2541,7 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
     assert response.status_code == 200
     assert response.json() == {
         "ok": True,
-        "message": "Review marked ready to merge.",
+        "message": "Review completed and merge request merged successfully.",
         "review": {"key": "WORK-511", "status_name": "Merge Queue"},
     }
     assert calls == [
@@ -2168,7 +2555,7 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
 def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> None:
     calls: list[tuple[object, ...]] = []
     approval_states = iter((False, True))
-    draft_states = iter((True, False))
+    draft_states = iter((True, True, True, False, False))
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -2216,6 +2603,10 @@ def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> Non
         def mark_merge_request_ready(self, project_path: str, number: int) -> None:
             calls.append(("mark-ready", project_path, number))
 
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            calls.append(("merge", project_path, number))
+            return GitLabMergeRequest(state="merged", updated_at="2026-08-30T10:01:00Z")
+
         def get_merge_request_discussions(
             self, project_path: str, number: int
         ) -> list[GitLabMergeRequestDiscussion]:
@@ -2244,11 +2635,15 @@ def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> Non
     assert calls == [
         ("jira-get", "WORK-513"),
         ("mr-get", "group/repository", 513),
+        ("mr-get", "group/repository", 513),
         ("approval-get", "group/repository", 513),
         ("approve", "group/repository", 513),
         ("approval-get", "group/repository", 513),
+        ("mr-get", "group/repository", 513),
         ("mark-ready", "group/repository", 513),
         ("mr-get", "group/repository", 513),
+        ("mr-get", "group/repository", 513),
+        ("merge", "group/repository", 513),
         ("transition", "WORK-513", "Merge Queue", "Awaiting Review"),
         ("comment", "WORK-513", "Tested and reviewed."),
         ("gitlab-close",),
@@ -2330,7 +2725,15 @@ def test_ready_to_merge_review_reports_draft_failure_without_jira_side_effects()
         else:
             raise AssertionError("Expected draft update failure")
 
-    assert calls == ["get:WORK-515", "mr-get", "gitlab-close", "jira-close"]
+    assert calls == [
+        "get:WORK-515",
+        "mr-get",
+        "mr-get",
+        "mr-get",
+        "mr-get",
+        "gitlab-close",
+        "jira-close",
+    ]
 
 
 def test_api_ready_to_merge_review_reports_gitlab_approval_failure_without_jira_side_effects(
@@ -2479,6 +2882,10 @@ def test_ready_to_merge_review_resolves_all_currently_unresolved_discussions_in_
         ) -> None:
             calls.append(("discussion-resolve", project_path, number, discussion_id))
 
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            calls.append(("merge", project_path, number))
+            return GitLabMergeRequest(state="merged", updated_at="2026-08-30T10:01:00Z")
+
         def close(self) -> None:
             calls.append(("gitlab-close",))
 
@@ -2501,12 +2908,16 @@ def test_ready_to_merge_review_resolves_all_currently_unresolved_discussions_in_
     assert calls == [
         ("jira-get", "WORK-516"),
         ("mr-get", "group/repository", 516),
+        ("mr-get", "group/repository", 516),
         ("approval-get", "group/repository", 516),
+        ("mr-get", "group/repository", 516),
+        ("mr-get", "group/repository", 516),
         ("discussions-get", "group/repository", 516),
         ("discussion-comment", "group/repository", 516, "thread-1", "Approved 👑"),
         ("discussion-resolve", "group/repository", 516, "thread-1"),
         ("discussion-comment", "group/repository", 516, "thread-2", "Approved 👑"),
         ("discussion-resolve", "group/repository", 516, "thread-2"),
+        ("merge", "group/repository", 516),
         ("transition", "WORK-516", "Merge Queue", "Awaiting Review"),
         ("jira-comment", "WORK-516", "Tested and reviewed."),
         ("gitlab-close",),

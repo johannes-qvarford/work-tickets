@@ -154,7 +154,7 @@ def api_ready_to_merge_review(issue_key: str, db: Session = Depends(get_db)) -> 
     return JSONResponse(
         {
             "ok": True,
-            "message": "Review marked ready to merge.",
+            "message": "Review completed and merge request merged successfully.",
             "review": {"key": issue.key, "status_name": issue.status_name},
         }
     )

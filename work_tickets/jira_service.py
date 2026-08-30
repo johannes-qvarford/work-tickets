@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
@@ -69,6 +70,9 @@ _KNOWN_MERGE_REQUEST_STATES = {
     _OPEN_MERGE_REQUEST_STATE,
     *_CLOSED_MERGE_REQUEST_STATES,
 }
+_MERGE_POLL_TIMEOUT_SECONDS = 60.0
+_MERGE_POLL_INITIAL_DELAY_SECONDS = 0.5
+_MERGE_POLL_MAX_DELAY_SECONDS = 5.0
 
 
 def canonicalize_jira_key(key: str) -> str:
@@ -450,7 +454,7 @@ def ready_to_merge_review(
     jira_client_factory: JiraClientFactory = JiraClient,
     gitlab_client_factory: GitLabClientFactory = GitLabClient,
 ) -> JiraIssue:
-    """Mark a review ready to merge and record that it was tested and reviewed."""
+    """Complete review preparation, merge the selected MR, and update Jira."""
     config = db.get(JiraConfig, 1)
     if config is None:
         raise JiraError("Jira is not configured. Configure Jira before completing a review.")
@@ -475,21 +479,25 @@ def ready_to_merge_review(
         )
         if not selection.enabled:
             raise JiraError(selection.reason)
-        _approve_selected_merge_request(
+        merged = _approve_selected_merge_request(
             config.gitlab_base_url,
             selection,
             gitlab,
         )
-        _mark_selected_merge_request_ready(
-            config.gitlab_base_url,
-            selection,
-            gitlab,
-        )
-        _resolve_selected_merge_request_discussions(
-            config.gitlab_base_url,
-            selection,
-            gitlab,
-        )
+        if not merged:
+            merged = _mark_selected_merge_request_ready(
+                config.gitlab_base_url,
+                selection,
+                gitlab,
+            )
+        if not merged:
+            merged = _resolve_selected_merge_request_discussions(
+                config.gitlab_base_url,
+                selection,
+                gitlab,
+            )
+        if not merged:
+            _merge_selected_merge_request(config.gitlab_base_url, selection, gitlab)
         if current.status_name != config.ready_to_merge_status:
             current = jira.transition_issue(
                 canonical_key,
@@ -504,12 +512,11 @@ def ready_to_merge_review(
         jira.close()
 
 
-def _approve_selected_merge_request(
+def _selected_merge_request_target(
     gitlab_base_url: str,
     selection: MergeRequestSelection,
     gitlab_client: GitLabClient | None,
-) -> None:
-    """Approve only the MR selected after resolving all links in the description."""
+) -> tuple[MergeRequestReference, str]:
     if selection.selected is None or gitlab_client is None:
         raise JiraError("GitLab merge request details could not be retrieved.")
 
@@ -520,11 +527,175 @@ def _approve_selected_merge_request(
     parsed = _parse_merge_request_url(selected_url, base) if base is not None else None
     if parsed is None:
         raise JiraError("Could not determine the GitLab project for the selected merge request.")
-    reference, project_path = parsed
+    return parsed
+
+
+def _refresh_selected_merge_request(
+    gitlab_base_url: str,
+    selection: MergeRequestSelection,
+    gitlab_client: GitLabClient | None,
+) -> tuple[MergeRequestReference, str, GitLabMergeRequest]:
+    reference, project_path = _selected_merge_request_target(
+        gitlab_base_url,
+        selection,
+        gitlab_client,
+    )
+    assert gitlab_client is not None
+    try:
+        current = gitlab_client.get_merge_request(project_path, reference.number)
+    except GitLabError as exc:
+        raise JiraError(str(exc)) from exc
+    if current.state not in _KNOWN_MERGE_REQUEST_STATES:
+        raise JiraError(
+            f"GitLab returned an unsupported state '{current.state}' for merge request "
+            f"{reference.repository}!{reference.number}."
+        )
+    if current.state != "opened" and current.state != "merged":
+        raise JiraError(
+            f"GitLab merge request {reference.repository}!{reference.number} is already "
+            f"{current.state} and cannot be prepared for merge."
+        )
+    return reference, project_path, current
+
+
+def _merged_after_gitlab_failure(
+    gitlab_client: GitLabClient,
+    project_path: str,
+    number: int,
+) -> bool:
+    try:
+        return gitlab_client.get_merge_request(project_path, number).state == "merged"
+    except GitLabError:
+        return False
+
+
+def _merge_selected_merge_request(
+    gitlab_base_url: str,
+    selection: MergeRequestSelection,
+    gitlab_client: GitLabClient | None,
+) -> None:
+    """Squash-merge the selected MR and wait until GitLab confirms the merge."""
+    if selection.selected is None or gitlab_client is None:
+        raise JiraError("GitLab merge request details could not be retrieved.")
+
+    selected_state = selection.selected.get("state")
+    if not isinstance(selected_state, str) or selected_state not in _KNOWN_MERGE_REQUEST_STATES:
+        raise JiraError("The selected GitLab merge request has an invalid state.")
+    reference, project_path = _selected_merge_request_target(
+        gitlab_base_url,
+        selection,
+        gitlab_client,
+    )
+    if selected_state == "merged":
+        return
+    if selected_state in _CLOSED_MERGE_REQUEST_STATES:
+        raise JiraError(
+            f"GitLab merge request {reference.repository}!{reference.number} is already "
+            f"{selected_state} and cannot be merged."
+        )
+
+    try:
+        merge_response = gitlab_client.merge_merge_request(project_path, reference.number)
+        if merge_response.state not in _KNOWN_MERGE_REQUEST_STATES:
+            raise JiraError(
+                f"GitLab returned an unsupported state '{merge_response.state}' for merge request "
+                f"{reference.repository}!{reference.number}."
+            )
+        _wait_for_merge(
+            gitlab_client,
+            project_path,
+            reference,
+            merge_response,
+        )
+    except GitLabError as exc:
+        # A concurrent merge can make GitLab reject the mutation; confirm that it
+        # did not succeed before reporting the mutation error.
+        try:
+            current = gitlab_client.get_merge_request(project_path, reference.number)
+        except GitLabError:
+            raise JiraError(str(exc)) from exc
+        if current.state != "merged":
+            raise JiraError(str(exc)) from exc
+    except JiraError:
+        raise
+
+
+def _wait_for_merge(
+    gitlab_client: GitLabClient,
+    project_path: str,
+    reference: MergeRequestReference,
+    initial_response: GitLabMergeRequest,
+    *,
+    timeout_seconds: float | None = None,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> None:
+    """Poll a merge response with bounded exponential backoff."""
+    if initial_response.state not in _KNOWN_MERGE_REQUEST_STATES:
+        raise JiraError(
+            f"GitLab returned an unsupported state '{initial_response.state}' for merge request "
+            f"{reference.repository}!{reference.number}."
+        )
+    if initial_response.state == "merged":
+        return
+    if initial_response.state in _CLOSED_MERGE_REQUEST_STATES:
+        raise JiraError(
+            f"GitLab merge request {reference.repository}!{reference.number} reached terminal "
+            f"state '{initial_response.state}' while waiting to merge."
+        )
+
+    sleep_fn = time.sleep if sleep is None else sleep
+    monotonic_fn = time.monotonic if monotonic is None else monotonic
+    timeout = _MERGE_POLL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    deadline = monotonic_fn() + timeout
+    delay = _MERGE_POLL_INITIAL_DELAY_SECONDS
+    while True:
+        remaining = deadline - monotonic_fn()
+        if remaining <= 0:
+            raise JiraError(
+                f"Timed out waiting for GitLab merge request {reference.repository}!"
+                f"{reference.number} to reach merged state."
+            )
+        sleep_fn(min(delay, remaining))
+        try:
+            current = gitlab_client.get_merge_request(project_path, reference.number)
+        except GitLabError as exc:
+            if _merged_after_gitlab_failure(gitlab_client, project_path, reference.number):
+                return
+            raise JiraError(str(exc)) from exc
+        if current.state == "merged":
+            return
+        if current.state not in _KNOWN_MERGE_REQUEST_STATES:
+            raise JiraError(
+                f"GitLab returned an unsupported state '{current.state}' for merge request "
+                f"{reference.repository}!{reference.number}."
+            )
+        if current.state in _CLOSED_MERGE_REQUEST_STATES:
+            raise JiraError(
+                f"GitLab merge request {reference.repository}!{reference.number} reached terminal "
+                f"state '{current.state}' while waiting to merge."
+            )
+        delay = min(delay * 2, _MERGE_POLL_MAX_DELAY_SECONDS)
+
+
+def _approve_selected_merge_request(
+    gitlab_base_url: str,
+    selection: MergeRequestSelection,
+    gitlab_client: GitLabClient | None,
+) -> bool:
+    """Approve only the MR selected after resolving all links in the description."""
+    reference, project_path, current = _refresh_selected_merge_request(
+        gitlab_base_url,
+        selection,
+        gitlab_client,
+    )
+    assert gitlab_client is not None
+    if current.state == "merged":
+        return True
     try:
         approval = gitlab_client.get_merge_request_approval_state(project_path, reference.number)
         if approval.approved:
-            return
+            return False
         gitlab_client.approve_merge_request(project_path, reference.number)
         if not gitlab_client.get_merge_request_approval_state(
             project_path, reference.number
@@ -533,60 +704,69 @@ def _approve_selected_merge_request(
                 f"GitLab did not approve merge request {reference.repository}!{reference.number}."
             )
     except GitLabError as exc:
+        if _merged_after_gitlab_failure(gitlab_client, project_path, reference.number):
+            return True
         raise JiraError(str(exc)) from exc
+    return False
 
 
 def _mark_selected_merge_request_ready(
     gitlab_base_url: str,
     selection: MergeRequestSelection,
     gitlab_client: GitLabClient | None,
-) -> None:
+) -> bool:
     """Remove the draft flag from the MR selected after resolving all links."""
-    if selection.selected is None or gitlab_client is None:
-        raise JiraError("GitLab merge request details could not be retrieved.")
-
-    selected_url = selection.selected.get("url")
-    if not isinstance(selected_url, str):
-        raise JiraError("The selected GitLab merge request has an invalid URL.")
-    draft = selection.selected.get("draft")
-    if not isinstance(draft, bool):
-        raise JiraError("The selected GitLab merge request has an invalid draft state.")
-    if not draft:
-        return
-
-    base = parse_gitlab_base_url(gitlab_base_url)
-    parsed = _parse_merge_request_url(selected_url, base) if base is not None else None
-    if parsed is None:
-        raise JiraError("Could not determine the GitLab project for the selected merge request.")
-    reference, project_path = parsed
+    reference, project_path, current = _refresh_selected_merge_request(
+        gitlab_base_url,
+        selection,
+        gitlab_client,
+    )
+    assert gitlab_client is not None
+    if current.state == "merged":
+        return True
+    if not current.draft:
+        return False
     try:
         gitlab_client.mark_merge_request_ready(project_path, reference.number)
-        if gitlab_client.get_merge_request(project_path, reference.number).draft:
+        refreshed = gitlab_client.get_merge_request(project_path, reference.number)
+        if refreshed.state == "merged":
+            return True
+        if refreshed.state not in _KNOWN_MERGE_REQUEST_STATES:
+            raise JiraError(
+                f"GitLab returned an unsupported state '{refreshed.state}' for merge request "
+                f"{reference.repository}!{reference.number}."
+            )
+        if refreshed.state != "opened":
+            raise JiraError(
+                f"GitLab merge request {reference.repository}!{reference.number} is already "
+                f"{refreshed.state} and cannot be prepared for merge."
+            )
+        if refreshed.draft:
             raise JiraError(
                 f"GitLab did not mark merge request {reference.repository}!{reference.number} "
                 "as ready."
             )
     except GitLabError as exc:
+        if _merged_after_gitlab_failure(gitlab_client, project_path, reference.number):
+            return True
         raise JiraError(str(exc)) from exc
+    return False
 
 
 def _resolve_selected_merge_request_discussions(
     gitlab_base_url: str,
     selection: MergeRequestSelection,
     gitlab_client: GitLabClient | None,
-) -> None:
+) -> bool:
     """Comment on and resolve every currently unresolved discussion in the selected MR."""
-    if selection.selected is None or gitlab_client is None:
-        raise JiraError("GitLab merge request details could not be retrieved.")
-
-    selected_url = selection.selected.get("url")
-    if not isinstance(selected_url, str):
-        raise JiraError("The selected GitLab merge request has an invalid URL.")
-    base = parse_gitlab_base_url(gitlab_base_url)
-    parsed = _parse_merge_request_url(selected_url, base) if base is not None else None
-    if parsed is None:
-        raise JiraError("Could not determine the GitLab project for the selected merge request.")
-    reference, project_path = parsed
+    reference, project_path, current = _refresh_selected_merge_request(
+        gitlab_base_url,
+        selection,
+        gitlab_client,
+    )
+    assert gitlab_client is not None
+    if current.state == "merged":
+        return True
 
     try:
         discussions = gitlab_client.get_merge_request_discussions(project_path, reference.number)
@@ -609,12 +789,17 @@ def _resolve_selected_merge_request_discussions(
                     discussion.id,
                 )
             except GitLabError as exc:
+                if _merged_after_gitlab_failure(gitlab_client, project_path, reference.number):
+                    return True
                 raise JiraError(
                     f"Could not resolve GitLab discussion {discussion.id} on "
                     f"merge request {reference.repository}!{reference.number}: {exc}"
                 ) from exc
     except GitLabError as exc:
+        if _merged_after_gitlab_failure(gitlab_client, project_path, reference.number):
+            return True
         raise JiraError(str(exc)) from exc
+    return False
 
 
 def _jql_value(value: str) -> str:
