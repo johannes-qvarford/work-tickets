@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -72,10 +73,10 @@ class JiraApiConventions:
         return self._adf(description) if self.uses_adf_descriptions else description
 
     def comment_payload(self, comment: str) -> str | dict[str, Any]:
-        return self._adf(comment) if self.uses_adf_descriptions else comment
+        return self._adf(comment, links=True) if self.uses_adf_descriptions else comment
 
     @staticmethod
-    def _adf(description: str) -> dict[str, Any]:
+    def _adf(description: str, *, links: bool = False) -> dict[str, Any]:
         paragraphs = description.splitlines() or [""]
         return {
             "type": "doc",
@@ -83,11 +84,35 @@ class JiraApiConventions:
             "content": [
                 {
                     "type": "paragraph",
-                    "content": [{"type": "text", "text": line}],
+                    "content": _adf_line_content(line, links=links),
                 }
                 for line in paragraphs
             ],
         }
+
+
+_JIRA_WIKI_LINK = re.compile(r"\[([^\]|]+)\|([^\]\s]+)\]")
+
+
+def _adf_line_content(line: str, *, links: bool) -> list[dict[str, Any]]:
+    if not links:
+        return [{"type": "text", "text": line}]
+    content: list[dict[str, Any]] = []
+    position = 0
+    for match in _JIRA_WIKI_LINK.finditer(line):
+        if match.start() > position:
+            content.append({"type": "text", "text": line[position : match.start()]})
+        content.append(
+            {
+                "type": "text",
+                "text": match.group(1),
+                "marks": [{"type": "link", "attrs": {"href": match.group(2)}}],
+            }
+        )
+        position = match.end()
+    if position < len(line) or not content:
+        content.append({"type": "text", "text": line[position:]})
+    return content
 
 
 class JiraClient:
@@ -195,7 +220,7 @@ class JiraClient:
         )
 
     def add_comment(self, key: str, comment: str) -> None:
-        """Add a plain-text comment to a Jira issue."""
+        """Add a comment to a Jira issue, preserving supported link markup."""
         self._request(
             "POST",
             self._api_path(f"issue/{quote(key, safe='')}/comment"),

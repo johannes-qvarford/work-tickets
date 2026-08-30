@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -7,6 +8,8 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .models import JiraConfig
+
+_GIT_SHA = re.compile(r"[0-9a-fA-F]{7,40}\Z")
 
 
 class GitLabError(Exception):
@@ -18,6 +21,8 @@ class GitLabMergeRequest:
     state: str
     updated_at: str
     draft: bool = False
+    merge_commit_sha: str | None = None
+    web_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +103,34 @@ class GitLabClient:
                 f"GitLab returned merge request {project_path}!{number} without a valid "
                 "draft state."
             )
-        return GitLabMergeRequest(state=state, updated_at=updated_at, draft=draft)
+        squash_commit_sha = response.get("squash_commit_sha")
+        merge_commit_sha = response.get("merge_commit_sha")
+        if squash_commit_sha is not None and (
+            not isinstance(squash_commit_sha, str) or _GIT_SHA.fullmatch(squash_commit_sha) is None
+        ):
+            raise GitLabError(
+                f"GitLab returned merge request {project_path}!{number} with an invalid "
+                "squash commit SHA."
+            )
+        if merge_commit_sha is not None and not isinstance(merge_commit_sha, str):
+            raise GitLabError(
+                f"GitLab returned merge request {project_path}!{number} with an invalid "
+                "merge commit SHA."
+            )
+        web_url = response.get("web_url")
+        if web_url is not None and not isinstance(web_url, str):
+            raise GitLabError(
+                f"GitLab returned merge request {project_path}!{number} with an invalid web URL."
+            )
+        return GitLabMergeRequest(
+            state=state,
+            updated_at=updated_at,
+            draft=draft,
+            merge_commit_sha=(
+                squash_commit_sha if squash_commit_sha is not None else merge_commit_sha
+            ),
+            web_url=web_url,
+        )
 
     def get_merge_request_approval_state(
         self, project_path: str, number: int
