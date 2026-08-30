@@ -3,6 +3,8 @@ import atexit
 import json
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 
@@ -39,8 +41,11 @@ from work_tickets.jira import (  # noqa: E402
 from work_tickets.jira_service import (  # noqa: E402
     MergeRequestReference,
     MergeRequestSelection,
+    _add_jira_comment_if_missing,
     _merge_selected_merge_request,
     _merged_commit_link,
+    _resolve_selected_merge_request_discussions,
+    _transition_review_status,
     _wait_for_merge,
     canonicalize_jira_key,
     detect_merge_requests,
@@ -1549,7 +1554,12 @@ def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> 
                 {
                     "id": "discussion-1",
                     "notes": [
-                        {"id": 11, "resolvable": True, "resolved": False},
+                        {
+                            "id": 11,
+                            "resolvable": True,
+                            "resolved": False,
+                            "body": "Needs review",
+                        },
                     ],
                 }
             ],
@@ -1597,7 +1607,14 @@ def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> 
     assert discussions == [
         GitLabMergeRequestDiscussion(
             id="discussion-1",
-            notes=(GitLabMergeRequestDiscussionNote(id=11, resolvable=True, resolved=False),),
+            notes=(
+                GitLabMergeRequestDiscussionNote(
+                    id=11,
+                    resolvable=True,
+                    resolved=False,
+                    body="Needs review",
+                ),
+            ),
         ),
         GitLabMergeRequestDiscussion(
             id="discussion-2",
@@ -1868,6 +1885,58 @@ def test_jira_client_adds_plain_text_comment() -> None:
     }
 
 
+def test_jira_client_reads_paginated_comment_bodies() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.params["startAt"] == "0":
+            return httpx.Response(
+                200,
+                json={
+                    "startAt": 0,
+                    "total": 2,
+                    "comments": [
+                        {
+                            "body": {
+                                "type": "doc",
+                                "version": 1,
+                                "content": [
+                                    {
+                                        "type": "paragraph",
+                                        "content": [
+                                            {"type": "text", "text": "Tested and reviewed."}
+                                        ],
+                                    }
+                                ],
+                            }
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"startAt": 1, "total": 2, "comments": [{"body": "A second comment"}]},
+        )
+
+    config = JiraConfig(
+        base_url="https://work.atlassian.net",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    comments = jira.get_comments("WORK-508")
+    jira.close()
+
+    assert comments == ["Tested and reviewed.", "A second comment"]
+    assert [request.method for request in requests] == ["GET", "GET"]
+    assert requests[0].url.path == "/rest/api/3/issue/WORK-508/comment"
+    assert requests[0].url.params["maxResults"] == "100"
+    assert requests[1].url.params["startAt"] == "1"
+
+
 def test_jira_client_preserves_linked_comment_for_adf_and_plain_jira() -> None:
     requests: list[httpx.Request] = []
 
@@ -1932,6 +2001,80 @@ def test_jira_client_preserves_linked_comment_for_adf_and_plain_jira() -> None:
     )
 
 
+def test_jira_comment_idempotency_matches_cloud_adf_link_after_successful_post() -> None:
+    comment = "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef01]"
+    requests: list[httpx.Request] = []
+    remote_body: dict[str, object] | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal remote_body
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "comments": ([{"body": remote_body}] if remote_body is not None else []),
+                    "total": 1 if remote_body is not None else 0,
+                },
+            )
+        assert request.method == "POST"
+        payload = json.loads(request.content)
+        remote_body = payload["body"]
+        return httpx.Response(201, json={"id": "comment-1"})
+
+    config = JiraConfig(
+        base_url="https://work.atlassian.net",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    _add_jira_comment_if_missing(jira, "WORK-536", comment)
+    _add_jira_comment_if_missing(jira, "WORK-536", comment)
+    jira.close()
+
+    assert [request.method for request in requests] == ["GET", "POST", "GET"]
+    assert sum(request.method == "POST" for request in requests) == 1
+
+
+def test_jira_comment_idempotency_confirms_cloud_adf_link_after_ambiguous_post() -> None:
+    comment = "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef01]"
+    requests: list[httpx.Request] = []
+    remote_body: dict[str, object] | None = None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal remote_body
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "comments": ([{"body": remote_body}] if remote_body is not None else []),
+                    "total": 1 if remote_body is not None else 0,
+                },
+            )
+        assert request.method == "POST"
+        payload = json.loads(request.content)
+        remote_body = payload["body"]
+        return httpx.Response(503, json={"errorMessages": ["gateway timeout"]})
+
+    config = JiraConfig(
+        base_url="https://work.atlassian.net",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    _add_jira_comment_if_missing(jira, "WORK-537", comment)
+    _add_jira_comment_if_missing(jira, "WORK-537", comment)
+    jira.close()
+
+    assert [request.method for request in requests] == ["GET", "POST", "GET", "GET"]
+    assert sum(request.method == "POST" for request in requests) == 1
+
+
 def test_jira_client_transitions_by_destination_status() -> None:
     requests: list[httpx.Request] = []
     transitioned = False
@@ -1978,6 +2121,49 @@ def test_jira_client_transitions_by_destination_status() -> None:
     assert issue == JiraIssue(key="WORK-504", summary="Review item", status_name="Ready to Merge")
     assert [request.method for request in requests] == ["GET", "GET", "POST", "GET"]
     assert all(request.method != "PUT" for request in requests)
+
+
+def test_jira_client_confirms_ambiguous_transition_without_repeat() -> None:
+    requests: list[httpx.Request] = []
+    status = "In Progress"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status
+        requests.append(request)
+        if request.method == "GET" and request.url.path.endswith("/transitions"):
+            return httpx.Response(
+                200,
+                json={"transitions": [{"id": "42", "to": {"name": "Ready to Merge"}}]},
+            )
+        if request.method == "POST":
+            assert json.loads(request.content) == {"transition": {"id": "42"}}
+            status = "Ready to Merge"
+            return httpx.Response(503, json={"errorMessages": ["gateway timeout"]})
+        return httpx.Response(
+            200,
+            json={"key": "WORK-535", "fields": {"status": {"name": status}}},
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Task",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    issue = jira.transition_issue("WORK-535", "Ready to Merge")
+    jira.close()
+
+    assert issue == JiraIssue(key="WORK-535", status_name="Ready to Merge")
+    assert [request.method for request in requests] == ["GET", "GET", "POST", "GET"]
+    assert [request.url.path for request in requests] == [
+        "/rest/api/3/issue/WORK-535",
+        "/rest/api/3/issue/WORK-535/transitions",
+        "/rest/api/3/issue/WORK-535/transitions",
+        "/rest/api/3/issue/WORK-535",
+    ]
+    assert sum(request.method == "POST" for request in requests) == 1
 
 
 def test_jira_client_treats_current_target_status_as_idempotent() -> None:
@@ -2243,6 +2429,7 @@ def test_wait_for_merge_reports_terminal_failure_state() -> None:
 )
 def test_ready_to_merge_review_handles_merged_mr_without_later_mutations(race: str) -> None:
     calls: list[str] = []
+    jira_status = ["Awaiting Review"]
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -2253,11 +2440,12 @@ def test_ready_to_merge_review_handles_merged_mr_without_later_mutations(race: s
             return JiraIssue(
                 key=key,
                 description="https://gitlab.example/group/repository/-/merge_requests/522",
-                status_name="Awaiting Review",
+                status_name=jira_status[0],
             )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(f"transition:{key}:{target_status}:{current_status}")
+            jira_status[0] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def add_comment(self, key: str, comment: str) -> None:
@@ -2407,21 +2595,24 @@ def test_ready_to_merge_review_handles_merged_mr_without_later_mutations(race: s
             "mr-get",
             "mr-get",
             "discussions-get",
+            "mr-get",
             "merge",
             "mr-get",
         ],
     }
-    assert calls[: len(expected_calls[race])] == expected_calls[race]
-    assert calls[-4:] == [
+    common_calls = [
+        "jira-get:WORK-522",
+        "transition:WORK-522:Merge Queue:Awaiting Review",
+        "jira-get:WORK-522",
+        "jira-comment:WORK-522:Tested and reviewed.",
         "jira-comment:WORK-522:Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
+        "jira-get:WORK-522",
         "transition:WORK-522:Ready to Deploy:Merge Queue",
+        "jira-get:WORK-522",
         "gitlab-close",
         "jira-close",
     ]
-    assert calls[-6:-4] == [
-        "transition:WORK-522:Merge Queue:Awaiting Review",
-        "jira-comment:WORK-522:Tested and reviewed.",
-    ]
+    assert calls == expected_calls[race] + common_calls
     assert "discussion-resolve" not in calls
     if race in {
         "initially-merged",
@@ -2434,6 +2625,7 @@ def test_ready_to_merge_review_handles_merged_mr_without_later_mutations(race: s
 
 def test_ready_to_merge_review_transitions_and_comments_once() -> None:
     calls: list[tuple[str, ...]] = []
+    jira_status = ["Awaiting Review"]
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -2444,11 +2636,12 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
             return JiraIssue(
                 key=key,
                 description="https://gitlab.example/group/repository/-/merge_requests/509",
-                status_name="Awaiting Review",
+                status_name=jira_status[0],
             )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(("transition", key, target_status, current_status))
+            jira_status[0] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def add_comment(self, key: str, comment: str) -> None:
@@ -2502,23 +2695,32 @@ def test_ready_to_merge_review_transitions_and_comments_once() -> None:
             gitlab_client_factory=FakeGitLabClient,
         )
 
-    assert result == JiraIssue(key="WORK-509", status_name="Ready to Deploy")
+    assert result == JiraIssue(
+        key="WORK-509",
+        description="https://gitlab.example/group/repository/-/merge_requests/509",
+        status_name="Ready to Deploy",
+    )
     assert calls == [
         ("get", "WORK-509"),
+        ("get", "WORK-509"),
         ("transition", "WORK-509", "Merge Queue", "Awaiting Review"),
+        ("get", "WORK-509"),
         ("comment", "WORK-509", "Tested and reviewed."),
         (
             "comment",
             "WORK-509",
             "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
         ),
+        ("get", "WORK-509"),
         ("transition", "WORK-509", "Ready to Deploy", "Merge Queue"),
+        ("get", "WORK-509"),
         ("close",),
     ]
 
 
 def test_ready_to_merge_review_skips_transition_when_already_ready_and_no_discussions() -> None:
     calls: list[str] = []
+    jira_status = ["Ready to Merge"]
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -2529,12 +2731,13 @@ def test_ready_to_merge_review_skips_transition_when_already_ready_and_no_discus
             return JiraIssue(
                 key=key,
                 description="https://gitlab.example/group/repository/-/merge_requests/510",
-                status_name="Ready to Merge",
+                status_name=jira_status[0],
             )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             assert target_status == "Ready to Deploy"
             calls.append(f"transition:{key}:{target_status}:{current_status}")
+            jira_status[0] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def add_comment(self, key: str, comment: str) -> None:
@@ -2597,9 +2800,12 @@ def test_ready_to_merge_review_skips_transition_when_already_ready_and_no_discus
     assert calls == [
         "get:WORK-510",
         "discussions-get",
+        "get:WORK-510",
         "comment:WORK-510:Tested and reviewed.",
         "comment:WORK-510:Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
+        "get:WORK-510",
         "transition:WORK-510:Ready to Deploy:Ready to Merge",
+        "get:WORK-510",
         "close",
     ]
 
@@ -2675,8 +2881,10 @@ def test_ready_to_merge_review_does_not_regress_an_already_deployable_issue() ->
     )
     assert calls == [
         "get:WORK-523",
+        "get:WORK-523",
         "comment:WORK-523:Tested and reviewed.",
         "comment:WORK-523:Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
+        "get:WORK-523",
         "close",
     ]
 
@@ -2718,6 +2926,7 @@ def test_ready_to_merge_review_refuses_without_an_unambiguous_mr() -> None:
 
 def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
+    jira_status = ["Awaiting Review"]
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -2728,11 +2937,12 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
             return JiraIssue(
                 key=key,
                 description="https://gitlab.example/group/repository/-/merge_requests/511",
-                status_name="Awaiting Review",
+                status_name=jira_status[0],
             )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(("transition", key, target_status, current_status))
+            jira_status[0] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def add_comment(self, key: str, comment: str) -> None:
@@ -2796,22 +3006,27 @@ def test_api_ready_to_merge_review_uses_configured_status_and_reports_success(mo
     }
     assert calls == [
         ("get", "WORK-511"),
+        ("get", "WORK-511"),
         ("transition", "WORK-511", "Merge Queue", "Awaiting Review"),
+        ("get", "WORK-511"),
         ("comment", "WORK-511", "Tested and reviewed."),
         (
             "comment",
             "WORK-511",
             "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
         ),
+        ("get", "WORK-511"),
         ("transition", "WORK-511", "Ready to Deploy", "Merge Queue"),
+        ("get", "WORK-511"),
         ("close",),
     ]
 
 
 def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> None:
     calls: list[tuple[object, ...]] = []
+    jira_status = ["Awaiting Review"]
     approval_states = iter((False, True))
-    draft_states = iter((True, True, True, False, False))
+    draft_states = iter((True, True, True, False, False, False))
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -2822,11 +3037,12 @@ def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> Non
             return JiraIssue(
                 key=key,
                 description="https://gitlab.example/group/repository/-/merge_requests/513",
-                status_name="Awaiting Review",
+                status_name=jira_status[0],
             )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(("transition", key, target_status, current_status))
+            jira_status[0] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def add_comment(self, key: str, comment: str) -> None:
@@ -2899,15 +3115,20 @@ def test_ready_to_merge_review_approves_selected_mr_before_jira_updates() -> Non
         ("mark-ready", "group/repository", 513),
         ("mr-get", "group/repository", 513),
         ("mr-get", "group/repository", 513),
+        ("mr-get", "group/repository", 513),
         ("merge", "group/repository", 513),
+        ("jira-get", "WORK-513"),
         ("transition", "WORK-513", "Merge Queue", "Awaiting Review"),
+        ("jira-get", "WORK-513"),
         ("comment", "WORK-513", "Tested and reviewed."),
         (
             "comment",
             "WORK-513",
             "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
         ),
+        ("jira-get", "WORK-513"),
         ("transition", "WORK-513", "Ready to Deploy", "Merge Queue"),
+        ("jira-get", "WORK-513"),
         ("gitlab-close",),
         ("jira-close",),
     ]
@@ -3069,6 +3290,7 @@ def test_api_ready_to_merge_review_reports_gitlab_approval_failure_without_jira_
 
 def test_ready_to_merge_review_resolves_all_currently_unresolved_discussions_in_order() -> None:
     calls: list[tuple[object, ...]] = []
+    jira_status = ["Awaiting Review"]
 
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -3079,11 +3301,12 @@ def test_ready_to_merge_review_resolves_all_currently_unresolved_discussions_in_
             return JiraIssue(
                 key=key,
                 description="https://gitlab.example/group/repository/-/merge_requests/516",
-                status_name="Awaiting Review",
+                status_name=jira_status[0],
             )
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             calls.append(("transition", key, target_status, current_status))
+            jira_status[0] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def add_comment(self, key: str, comment: str) -> None:
@@ -3174,15 +3397,20 @@ def test_ready_to_merge_review_resolves_all_currently_unresolved_discussions_in_
         ("discussion-resolve", "group/repository", 516, "thread-1"),
         ("discussion-comment", "group/repository", 516, "thread-2", "Approved 👑"),
         ("discussion-resolve", "group/repository", 516, "thread-2"),
+        ("mr-get", "group/repository", 516),
         ("merge", "group/repository", 516),
+        ("jira-get", "WORK-516"),
         ("transition", "WORK-516", "Merge Queue", "Awaiting Review"),
+        ("jira-get", "WORK-516"),
         ("jira-comment", "WORK-516", "Tested and reviewed."),
         (
             "jira-comment",
             "WORK-516",
             "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
         ),
+        ("jira-get", "WORK-516"),
         ("transition", "WORK-516", "Ready to Deploy", "Merge Queue"),
+        ("jira-get", "WORK-516"),
         ("gitlab-close",),
         ("jira-close",),
     ]
@@ -3279,8 +3507,638 @@ def test_ready_to_merge_review_preserves_discussion_failure_and_skips_later_step
         "discussions-get",
         "discussion-comment",
         "discussion-resolve",
+        "discussions-get",
         "gitlab-close",
         "jira-close",
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    (
+        "approval",
+        "draft",
+        "discussion-comment",
+        "discussion-resolve",
+        "merge",
+        "jira-ready-transition",
+        "jira-review-comment",
+        "jira-commit-comment",
+        "jira-deploy-transition",
+    ),
+)
+def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_stage: str) -> None:
+    state = {
+        "approved": True,
+        "draft": False,
+        "discussion_body": None,
+        "discussion_resolved": False,
+        "mr_state": "merged",
+        "jira_status": "Ready to Deploy",
+        "jira_comments": [],
+        "failed": False,
+        "jira_gets": 0,
+        "mr_gets": 0,
+        "approval_gets": 0,
+        "approval_mutations": 0,
+        "draft_mutations": 0,
+        "discussion_comments": 0,
+        "discussion_resolutions": 0,
+        "merges": 0,
+        "transitions": [],
+        "comments": [],
+    }
+    state.update(
+        approved=failure_stage != "approval",
+        draft=failure_stage not in {"discussion-comment", "discussion-resolve"},
+        mr_state="opened",
+        jira_status="In Review",
+    )
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            assert key == "WORK-518"
+            state["jira_gets"] += 1
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/518",
+                status_name=state["jira_status"],
+            )
+
+        def get_comments(self, key: str) -> list[str]:
+            assert key == "WORK-518"
+            return list(state["jira_comments"])
+
+        def add_comment(self, key: str, comment: str) -> None:
+            assert key == "WORK-518"
+            state["comments"].append(comment)
+            if (
+                failure_stage in {"jira-review-comment", "jira-commit-comment"}
+                and not state["failed"]
+            ):
+                state["failed"] = True
+                raise JiraError(f"forced failure at {failure_stage}")
+            state["jira_comments"].append(comment)
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            assert key == "WORK-518"
+            assert current_status == state["jira_status"]
+            state["transitions"].append(target_status)
+            if target_status == "Ready to Merge" and failure_stage == "jira-ready-transition":
+                if not state["failed"]:
+                    state["failed"] = True
+                    raise JiraError("forced failure at jira-ready-transition")
+            if target_status == "Ready to Deploy" and failure_stage == "jira-deploy-transition":
+                if not state["failed"]:
+                    state["failed"] = True
+                    raise JiraError("forced failure at jira-deploy-transition")
+            state["jira_status"] = target_status
+            return JiraIssue(key=key, status_name=target_status)
+
+        def close(self) -> None:
+            pass
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 518)
+            state["mr_gets"] += 1
+            return GitLabMergeRequest(
+                state["mr_state"],
+                "2026-08-30T10:00:00Z",
+                draft=state["draft"],
+                merge_commit_sha=(
+                    "abcdef0123456789abcdef0123456789abcdef01"
+                    if state["mr_state"] == "merged"
+                    else None
+                ),
+                web_url=(
+                    "https://gitlab.example/group/repository/-/merge_requests/518"
+                    if state["mr_state"] == "merged"
+                    else None
+                ),
+            )
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            assert (project_path, number) == ("group/repository", 518)
+            state["approval_gets"] += 1
+            return GitLabMergeRequestApprovalState(approved=state["approved"])
+
+        def approve_merge_request(self, project_path: str, number: int) -> None:
+            assert (project_path, number) == ("group/repository", 518)
+            state["approval_mutations"] += 1
+            state["approved"] = True
+            if failure_stage == "approval" and not state["failed"]:
+                state["failed"] = True
+                raise GitLabError("forced failure at approval")
+
+        def mark_merge_request_ready(self, project_path: str, number: int) -> None:
+            assert (project_path, number) == ("group/repository", 518)
+            state["draft_mutations"] += 1
+            state["draft"] = False
+            if failure_stage == "draft" and not state["failed"]:
+                state["failed"] = True
+                raise GitLabError("forced failure at draft")
+
+        def get_merge_request_discussions(
+            self, project_path: str, number: int
+        ) -> list[GitLabMergeRequestDiscussion]:
+            assert (project_path, number) == ("group/repository", 518)
+            return [
+                GitLabMergeRequestDiscussion(
+                    "thread-1",
+                    (
+                        GitLabMergeRequestDiscussionNote(
+                            1,
+                            resolvable=True,
+                            resolved=state["discussion_resolved"],
+                            body=state["discussion_body"],
+                        ),
+                    ),
+                )
+            ]
+
+        def add_merge_request_discussion_note(
+            self, project_path: str, number: int, discussion_id: str, body: str
+        ) -> None:
+            assert (project_path, number, discussion_id, body) == (
+                "group/repository",
+                518,
+                "thread-1",
+                "Approved 👑",
+            )
+            state["discussion_comments"] += 1
+            if failure_stage == "discussion-comment" and not state["failed"]:
+                state["failed"] = True
+                raise GitLabError("forced failure at discussion-comment")
+            state["discussion_body"] = body
+
+        def resolve_merge_request_discussion(
+            self, project_path: str, number: int, discussion_id: str
+        ) -> None:
+            assert (project_path, number, discussion_id) == ("group/repository", 518, "thread-1")
+            state["discussion_resolutions"] += 1
+            if failure_stage == "discussion-resolve" and not state["failed"]:
+                state["failed"] = True
+                raise GitLabError("forced failure at discussion-resolve")
+            state["discussion_resolved"] = True
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 518)
+            state["merges"] += 1
+            if failure_stage == "merge" and not state["failed"]:
+                state["failed"] = True
+                raise GitLabError("forced failure at merge")
+            state["mr_state"] = "merged"
+            return GitLabMergeRequest(
+                "merged",
+                "2026-08-30T10:01:00Z",
+                merge_commit_sha="abcdef0123456789abcdef0123456789abcdef01",
+                web_url="https://gitlab.example/group/repository/-/merge_requests/518",
+            )
+
+        def close(self) -> None:
+            pass
+
+    with SessionLocal() as db:
+        _seed_jira_config(db, in_review_status="In Review")
+        db.commit()
+        with pytest.raises(JiraError, match=failure_stage):
+            ready_to_merge_review(
+                "WORK-518",
+                db,
+                jira_client_factory=FakeJiraClient,
+                gitlab_client_factory=FakeGitLabClient,
+            )
+        result = ready_to_merge_review(
+            "WORK-518",
+            db,
+            jira_client_factory=FakeJiraClient,
+            gitlab_client_factory=FakeGitLabClient,
+        )
+
+    assert result.status_name == "Ready to Deploy"
+    assert state["jira_gets"] >= 2
+    assert state["mr_gets"] >= 2
+    assert state["jira_status"] == "Ready to Deploy"
+    assert state["discussion_resolved"] is True
+    assert state["mr_state"] == "merged"
+    assert state["jira_comments"] == [
+        "Tested and reviewed.",
+        "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
+    ]
+    assert state["discussion_comments"] == (2 if failure_stage == "discussion-comment" else 1)
+    assert state["discussion_resolutions"] == (2 if failure_stage == "discussion-resolve" else 1)
+    assert state["approval_mutations"] <= 1
+    assert state["draft_mutations"] <= 1
+    assert state["merges"] == (2 if failure_stage == "merge" else 1)
+
+
+def test_ready_to_merge_review_serializes_concurrent_attempts_for_one_issue() -> None:
+    state = {
+        "active": 0,
+        "maximum_active": 0,
+        "first_started": threading.Event(),
+        "release_first": threading.Event(),
+        "second_started": threading.Event(),
+    }
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            assert key == "WORK-519"
+            state["active"] += 1
+            state["maximum_active"] = max(state["maximum_active"], state["active"])
+            if not state["first_started"].is_set():
+                state["first_started"].set()
+                assert state["release_first"].wait(2)
+            else:
+                state["second_started"].set()
+            state["active"] -= 1
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/519",
+                status_name="Ready to Deploy",
+            )
+
+        def get_comments(self, key: str) -> list[str]:
+            assert key == "WORK-519"
+            return [
+                "Tested and reviewed.",
+                "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
+            ]
+
+        def add_comment(self, key: str, comment: str) -> None:
+            raise AssertionError(f"already-commented issue must not be changed: {key} {comment}")
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            raise AssertionError(
+                f"already-deployable issue must not be transitioned: "
+                f"{key} {target_status} {current_status}"
+            )
+
+        def close(self) -> None:
+            pass
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 519)
+            return GitLabMergeRequest(
+                "merged",
+                "2026-08-30T10:00:00Z",
+                merge_commit_sha="abcdef0123456789abcdef0123456789abcdef01",
+                web_url="https://gitlab.example/group/repository/-/merge_requests/519",
+            )
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            raise AssertionError("merged issue must skip approval state")
+
+        def get_merge_request_discussions(
+            self, project_path: str, number: int
+        ) -> list[GitLabMergeRequestDiscussion]:
+            assert (project_path, number) == ("group/repository", 519)
+            return []
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            raise AssertionError("already-merged MR must not be merged")
+
+        def close(self) -> None:
+            pass
+
+    def run() -> JiraIssue:
+        with SessionLocal() as db:
+            _seed_jira_config(db)
+            db.commit()
+            return ready_to_merge_review(
+                "WORK-519",
+                db,
+                jira_client_factory=FakeJiraClient,
+                gitlab_client_factory=FakeGitLabClient,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(run)
+        assert state["first_started"].wait(2)
+        second = executor.submit(run)
+        assert not state["second_started"].wait(0.1)
+        state["release_first"].set()
+        assert first.result().status_name == "Ready to Deploy"
+        assert second.result().status_name == "Ready to Deploy"
+
+    assert state["maximum_active"] == 1
+
+
+def test_ready_to_merge_review_refuses_concurrent_terminal_jira_change() -> None:
+    statuses = iter(("In Review", "Done"))
+    transitions: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_issue(self, key: str) -> JiraIssue:
+            return JiraIssue(
+                key=key,
+                description="https://gitlab.example/group/repository/-/merge_requests/530",
+                status_name=next(statuses),
+            )
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            del key, current_status
+            transitions.append(target_status)
+            raise AssertionError("a terminal Jira status must not be changed")
+
+        def add_comment(self, key: str, comment: str) -> None:
+            raise AssertionError(f"Jira must not be commented: {key} {comment}")
+
+        def close(self) -> None:
+            pass
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 530)
+            return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+
+        def get_merge_request_approval_state(
+            self, project_path: str, number: int
+        ) -> GitLabMergeRequestApprovalState:
+            return GitLabMergeRequestApprovalState(approved=True)
+
+        def get_merge_request_discussions(
+            self, project_path: str, number: int
+        ) -> list[GitLabMergeRequestDiscussion]:
+            return []
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            return GitLabMergeRequest(
+                "merged",
+                "2026-08-30T10:01:00Z",
+                merge_commit_sha="abcdef0123456789abcdef0123456789abcdef01",
+                web_url="https://gitlab.example/group/repository/-/merge_requests/530",
+            )
+
+        def close(self) -> None:
+            pass
+
+    with SessionLocal() as db:
+        _seed_jira_config(db, in_review_status="In Review", completed_statuses="Done")
+        db.commit()
+        with pytest.raises(JiraError, match="terminal status"):
+            ready_to_merge_review(
+                "WORK-530",
+                db,
+                jira_client_factory=FakeJiraClient,
+                gitlab_client_factory=FakeGitLabClient,
+            )
+
+    assert transitions == []
+
+
+def test_merge_revalidates_opened_selection_before_post() -> None:
+    selection = MergeRequestSelection(
+        selected={
+            "repository": "repository",
+            "number": 531,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/531",
+            "state": "opened",
+        },
+        enabled=True,
+        reason="Selected the only open MR; closed MRs were ignored.",
+    )
+    calls = {"gets": 0, "merges": 0}
+
+    class FakeGitLabClient:
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 531)
+            calls["gets"] += 1
+            return GitLabMergeRequest(
+                "merged",
+                "2026-08-30T10:00:00Z",
+                merge_commit_sha="abcdef0123456789abcdef0123456789abcdef01",
+                web_url="https://gitlab.example/group/repository/-/merge_requests/531",
+            )
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            del project_path, number
+            calls["merges"] += 1
+            raise AssertionError("a freshly merged MR must not receive a merge POST")
+
+    result = _merge_selected_merge_request("https://gitlab.example", selection, FakeGitLabClient())
+
+    assert result.state == "merged"
+    assert calls == {"gets": 1, "merges": 0}
+
+
+def test_merge_timeout_then_retry_skips_post_after_remote_merge(monkeypatch) -> None:
+    selection = MergeRequestSelection(
+        selected={
+            "repository": "repository",
+            "number": 532,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/532",
+            "state": "opened",
+        },
+        enabled=True,
+        reason="Selected the only open MR; closed MRs were ignored.",
+    )
+    state = {"merged": False, "gets": 0, "merges": 0}
+
+    class FakeGitLabClient:
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 532)
+            state["gets"] += 1
+            if state["merged"]:
+                return GitLabMergeRequest(
+                    "merged",
+                    "2026-08-30T10:01:00Z",
+                    merge_commit_sha="abcdef0123456789abcdef0123456789abcdef01",
+                    web_url="https://gitlab.example/group/repository/-/merge_requests/532",
+                )
+            return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            del project_path, number
+            state["merges"] += 1
+            return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+
+    gitlab = FakeGitLabClient()
+    monkeypatch.setattr("work_tickets.jira_service._MERGE_POLL_TIMEOUT_SECONDS", 0.0)
+    with pytest.raises(JiraError, match="Timed out waiting"):
+        _merge_selected_merge_request("https://gitlab.example", selection, gitlab)
+
+    state["merged"] = True
+    result = _merge_selected_merge_request("https://gitlab.example", selection, gitlab)
+
+    assert result.state == "merged"
+    assert state["merges"] == 1
+
+
+def test_ambiguous_jira_comment_is_confirmed_without_second_post() -> None:
+    comment = "Tested and reviewed."
+    remote_comments: list[str] = []
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def get_comments(self, key: str) -> list[str]:
+            assert key == "WORK-535"
+            calls.append("GET comments")
+            return list(remote_comments)
+
+        def add_comment(self, key: str, body: str) -> None:
+            assert (key, body) == ("WORK-535", comment)
+            calls.append("POST comment")
+            remote_comments.append(body)
+            raise JiraError("comment response was lost")
+
+    jira = FakeJiraClient()
+    _add_jira_comment_if_missing(jira, "WORK-535", comment)
+    _add_jira_comment_if_missing(jira, "WORK-535", comment)
+
+    assert remote_comments == [comment]
+    assert calls == ["GET comments", "POST comment", "GET comments", "GET comments"]
+    assert calls.count("POST comment") == 1
+
+
+def test_jira_transition_ambiguous_mutation_is_confirmed_without_repeat() -> None:
+    status = ["In Review"]
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def get_issue(self, key: str) -> JiraIssue:
+            calls.append("get")
+            return JiraIssue(key=key, status_name=status[0])
+
+        def transition_issue(self, key: str, target_status: str, *, current_status: str):
+            del key, current_status
+            calls.append("transition")
+            status[0] = target_status
+            raise JiraError("Jira transition response was lost")
+
+    with SessionLocal() as db:
+        config = _seed_jira_config(db, in_review_status="In Review")
+        result = _transition_review_status(
+            FakeJiraClient(),
+            "WORK-533",
+            config.ready_to_merge_status,
+            config,
+            allowed_sources={config.in_review_status},
+        )
+
+    assert result.status_name == "Ready to Merge"
+    assert calls == ["get", "transition", "get"]
+
+
+def test_ambiguous_discussion_mutations_are_confirmed_without_duplicates() -> None:
+    selection = MergeRequestSelection(
+        selected={
+            "repository": "repository",
+            "number": 534,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/534",
+            "state": "opened",
+        },
+        enabled=True,
+        reason="Selected the only open MR; closed MRs were ignored.",
+    )
+    state = {
+        "body": None,
+        "resolved": False,
+        "note_posts": 0,
+        "resolution_puts": 0,
+        "calls": [],
+    }
+
+    class FakeGitLabClient:
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 534)
+            state["calls"].append("GET merge request")
+            return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+
+        def get_merge_request_discussions(
+            self, project_path: str, number: int
+        ) -> list[GitLabMergeRequestDiscussion]:
+            assert (project_path, number) == ("group/repository", 534)
+            state["calls"].append("GET discussions")
+            return [
+                GitLabMergeRequestDiscussion(
+                    "thread-1",
+                    (
+                        GitLabMergeRequestDiscussionNote(
+                            1,
+                            resolvable=True,
+                            resolved=state["resolved"],
+                            body=state["body"],
+                        ),
+                    ),
+                )
+            ]
+
+        def add_merge_request_discussion_note(
+            self, project_path: str, number: int, discussion_id: str, body: str
+        ) -> None:
+            assert (project_path, number, discussion_id, body) == (
+                "group/repository",
+                534,
+                "thread-1",
+                "Approved 👑",
+            )
+            state["calls"].append("POST note")
+            state["note_posts"] += 1
+            state["body"] = body
+            raise GitLabError("note response was lost")
+
+        def resolve_merge_request_discussion(
+            self, project_path: str, number: int, discussion_id: str
+        ) -> None:
+            assert (project_path, number, discussion_id) == (
+                "group/repository",
+                534,
+                "thread-1",
+            )
+            state["calls"].append("PUT resolution")
+            state["resolution_puts"] += 1
+            state["resolved"] = True
+            raise GitLabError("resolution response was lost")
+
+    result = _resolve_selected_merge_request_discussions(
+        "https://gitlab.example", selection, FakeGitLabClient()
+    )
+    retry_result = _resolve_selected_merge_request_discussions(
+        "https://gitlab.example", selection, FakeGitLabClient()
+    )
+
+    assert result is None
+    assert retry_result is None
+    assert state["body"] == "Approved 👑"
+    assert state["resolved"] is True
+    assert state["note_posts"] == 1
+    assert state["resolution_puts"] == 1
+    assert state["calls"] == [
+        "GET merge request",
+        "GET discussions",
+        "POST note",
+        "GET merge request",
+        "GET discussions",
+        "PUT resolution",
+        "GET merge request",
+        "GET discussions",
+        "GET merge request",
+        "GET discussions",
     ]
 
 

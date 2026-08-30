@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
@@ -74,6 +75,10 @@ _MERGE_POLL_TIMEOUT_SECONDS = 60.0
 _MERGE_POLL_INITIAL_DELAY_SECONDS = 0.5
 _MERGE_POLL_MAX_DELAY_SECONDS = 5.0
 _GIT_SHA = re.compile(r"[0-9a-fA-F]{7,40}\Z")
+_REVIEW_COMMENT = "Tested and reviewed."
+_DISCUSSION_APPROVAL_COMMENT = "Approved 👑"
+_ready_to_merge_locks: dict[str, threading.Lock] = {}
+_ready_to_merge_locks_guard = threading.Lock()
 
 
 def canonicalize_jira_key(key: str) -> str:
@@ -441,13 +446,12 @@ def transition_jira_issue(
     canonical_key = canonicalize_jira_key(issue_key)
     jira = jira_client_factory(config)
     try:
-        current = jira.get_issue(canonical_key)
-        if current.status_name == target_status:
-            return current
-        return jira.transition_issue(
+        return _transition_review_status(
+            jira,
             canonical_key,
             target_status,
-            current_status=current.status_name,
+            config,
+            allowed_sources=None,
         )
     finally:
         jira.close()
@@ -461,11 +465,30 @@ def ready_to_merge_review(
     gitlab_client_factory: GitLabClientFactory = GitLabClient,
 ) -> JiraIssue:
     """Complete review preparation, merge the selected MR, and update Jira."""
+    canonical_key = canonicalize_jira_key(issue_key)
+    with _ready_to_merge_locks_guard:
+        lock = _ready_to_merge_locks.setdefault(canonical_key, threading.Lock())
+    with lock:
+        return _ready_to_merge_review_locked(
+            canonical_key,
+            db,
+            jira_client_factory=jira_client_factory,
+            gitlab_client_factory=gitlab_client_factory,
+        )
+
+
+def _ready_to_merge_review_locked(
+    canonical_key: str,
+    db: Session,
+    *,
+    jira_client_factory: JiraClientFactory,
+    gitlab_client_factory: GitLabClientFactory,
+) -> JiraIssue:
+    """Run one serialized attempt; progress is read from remote state."""
     config = db.get(JiraConfig, 1)
     if config is None:
         raise JiraError("Jira is not configured. Configure Jira before completing a review.")
 
-    canonical_key = canonicalize_jira_key(issue_key)
     jira = jira_client_factory(config)
     gitlab: GitLabClient | None = None
     try:
@@ -505,28 +528,113 @@ def ready_to_merge_review(
         if merged is None:
             merged = _merge_selected_merge_request(config.gitlab_base_url, selection, gitlab)
         short_sha, commit_url = _merged_commit_link(merged)
-        if current.status_name not in {
+        current = _transition_review_status(
+            jira,
+            canonical_key,
             config.ready_to_merge_status,
+            config,
+            allowed_sources={config.in_review_status},
+            later_statuses={config.ready_to_deploy_status},
+        )
+        _add_jira_comment_if_missing(jira, canonical_key, _REVIEW_COMMENT)
+        _add_jira_comment_if_missing(jira, canonical_key, f"Merged with [{short_sha}|{commit_url}]")
+        current = _transition_review_status(
+            jira,
+            canonical_key,
             config.ready_to_deploy_status,
-        }:
-            current = jira.transition_issue(
-                canonical_key,
-                config.ready_to_merge_status,
-                current_status=current.status_name,
-            )
-        jira.add_comment(canonical_key, "Tested and reviewed.")
-        jira.add_comment(canonical_key, f"Merged with [{short_sha}|{commit_url}]")
-        if current.status_name != config.ready_to_deploy_status:
-            current = jira.transition_issue(
-                canonical_key,
-                config.ready_to_deploy_status,
-                current_status=current.status_name,
-            )
+            config,
+            allowed_sources={config.ready_to_merge_status},
+        )
         return current
     finally:
         if gitlab is not None:
             gitlab.close()
         jira.close()
+
+
+def _transition_review_status(
+    jira: JiraClient,
+    issue_key: str,
+    target_status: str,
+    config: JiraConfig,
+    *,
+    allowed_sources: set[str] | None,
+    later_statuses: set[str] | None = None,
+) -> JiraIssue:
+    """Transition only from a freshly confirmed safe workflow state."""
+    # GitLab preparation can take long enough for Jira to change. Never use the
+    # issue snapshot fetched before that work as the transition source.
+    current = jira.get_issue(issue_key)
+    if current.status_name == target_status:
+        return current
+    if current.status_name in _completed_statuses(config.completed_statuses):
+        raise JiraError(
+            f"Jira issue {issue_key} is already in terminal status '{current.status_name}' "
+            f"and cannot transition to '{target_status}'."
+        )
+    if later_statuses is not None and current.status_name in later_statuses:
+        # A later workflow state is already further along. Do not reverse it;
+        # the caller may still need to reconcile comments or the final target.
+        return current
+    if allowed_sources is not None and current.status_name not in allowed_sources:
+        expected = ", ".join(sorted(allowed_sources))
+        raise JiraError(
+            f"Jira issue {issue_key} is in status '{current.status_name}', not a safe source "
+            f"for transition to '{target_status}' (expected {expected})."
+        )
+
+    try:
+        jira.transition_issue(
+            issue_key,
+            target_status,
+            current_status=current.status_name,
+        )
+    except JiraError as exc:
+        try:
+            confirmed = jira.get_issue(issue_key)
+        except JiraError as confirm_error:
+            raise exc from confirm_error
+        if confirmed.status_name == target_status:
+            return confirmed
+        raise
+    try:
+        confirmed = jira.get_issue(issue_key)
+    except JiraError as exc:
+        raise JiraError(
+            f"Jira transition to '{target_status}' did not return a verifiable target state."
+        ) from exc
+    if confirmed.status_name == target_status:
+        return confirmed
+    raise JiraError(
+        f"Jira transition to '{target_status}' was not confirmed; current status is "
+        f"'{confirmed.status_name}'."
+    )
+
+
+def _completed_statuses(value: str) -> set[str]:
+    return {status.strip() for status in value.split(",") if status.strip()}
+
+
+def _jira_comment_reader(jira: JiraClient) -> Callable[[str], list[str]] | None:
+    reader = getattr(jira, "get_comments", None)
+    return reader if callable(reader) else None
+
+
+def _add_jira_comment_if_missing(jira: JiraClient, issue_key: str, comment: str) -> None:
+    """Post an exact Jira comment only when it is not already present."""
+    reader = _jira_comment_reader(jira)
+    if reader is not None and comment in reader(issue_key):
+        return
+    try:
+        jira.add_comment(issue_key, comment)
+    except JiraError:
+        if reader is not None:
+            try:
+                if comment in reader(issue_key):
+                    return
+            except JiraError:
+                pass
+        raise
 
 
 def _selected_merge_request_target(
@@ -596,25 +704,19 @@ def _merge_selected_merge_request(
     if selection.selected is None or gitlab_client is None:
         raise JiraError("GitLab merge request details could not be retrieved.")
 
-    selected_state = selection.selected.get("state")
-    if not isinstance(selected_state, str) or selected_state not in _KNOWN_MERGE_REQUEST_STATES:
-        raise JiraError("The selected GitLab merge request has an invalid state.")
-    reference, project_path = _selected_merge_request_target(
+    # Revalidate immediately before the POST. The selection payload may have
+    # been fetched before another actor merged or closed this MR.
+    reference, project_path, current = _refresh_selected_merge_request(
         gitlab_base_url,
         selection,
         gitlab_client,
     )
-    if selected_state == "merged":
-        _, _, current = _refresh_selected_merge_request(
-            gitlab_base_url,
-            selection,
-            gitlab_client,
-        )
+    if current.state == "merged":
         return current
-    if selected_state in _CLOSED_MERGE_REQUEST_STATES:
+    if current.state != "opened":
         raise JiraError(
             f"GitLab merge request {reference.repository}!{reference.number} is already "
-            f"{selected_state} and cannot be merged."
+            f"{current.state} and cannot be merged."
         )
 
     try:
@@ -804,17 +906,80 @@ def _resolve_selected_merge_request_discussions(
             if not unresolved_notes:
                 continue
             try:
-                gitlab_client.add_merge_request_discussion_note(
-                    project_path,
-                    reference.number,
-                    discussion.id,
-                    "Approved 👑",
-                )
-                gitlab_client.resolve_merge_request_discussion(
-                    project_path,
-                    reference.number,
-                    discussion.id,
-                )
+                if not any(note.body == _DISCUSSION_APPROVAL_COMMENT for note in discussion.notes):
+                    try:
+                        gitlab_client.add_merge_request_discussion_note(
+                            project_path,
+                            reference.number,
+                            discussion.id,
+                            _DISCUSSION_APPROVAL_COMMENT,
+                        )
+                    except GitLabError as exc:
+                        merged = _merged_after_gitlab_failure(
+                            gitlab_client, project_path, reference.number
+                        )
+                        if merged is not None:
+                            return merged
+                        # A note POST can be applied remotely before its response
+                        # is lost. Re-read the thread before deciding to fail so a
+                        # retry cannot create a duplicate approval note.
+                        try:
+                            refreshed_discussions = gitlab_client.get_merge_request_discussions(
+                                project_path, reference.number
+                            )
+                        except GitLabError as refresh_error:
+                            raise exc from refresh_error
+                        refreshed = next(
+                            (
+                                candidate
+                                for candidate in refreshed_discussions
+                                if candidate.id == discussion.id
+                            ),
+                            None,
+                        )
+                        if refreshed is None:
+                            raise exc
+                        if not any(
+                            note.resolvable and not note.resolved for note in refreshed.notes
+                        ):
+                            continue
+                        if not any(
+                            note.body == _DISCUSSION_APPROVAL_COMMENT for note in refreshed.notes
+                        ):
+                            raise exc
+                try:
+                    gitlab_client.resolve_merge_request_discussion(
+                        project_path,
+                        reference.number,
+                        discussion.id,
+                    )
+                except GitLabError as exc:
+                    merged = _merged_after_gitlab_failure(
+                        gitlab_client, project_path, reference.number
+                    )
+                    if merged is not None:
+                        return merged
+                    # The PUT may have succeeded even when its response was
+                    # lost. Confirm this discussion before allowing a retry.
+                    try:
+                        refreshed_discussions = gitlab_client.get_merge_request_discussions(
+                            project_path, reference.number
+                        )
+                    except GitLabError as refresh_error:
+                        raise exc from refresh_error
+                    refreshed = next(
+                        (
+                            candidate
+                            for candidate in refreshed_discussions
+                            if candidate.id == discussion.id
+                        ),
+                        None,
+                    )
+                    if refreshed is not None and not any(
+                        note.resolvable and not note.resolved for note in refreshed.notes
+                    ):
+                        continue
+                    raise
             except GitLabError as exc:
                 merged = _merged_after_gitlab_failure(gitlab_client, project_path, reference.number)
                 if merged is not None:
