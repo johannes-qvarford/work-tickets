@@ -22,7 +22,7 @@
 
 ## Reviews and Jira
 
-- [ ] Migrate Jira Reviews search away from the removed endpoint.
+- [x] Migrate Jira Reviews search away from the removed endpoint.
 
   Jira Cloud must use the supported `/rest/api/3/search/jql` contract instead of the removed search endpoint, including its request and pagination behavior. Preserve the existing project, issue type, status, and assignee filters and include all result pages. Retain the current Jira Server/Data Center behavior where that endpoint remains supported. Add client tests for Cloud pagination and for the existing Server/Data Center path.
 
