@@ -27,6 +27,8 @@ h3 { margin: 0; font-size: 1.15rem; }
 .ticket-card.completed strong { text-decoration: line-through; }
 .ticket-card.dragging, .subtask-row.dragging { opacity: .45; }
 .ticket-card.drag-over, .subtask-row.drag-over { border-color: #6ee7c2; box-shadow: 0 0 0 1px #6ee7c2; }
+.ticket-card.drag-over-before, .subtask-row.drag-over-before { box-shadow: 0 0 0 1px #6ee7c2, 0 -3px 0 -1px #6ee7c2; }
+.ticket-card.drag-over-after, .subtask-row.drag-over-after { box-shadow: 0 0 0 1px #6ee7c2, 0 3px 0 -1px #6ee7c2; }
 .ticket-title { display: flex; justify-content: space-between; align-items: start; gap: 12px; min-width: 0; }
 .ticket-summary { flex: 1; min-width: 0; }
 .ticket-title strong { display: block; font-size: 1.05rem; line-height: 1.35; overflow-wrap: anywhere; }
