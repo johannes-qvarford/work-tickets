@@ -21,6 +21,7 @@ import {
 import {
   buildSettingsRequest,
   gitlabBaseUrlGuidance,
+  jiraUrlGuidance,
   requestErrorMessage,
   type JiraSettings,
 } from "./settingsAction";
@@ -215,6 +216,10 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
     </header>
     <Message v-if="notice" :severity="notice.severity" closable @close="notice = null">{{ notice.text }}</Message>
     <RefineSessionCoordinator :tickets="state.tickets" />
+    <section v-if="page === 'settings'" class="settings-guidance" aria-labelledby="jira-url-guidance-heading">
+      <h3 id="jira-url-guidance-heading">Jira URL guidance</h3>
+      <p>{{ jiraUrlGuidance }}</p>
+    </section>
     <section v-if="page === 'settings'" class="settings-guidance" aria-labelledby="gitlab-url-guidance-heading">
       <h3 id="gitlab-url-guidance-heading">GitLab URL and token</h3>
       <p>{{ gitlabBaseUrlGuidance }}</p>
