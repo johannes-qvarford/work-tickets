@@ -135,6 +135,7 @@ def create_subtask(
         parent_id=parent.id,
         summary=summary_value,
         description=description,
+        notes="",
         planned_date=planned_date_value,
         position=0,
     )

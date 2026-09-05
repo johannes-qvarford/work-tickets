@@ -17,7 +17,7 @@ def upgrade() -> None:
     if "notes" not in {column["name"] for column in inspect(bind).get_columns("tickets")}:
         op.add_column(
             "tickets",
-            sa.Column("notes", sa.Text(), nullable=True),
+            sa.Column("notes", sa.Text(), server_default="", nullable=False),
         )
 
 

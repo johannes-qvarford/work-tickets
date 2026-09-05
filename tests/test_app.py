@@ -23,6 +23,7 @@ atexit.register(_test_db_path.unlink, missing_ok=True)
 
 from work_tickets import refine  # noqa: E402
 from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
+from work_tickets.db_migrations import apply_migrations  # noqa: E402
 from work_tickets.gitlab import (  # noqa: E402
     GitLabClient,
     GitLabError,
@@ -56,7 +57,6 @@ from work_tickets.jira_service import (  # noqa: E402
     transition_jira_issue,
 )
 from work_tickets.models import (  # noqa: E402
-    Base,
     Category,
     CategoryComponent,
     Component,
@@ -66,8 +66,7 @@ from work_tickets.models import (  # noqa: E402
     engine,
 )
 
-Base.metadata.drop_all(engine)
-Base.metadata.create_all(engine)
+apply_migrations(engine)
 client = TestClient(app)
 
 
@@ -239,10 +238,58 @@ def test_ticket_and_subtask_api_mutations_persist_state() -> None:
         assert ticket.planned_date == date(2026, 8, 25)
         assert ticket.category_id == category_id
         assert subtask.summary == "API updated subtask"
-        assert subtask.notes is None
+        assert subtask.notes == ""
         assert subtask.planned_date == date(2026, 8, 27)
     assert "notes" in update_response.json()["state"]["tickets"][0]
     assert "notes" not in subtask_response.json()["state"]["tickets"][0]["subtasks"][0]
+
+
+def test_subtask_creation_works_for_new_and_existing_tickets_with_migrated_schema() -> None:
+    new_ticket_response = client.post(
+        "/api/tickets",
+        json={"summary": "Ticket with creation-flow subtask"},
+    )
+    assert new_ticket_response.status_code == 200
+    new_ticket_id = new_ticket_response.json()["created_id"]
+
+    creation_flow_response = client.post(
+        f"/api/tickets/{new_ticket_id}/subtasks",
+        json={"summary": "Creation-flow subtask"},
+    )
+
+    with SessionLocal() as db:
+        existing_ticket = Ticket(summary="Existing ticket", position=0)
+        db.add(existing_ticket)
+        db.commit()
+        existing_ticket_id = existing_ticket.id
+
+    edit_flow_response = client.post(
+        f"/api/tickets/{existing_ticket_id}/subtasks",
+        json={"summary": "Edit-flow subtask"},
+    )
+
+    assert creation_flow_response.status_code == 200
+    assert edit_flow_response.status_code == 200
+    for response, summary in (
+        (creation_flow_response, "Creation-flow subtask"),
+        (edit_flow_response, "Edit-flow subtask"),
+    ):
+        ticket = next(
+            ticket
+            for ticket in response.json()["state"]["tickets"]
+            if ticket["id"] in {new_ticket_id, existing_ticket_id}
+            and any(subtask["summary"] == summary for subtask in ticket["subtasks"])
+        )
+        subtask = next(subtask for subtask in ticket["subtasks"] if subtask["summary"] == summary)
+        assert "notes" not in subtask
+
+    with SessionLocal() as db:
+        subtasks = list(
+            db.scalars(
+                select(Ticket).where(Ticket.parent_id.in_([new_ticket_id, existing_ticket_id]))
+            )
+        )
+        assert {subtask.notes for subtask in subtasks} == {""}
 
 
 def test_ticket_api_validation_does_not_persist_invalid_values() -> None:
