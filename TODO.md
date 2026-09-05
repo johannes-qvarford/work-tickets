@@ -36,6 +36,6 @@
 
   Explain that the field accepts the GitLab site root, including an installation context path when applicable, and must not include `/api/v4` or a merge-request path. Include examples such as `https://gitlab.com` and `https://gitlab.example.com/gitlab`, and state that an authenticated personal access token is required for connection testing and Reviews merge-request operations.
 
-- [ ] Add Jira URL guidance to Settings.
+- [x] Add Jira URL guidance to Settings.
 
   Explain the difference between the Jira API URL and the Jira browser URL. Show valid examples for a Jira Cloud site (`https://company.atlassian.net`), the Cloud API gateway (`https://api.atlassian.com/ex/jira/<cloud-id>`), and a Server/Data Center context path (`https://jira.example.com/jira`). State that the API URL is the base to which the REST path is appended, the browser URL must be the site root rather than a `/browse/...` URL, and the browser URL is used to construct issue links and Refine prompts.
