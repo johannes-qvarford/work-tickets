@@ -270,6 +270,163 @@ def test_ticket_api_validation_does_not_persist_invalid_values() -> None:
         assert ticket.summary == "Validation ticket"
 
 
+def test_synced_ticket_saves_local_fields_without_jira_and_rejects_owned_fields(
+    monkeypatch,
+) -> None:
+    class UnavailableJiraClient:
+        def __init__(self, config) -> None:
+            del config
+            raise AssertionError("Jira must not be contacted for local-only edits")
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", UnavailableJiraClient)
+    with SessionLocal() as db:
+        category = Category(name="Synced local category")
+        component = Component(name="synced-local-component")
+        ticket = Ticket(
+            summary="Jira-owned summary",
+            description="Jira-owned description",
+            notes="Old notes",
+            planned_date=date(2026, 8, 25),
+            category=category,
+            component=component.name,
+            position=0,
+            jira_issue_key="WORK-200",
+        )
+        subtask = Ticket(
+            summary="Jira-owned subtask summary",
+            description="Jira-owned subtask description",
+            planned_date=date(2026, 8, 26),
+            position=0,
+            parent=ticket,
+            jira_issue_key="WORK-201",
+        )
+        db.add_all([category, component, ticket, subtask])
+        db.commit()
+        ticket_id = ticket.id
+        subtask_id = subtask.id
+        category_id = category.id
+
+    local_update = client.put(
+        f"/api/tickets/{ticket_id}",
+        json={
+            "summary": "Jira-owned summary",
+            "description": "Jira-owned description",
+            "notes": "New local notes",
+            "planned_date": "2026-08-30",
+            "category_id": category_id,
+            "component": "synced-local-component",
+        },
+    )
+    changed_summary = client.put(
+        f"/api/tickets/{ticket_id}",
+        json={
+            "summary": "Attempted Jira summary change",
+            "description": "Jira-owned description",
+            "notes": "Another local update",
+            "planned_date": "2026-08-31",
+            "category_id": category_id,
+            "component": "synced-local-component",
+        },
+    )
+    changed_description = client.put(
+        f"/api/tickets/{ticket_id}",
+        json={
+            "summary": "Jira-owned summary",
+            "description": "Attempted Jira description change",
+            "notes": "Another local update",
+            "planned_date": "2026-09-01",
+            "category_id": category_id,
+            "component": "synced-local-component",
+        },
+    )
+    changed_subtask_summary = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={
+            "summary": "Attempted Jira subtask summary change",
+            "description": "Jira-owned subtask description",
+            "planned_date": "2026-08-29",
+        },
+    )
+    changed_subtask_description = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={
+            "summary": "Jira-owned subtask summary",
+            "description": "Attempted Jira subtask description change",
+            "planned_date": "2026-08-29",
+        },
+    )
+
+    assert local_update.status_code == 200
+    subtask_update = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={"planned_date": "2026-08-29"},
+    )
+    assert changed_summary.status_code == 422
+    assert changed_summary.json() == {
+        "ok": False,
+        "message": "Ticket summary is owned by Jira and cannot be changed after sync.",
+    }
+    assert changed_description.status_code == 422
+    assert changed_description.json() == {
+        "ok": False,
+        "message": "Ticket description is owned by Jira and cannot be changed after sync.",
+    }
+    assert changed_subtask_summary.status_code == 422
+    assert changed_subtask_summary.json() == {
+        "ok": False,
+        "message": "Subtask summary is owned by Jira and cannot be changed after sync.",
+    }
+    assert changed_subtask_description.status_code == 422
+    assert changed_subtask_description.json() == {
+        "ok": False,
+        "message": "Subtask description is owned by Jira and cannot be changed after sync.",
+    }
+    assert subtask_update.status_code == 200
+    with SessionLocal() as db:
+        ticket = db.get(Ticket, ticket_id)
+        assert ticket is not None
+        assert ticket.summary == "Jira-owned summary"
+        assert ticket.description == "Jira-owned description"
+        assert ticket.notes == "New local notes"
+        assert ticket.planned_date == date(2026, 8, 30)
+        assert ticket.category_id == category_id
+        assert ticket.component == "synced-local-component"
+        subtask = db.get(Ticket, subtask_id)
+        assert subtask is not None
+        assert subtask.summary == "Jira-owned subtask summary"
+        assert subtask.description == "Jira-owned subtask description"
+        assert subtask.planned_date == date(2026, 8, 29)
+
+
+def test_ticket_sync_surfaces_the_actual_jira_error(monkeypatch) -> None:
+    class FailingJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def create_issue(self, summary: str, description: str) -> JiraIssue:
+            del summary, description
+            raise JiraError("Jira returned HTTP 503: unavailable.")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FailingJiraClient)
+    with SessionLocal() as db:
+        _seed_jira_config(db)
+        ticket = Ticket(summary="Needs Jira", position=0)
+        db.add(ticket)
+        db.commit()
+        ticket_id = ticket.id
+
+    response = client.post(f"/api/tickets/{ticket_id}/sync")
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "Jira returned HTTP 503: unavailable.",
+    }
+
+
 def test_category_api_creates_and_deletes_without_deleting_tickets() -> None:
     create_response = client.post("/api/categories", json={"name": "API category lifecycle"})
     category_id = next(
@@ -569,6 +726,46 @@ def test_spa_ticket_edit_layout_constrains_narrow_content() -> None:
     date_control = ".date-control { display: flex; align-items: center; gap: 8px; min-width: 0;"
     assert date_control in style_source
     assert "max-width: 100%; flex-wrap: wrap; }" in style_source
+
+
+def test_spa_disables_and_grays_jira_owned_ticket_fields() -> None:
+    frontend_source = Path(__file__).parents[1] / "frontend" / "src"
+    ticket_card_source = (frontend_source / "components" / "TicketCard.vue").read_text()
+    style_source = (frontend_source / "style.css").read_text()
+
+    assert (
+        '<InputText v-model="ticket.summary" aria-label="Ticket summary" '
+        ':disabled="!!ticket.jira_issue_key" '
+        ":class=\"{ 'jira-owned-field': ticket.jira_issue_key }\" />"
+    ) in ticket_card_source
+    assert (
+        '<Textarea v-model="ticket.description" rows="3" autoResize '
+        'aria-label="Ticket description" :disabled="!!ticket.jira_issue_key" '
+        ":class=\"{ 'jira-owned-field': ticket.jira_issue_key }\" />"
+    ) in ticket_card_source
+    assert (
+        '<InputText v-if="!subtask.local_completed" v-model="subtask.summary" '
+        ':aria-label="`Subtask ${subtask.summary}`" '
+        ':disabled="!!subtask.jira_issue_key" '
+        ":class=\"{ 'jira-owned-field': subtask.jira_issue_key }\" />"
+    ) in ticket_card_source
+    assert (
+        '<Textarea v-if="!subtask.local_completed" v-model="subtask.description" '
+        'rows="2" autoResize :aria-label="`Description for subtask ${subtask.summary}`" '
+        ':disabled="!!subtask.jira_issue_key" '
+        ":class=\"{ 'jira-owned-field': subtask.jira_issue_key }\" />"
+    ) in ticket_card_source
+    assert ".details-form .jira-owned-field { color:" in style_source
+    assert 'v-model="ticket.notes"' in ticket_card_source
+    assert (
+        'v-model="ticket.planned_date" type="date" aria-label="Planned date"' in ticket_card_source
+    )
+    assert '<CategoryButtons v-model="ticket.category_id"' in ticket_card_source
+    assert '<ComponentSelect v-model="ticket.component"' in ticket_card_source
+    assert (
+        'v-model="subtask.planned_date" type="date" aria-label="Subtask planned date"'
+        in ticket_card_source
+    )
 
 
 def test_spa_uses_a_category_first_component_dropdown() -> None:

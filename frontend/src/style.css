@@ -45,6 +45,7 @@ h3 { margin: 0; font-size: 1.15rem; }
 .details-form { min-width: 0; margin-top: 18px; }
 .details-form > * { min-width: 0; max-width: 100%; }
 .details-form > .p-inputtext, .details-form > .p-textarea { width: 100%; }
+.details-form .jira-owned-field { color: #7f8da1; background: #0d1727; border-color: #33445a; opacity: 1; }
 .details-form .ticket-meta { overflow-wrap: anywhere; }
 .edit-toggle { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .edit-toggle .p-button-label { white-space: normal; overflow-wrap: anywhere; }
