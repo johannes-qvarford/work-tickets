@@ -2,7 +2,7 @@
 
 ## Ticket List and Editing
 
-- [ ] Fix drag-and-drop insertion feedback for top-level tickets and subtasks.
+- [x] Fix drag-and-drop insertion feedback for top-level tickets and subtasks.
 
   When the pointer enters a valid active drop target, highlight that ticket or subtask immediately. Do not require an arbitrary additional movement before showing feedback. Use the pointer position within the target to indicate whether the item will be inserted before or after it, and keep the same behavior when the queue is filtered.
 
