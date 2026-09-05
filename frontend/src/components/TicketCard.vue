@@ -13,10 +13,18 @@ import {
   clearSubtaskDragState,
   clearSubtaskDragOverState,
   dragOverSubtaskId,
+  dragOverSubtaskAfter,
   dragOverSubtaskParentId,
   draggingSubtaskId,
   draggingSubtaskParentId,
   dropTargetIndex,
+  handleSubtaskDragEnter,
+  handleSubtaskDragOver,
+  handleTicketDragEnter,
+  handleTicketDragOver,
+  isSubtaskDrag,
+  isTicketDrag,
+  isAfterDropTarget,
 } from "../reordering";
 
 export interface Ticket {
@@ -45,6 +53,7 @@ const props = defineProps<{
   reorderable?: boolean;
   draggingTicketId?: number | null;
   dragOverTicketId?: number | null;
+  dragOverTicketAfter?: boolean | null;
 }>();
 const emit = defineEmits<{
   toggle: [];
@@ -57,7 +66,7 @@ const emit = defineEmits<{
   addSubtask: [ticket: Ticket, draft: { summary: string; description: string; planned_date: string }];
   ticketDragStart: [id: number];
   ticketDragEnd: [];
-  ticketDragOver: [id: number];
+  ticketDragOver: [id: number, afterTarget: boolean];
   ticketDrop: [id: number, afterTarget: boolean];
   moveSubtask: [id: number, targetIndex: number];
 }>();
@@ -95,20 +104,24 @@ function onTicketDragStart(event: DragEvent) {
   emit("ticketDragStart", props.ticket.id);
 }
 
-function isTicketDrag(event: DragEvent) {
-  return event.dataTransfer?.types.includes("application/x-work-tickets-ticket") ?? false;
+function onTicketDragEnter(event: DragEvent) {
+  handleTicketDragEnter(event, {
+    ticketId: props.ticket.id,
+    ticketCanDrag: ticketCanDrag.value,
+    draggingTicketId: props.draggingTicketId,
+    clearSubtaskDragOverState,
+    onFeedback: (afterTarget) => emit("ticketDragOver", props.ticket.id, afterTarget),
+  });
 }
 
 function onTicketDragOver(event: DragEvent) {
-  if (isSubtaskDrag(event)) {
-    clearSubtaskDragOverState();
-    return;
-  }
-  if (!ticketCanDrag.value || !isTicketDrag(event) || props.draggingTicketId === props.ticket.id) return;
-  event.preventDefault();
-  event.stopPropagation();
-  event.dataTransfer!.dropEffect = "move";
-  emit("ticketDragOver", props.ticket.id);
+  handleTicketDragOver(event, {
+    ticketId: props.ticket.id,
+    ticketCanDrag: ticketCanDrag.value,
+    draggingTicketId: props.draggingTicketId,
+    clearSubtaskDragOverState,
+    onFeedback: (afterTarget) => emit("ticketDragOver", props.ticket.id, afterTarget),
+  });
 }
 
 function onTicketDrop(event: DragEvent) {
@@ -128,7 +141,7 @@ function onTicketDrop(event: DragEvent) {
   event.preventDefault();
   event.stopPropagation();
   const target = event.currentTarget as HTMLElement;
-  const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+  const afterTarget = isAfterDropTarget(event.clientY, target.getBoundingClientRect());
   emit("ticketDrop", props.ticket.id, afterTarget);
 }
 
@@ -141,25 +154,39 @@ function onSubtaskDragStart(event: DragEvent, subtask: Ticket) {
   event.dataTransfer.setData("application/x-work-tickets-subtask", String(subtask.id));
   draggingSubtaskParentId.value = props.ticket.id;
   draggingSubtaskId.value = subtask.id;
-  dragOverSubtaskParentId.value = null;
-  dragOverSubtaskId.value = null;
-}
-
-function isSubtaskDrag(event: DragEvent) {
-  return event.dataTransfer?.types.includes("application/x-work-tickets-subtask") ?? false;
+  clearSubtaskDragOverState();
 }
 
 function onSubtaskDragOver(event: DragEvent, subtask: Ticket) {
-  if (!isSubtaskDrag(event)) return;
-  if (subtask.local_completed || draggingSubtaskParentId.value !== props.ticket.id || draggingSubtaskId.value === subtask.id) {
-    clearSubtaskDragOverState();
-    return;
-  }
-  event.preventDefault();
-  event.stopPropagation();
-  event.dataTransfer!.dropEffect = "move";
-  dragOverSubtaskParentId.value = props.ticket.id;
-  dragOverSubtaskId.value = subtask.id;
+  handleSubtaskDragOver(event, {
+    parentId: props.ticket.id,
+    subtaskId: subtask.id,
+    subtaskCompleted: subtask.local_completed,
+    draggingParentId: draggingSubtaskParentId.value,
+    draggingSubtaskId: draggingSubtaskId.value,
+    clearSubtaskDragOverState,
+    onTarget: () => {
+      dragOverSubtaskParentId.value = props.ticket.id;
+      dragOverSubtaskId.value = subtask.id;
+    },
+    onFeedback: (afterTarget) => { dragOverSubtaskAfter.value = afterTarget; },
+  });
+}
+
+function onSubtaskDragEnter(event: DragEvent, subtask: Ticket) {
+  handleSubtaskDragEnter(event, {
+    parentId: props.ticket.id,
+    subtaskId: subtask.id,
+    subtaskCompleted: subtask.local_completed,
+    draggingParentId: draggingSubtaskParentId.value,
+    draggingSubtaskId: draggingSubtaskId.value,
+    clearSubtaskDragOverState,
+    onTarget: () => {
+      dragOverSubtaskParentId.value = props.ticket.id;
+      dragOverSubtaskId.value = subtask.id;
+    },
+    onFeedback: (afterTarget) => { dragOverSubtaskAfter.value = afterTarget; },
+  });
 }
 
 function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
@@ -173,7 +200,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
   event.preventDefault();
   event.stopPropagation();
   const target = event.currentTarget as HTMLElement;
-  const afterTarget = event.clientY > target.getBoundingClientRect().top + target.offsetHeight / 2;
+  const afterTarget = isAfterDropTarget(event.clientY, target.getBoundingClientRect());
   const sourceId = draggingSubtaskId.value;
   const targetIndex = sourceId === null ? null : dropTargetIndex(activeSubtasks.value, sourceId, subtask.id, afterTarget);
   clearSubtaskDragState();
@@ -186,7 +213,8 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
 
 <template>
   <Card
-    :class="['ticket-card', ticket.local_completed && 'completed', draggingTicketId === ticket.id && 'dragging', dragOverTicketId === ticket.id && 'drag-over']"
+    :class="['ticket-card', ticket.local_completed && 'completed', draggingTicketId === ticket.id && 'dragging', dragOverTicketId === ticket.id && 'drag-over', dragOverTicketId === ticket.id && dragOverTicketAfter === false && 'drag-over-before', dragOverTicketId === ticket.id && dragOverTicketAfter === true && 'drag-over-after']"
+    @dragenter="onTicketDragEnter"
     @dragover="onTicketDragOver"
     @drop="onTicketDrop"
   >
@@ -236,7 +264,8 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
           <div
             v-for="subtask in ticket.subtasks"
             :key="subtask.id"
-            :class="['subtask-row', subtask.local_completed && 'completed', draggingSubtaskParentId === ticket.id && draggingSubtaskId === subtask.id && 'dragging', dragOverSubtaskParentId === ticket.id && dragOverSubtaskId === subtask.id && 'drag-over']"
+            :class="['subtask-row', subtask.local_completed && 'completed', draggingSubtaskParentId === ticket.id && draggingSubtaskId === subtask.id && 'dragging', dragOverSubtaskParentId === ticket.id && dragOverSubtaskId === subtask.id && 'drag-over', dragOverSubtaskParentId === ticket.id && dragOverSubtaskId === subtask.id && dragOverSubtaskAfter === false && 'drag-over-before', dragOverSubtaskParentId === ticket.id && dragOverSubtaskId === subtask.id && dragOverSubtaskAfter === true && 'drag-over-after']"
+            @dragenter="onSubtaskDragEnter($event, subtask)"
             @dragover="onSubtaskDragOver($event, subtask)"
             @drop="onSubtaskDrop($event, subtask)"
           >
