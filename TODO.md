@@ -2,128 +2,40 @@
 
 ## Ticket List and Editing
 
-- [x] Make the ticket list a vertical list.
+- [ ] Fix drag-and-drop insertion feedback for top-level tickets and subtasks.
 
-  Each ticket should occupy the full available horizontal space of its container rather than being laid out as a multi-column grid.
+  When the pointer enters a valid active drop target, highlight that ticket or subtask immediately. Do not require an arbitrary additional movement before showing feedback. Use the pointer position within the target to indicate whether the item will be inserted before or after it, and keep the same behavior when the queue is filtered.
 
-- [x] Remove the ticket completion marker.
+- [ ] Allow local-only edits to synced tickets.
 
-  The ticket state should remain clear from the existing styling and controls without an additional marker beside the title.
+  After a ticket is synced to Jira, disable and visibly gray out its summary and description fields. Keep local-only fields editable: personal notes on top-level tickets, planned date, category, and component. The API should treat unchanged summary and description values as unchanged, save local-only changes without calling Jira, and reject attempted changes to those Jira-owned fields with a field-specific error. Saving changes to only local fields must succeed even when Jira is unavailable. If a save does require Jira and fails, display the actual Jira error rather than treating every failure as an unexplained 422. Add coverage for both the UI state and the API behavior.
 
-- [x] Make the ticket drag handle larger and move it to the leftmost side of the ticket, before the title.
+- [ ] Fix new subtask creation returning HTTP 500.
 
-- [x] Fix the ticket drag insertion edge case.
-
-  Moving the item at position 2 before the item at position 1 should continue to work. Moving the item at position 1 after the item at position 2 must also swap the items correctly. The insertion index must account for removing the dragged item before calculating the final position.
-
-- [x] Remove the ticket and subtask up/down arrow controls.
-
-  Dragging is the supported reordering interaction.
-
-- [x] Fix the expanded ticket edit layout.
-
-  Clicking `Edit ticket and subtasks` must expand within the ticket/container width and never overflow horizontally. The layout must also remain usable on narrow screens.
-
-- [x] Add personal notes to top-level tickets.
-
-  Notes need a textarea when creating and editing a ticket. They are local-only, must never be sent to Jira, and must not be added to subtasks.
-
-## Categories and Components
-
-- [x] Replace ticket category selection dropdowns with category buttons.
-
-  Include an explicit `Uncategorized` button. This applies to ticket creation and editing; the category filter may remain a dropdown.
-
-- [x] Add local category-specific components.
-
-  The Categories page should allow components such as `payment-integration-app` and `payment-provider-app` to be assigned to categories, reordered, and removed.
-
-  Components are local metadata for now and may be mapped to Jira components in the future. A component may belong to multiple categories, with an independent order within each category. Components should be globally deduplicated in ticket selection.
-
-  After selecting a ticket category, show category-associated components first, followed by components from other categories. Use a dropdown for component selection.
-
-  If a component is deleted, existing tickets retain their stored component value, but the deleted component must not be selectable when creating or editing tickets.
+  Creating a subtask currently passes `NULL` to the shared `tickets.notes` column, which is `NOT NULL` in the migrated development database. Subtasks must continue to have no notes field in the API or UI, while creation from both the ticket-creation flow and the ticket-edit flow succeeds. Do not regress existing tickets or the no-notes-on-subtasks invariant. Add a regression test using the migrated schema.
 
 ## Refine Terminal
 
-- [x] Add a `Refine` button backed by an xterm.js console.
+- [ ] Fix the Refine terminal when a session is started.
 
-  The button should be available for synced top-level tickets and synced subtasks, and should launch:
+  A WebSocket remaining open until the terminal is closed is expected; the issue is that the connected terminal currently shows no usable session and does not accept input. For a synced ticket with a valid local component, local projects directory, and Jira browser URL, launch `opencode --prompt "Refine <Jira issue URL>"`, display the process output, and forward terminal input to the process. Show a user-facing error when the command cannot start or the working directory is invalid. Keep one session per Jira key and reconnect to it after a browser refresh while the process is still running. Add a regression test for initial output, input forwarding, and reconnect behavior.
 
-  ```text
-  opencode --prompt "Refine <ticket browser URL>"
-  ```
+## Reviews and Jira
 
-  Replace `<ticket browser URL>` with the configured Jira browser URL and the ticket's Jira key.
+- [ ] Migrate Jira Reviews search away from the removed endpoint.
 
-- [x] Add a local projects directory setting.
+  Jira Cloud must use the supported `/rest/api/3/search/jql` contract instead of the removed search endpoint, including its request and pagination behavior. Preserve the existing project, issue type, status, and assignee filters and include all result pages. Retain the current Jira Server/Data Center behavior where that endpoint remains supported. Add client tests for Cloud pagination and for the existing Server/Data Center path.
 
-  The setting selects the root directory containing local projects. Refine should use `<local projects>/<component>` as the subprocess working directory and inherit the environment of the server process.
+## Settings
 
-  Validate that the configured root path exists when saving settings. Disable `Refine` when the ticket has no local component, and report an inline error when the root/component directory does not exist at launch time.
+- [ ] Validate the configured GitLab connection when requested.
 
-- [x] Make Refine sessions resumable.
+  `Save & test connection` must always validate Jira and must also validate GitLab when both a GitLab base URL and token are configured. Use an authenticated, non-mutating GitLab API request and report GitLab-specific failures without saving a connection that failed validation. If only one GitLab credential is supplied, show an actionable validation error instead of silently reporting success. Keep GitLab optional when neither GitLab field is configured.
 
-  Maintain one session per item, keyed by its Jira key regardless of whether it belongs to a top-level ticket or a subtask. The terminal should reconnect to an existing session after a browser refresh while the server process is running.
+- [ ] Add GitLab URL guidance to Settings.
 
-## Reviews and Jira Workflow
+  Explain that the field accepts the GitLab site root, including an installation context path when applicable, and must not include `/api/v4` or a merge-request path. Include examples such as `https://gitlab.com` and `https://gitlab.example.com/gitlab`, and state that an authenticated personal access token is required for connection testing and Reviews merge-request operations.
 
-- [x] Add a separate `Reviews` page.
+- [ ] Add Jira URL guidance to Settings.
 
-  On page switch, fetch Jira issues assigned to the configured Jira account, limited to the configured project and issue type, with the configured `In Review` status. Include Jira issues even when they have no local ticket equivalent.
-
-  Add a manual refresh button. If Jira fails for one ticket, show an inline error for that ticket without preventing other tickets from loading.
-
-- [x] Add configurable Jira workflow status settings.
-
-  Add settings for `In Review`, `Ready to Merge`, and `Ready to Deploy`, using those values as the defaults. Status changes should find the Jira transition whose destination matches the configured status rather than attempting to update the status field directly.
-
-  Treat an item already in the requested target status as successfully transitioned so retries are idempotent.
-
-- [x] Add a `Ready to Merge` action to each Reviews item.
-
-  There is no separate merge button. The action should perform the full review and merge workflow described below. It should transition the Jira issue to `Ready to Merge` and add the Jira comment `Tested and reviewed.`
-
-## GitLab Merge Requests
-
-- [x] Add GitLab settings.
-
-  Add a GitLab base URL and user personal access token to application settings. Store and handle the token like the existing Jira credential.
-
-- [x] Detect merge requests from Jira descriptions.
-
-  For now, scan the Jira description for links matching the configured GitLab base URL, such as:
-
-  ```text
-  https://gitlab.example/group1/group2/repository/-/merge_requests/1234
-  ```
-
-  Extract the MR number and repository name. Omit repository groups from the displayed repository name. Detection may later be replaced with a Jira custom field.
-
-- [x] Select an unambiguous MR for each ticket.
-
-  If multiple MRs are found and more than one remains open, disable `Ready to Merge` and document that the action requires one unambiguous MR.
-
-  If one open MR remains after filtering, use it and ignore closed MRs. If all MRs are closed, use the most recently updated MR. Disable the action when no MRs are found or when more than one MR remains after filtering.
-
-- [x] Make the `Ready to Merge` action approve the selected MR when necessary.
-
-  An MR that is already approved should be treated as successful.
-
-- [x] Make the `Ready to Merge` action mark the selected MR as no longer a draft.
-
-- [x] Resolve all unresolved discussion threads on the selected MR.
-
-  Add the comment `Approved 👑` to each unresolved MR thread and mark each thread as resolved.
-
-- [x] Merge the selected MR with squashing enabled.
-
-  Wait for the MR to reach the merged state, then show a success or failure notification.
-
-- [x] Complete the Jira update after a successful MR merge.
-
-  Add a Jira comment containing a link to the MR commit, using the short SHA as the visible text, for example `Merged with <linked short SHA>`, and transition the Jira issue to `Ready to Deploy`.
-
-- [x] Support partial failures and retries in the Ready to Merge workflow.
-
-  Show failures inline on the affected Reviews item and provide a retry button. Both the initial action and retries must check the current Jira/GitLab state and safely skip steps that have already succeeded.
+  Explain the difference between the Jira API URL and the Jira browser URL. Show valid examples for a Jira Cloud site (`https://company.atlassian.net`), the Cloud API gateway (`https://api.atlassian.com/ex/jira/<cloud-id>`), and a Server/Data Center context path (`https://jira.example.com/jira`). State that the API URL is the base to which the REST path is appended, the browser URL must be the site root rather than a `/browse/...` URL, and the browser URL is used to construct issue links and Refine prompts.
