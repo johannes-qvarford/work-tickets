@@ -67,6 +67,10 @@ class GitLabClient:
     def close(self) -> None:
         self._client.close()
 
+    def validate(self) -> None:
+        """Check authenticated access without changing GitLab state."""
+        self._request("GET", f"{self._api_prefix}/user")
+
     def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
         response = self._request(
             "GET",

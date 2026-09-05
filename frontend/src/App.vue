@@ -18,20 +18,13 @@ import {
   failReviewAction,
   reviewActionDisabled,
 } from "./reviewActionLifecycle";
+import {
+  buildSettingsRequest,
+  requestErrorMessage,
+  type JiraSettings,
+} from "./settingsAction";
 
-interface JiraConfig {
-  base_url: string;
-  browser_base_url: string;
-  local_projects_directory: string;
-  gitlab_base_url: string;
-  email: string;
-  project_key: string;
-  issue_type: string;
-  completed_statuses: string;
-  in_review_status: string;
-  ready_to_merge_status: string;
-  ready_to_deploy_status: string;
-}
+type JiraConfig = Omit<JiraSettings, "api_token" | "gitlab_token" | "validate">;
 interface State {
   tickets: Ticket[];
   categories: Category[];
@@ -80,7 +73,7 @@ const newSubtasks = ref<Array<{ summary: string; description: string; planned_da
 const newCategory = ref("");
 const newComponent = ref("");
 const selectedComponentByCategory = ref<Record<number, number | null>>({});
-const settings = ref({ base_url: "", browser_base_url: "", local_projects_directory: "", gitlab_base_url: "", email: "", api_token: "", gitlab_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", in_review_status: "In Review", ready_to_merge_status: "Ready to Merge", ready_to_deploy_status: "Ready to Deploy", validate: false });
+const settings = ref<JiraSettings>({ base_url: "", browser_base_url: "", local_projects_directory: "", gitlab_base_url: "", email: "", api_token: "", gitlab_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", in_review_status: "In Review", ready_to_merge_status: "Ready to Merge", ready_to_deploy_status: "Ready to Deploy", validate: false });
 
 const visibleTickets = computed(() => categoryFilter.value === null ? state.value.tickets : state.value.tickets.filter((ticket) => ticket.category_id === categoryFilter.value));
 const dueTickets = computed(() => visibleTickets.value.filter((ticket) => !ticket.local_completed && ticket.planned_date && ticket.planned_date <= dateValue(todayDate())));
@@ -114,7 +107,7 @@ function dateValue(value: Date | null) {
 async function request(url: string, init: RequestInit = {}) {
   const response = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...(init.headers || {}) } });
   const result = await response.json();
-  if (!response.ok || !result.ok) throw new Error(result.message || "Request failed.");
+  if (!response.ok || !result.ok) throw new Error(requestErrorMessage(result));
   if (result.state) state.value = result.state;
   return result;
 }
@@ -175,7 +168,7 @@ async function assignComponent(category: Category) {
 async function removeCategoryComponent(categoryId: number, componentId: number) { await run(() => request(`/api/categories/${categoryId}/components/${componentId}`, { method: "DELETE" }), "Component removed from category."); }
 async function moveCategoryComponent(categoryId: number, componentId: number, targetIndex: number) { await run(() => request(`/api/categories/${categoryId}/components/${componentId}/move?target_index=${targetIndex}`, { method: "POST" }), "Component order saved."); }
 function availableComponents(category: Category) { return state.value.components.filter((component) => !(category.components || []).some((assigned) => assigned.id === component.id)); }
-async function saveSettings() { await run(async () => { const result = await request("/api/settings/jira", { method: "PUT", body: JSON.stringify(settings.value) }); settings.value.api_token = ""; settings.value.gitlab_token = ""; if (result.state.jira_config) Object.assign(settings.value, result.state.jira_config); }, "Jira and GitLab settings saved."); }
+async function saveSettings() { const validate = settings.value.validate; await run(async () => { const result = await request("/api/settings/jira", buildSettingsRequest(settings.value, validate)); settings.value.api_token = ""; settings.value.gitlab_token = ""; if (result.state.jira_config) Object.assign(settings.value, result.state.jira_config); }, "Jira and GitLab settings saved."); }
 async function sync(url: string) { await run(() => request(url, { method: "POST" }), "Jira sync complete."); }
 async function moveTicket(ticketId: number, targetIndex: number) { await run(() => request(`/api/tickets/${ticketId}/move?target_index=${targetIndex}`, { method: "POST" }), "Ticket order saved."); }
 async function moveSubtask(subtaskId: number, targetIndex: number) { await run(() => request(`/api/subtasks/${subtaskId}/move?target_index=${targetIndex}`, { method: "POST" }), "Subtask order saved."); }

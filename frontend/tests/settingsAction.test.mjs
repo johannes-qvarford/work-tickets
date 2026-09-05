@@ -1,0 +1,38 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { buildSettingsRequest, requestErrorMessage } from "../src/settingsAction.ts";
+
+const settings = {
+  base_url: "https://jira.example.test",
+  browser_base_url: "",
+  local_projects_directory: "",
+  gitlab_base_url: "https://gitlab.example.test",
+  email: "person@example.test",
+  api_token: "jira-secret",
+  gitlab_token: "gitlab-secret",
+  project_key: "WORK",
+  issue_type: "Task",
+  completed_statuses: "Done",
+  in_review_status: "In Review",
+  ready_to_merge_status: "Ready to Merge",
+  ready_to_deploy_status: "Ready to Deploy",
+  validate: false,
+};
+
+function requestPayload(validate) {
+  return JSON.parse(buildSettingsRequest(settings, validate).body);
+}
+
+test("normal settings save sends validate false", () => {
+  assert.equal(requestPayload(false).validate, false);
+});
+
+test("Save & test connection sends validate true", () => {
+  assert.equal(requestPayload(true).validate, true);
+});
+
+test("GitLab validation errors remain displayable through the request error path", () => {
+  const message = "GitLab setup failed: GitLab returned HTTP 401: Unauthorized.";
+
+  assert.equal(requestErrorMessage({ message }), message);
+});

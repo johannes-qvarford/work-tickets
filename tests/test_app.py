@@ -1187,6 +1187,210 @@ def test_api_jira_config_validation_uses_jira_client(monkeypatch) -> None:
     assert response.json()["message"] == "Jira connection validated and saved."
 
 
+def test_api_jira_config_validation_keeps_gitlab_optional(monkeypatch) -> None:
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def validate(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class UnavailableGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+            raise AssertionError("GitLab must remain optional")
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", UnavailableGitLabClient)
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+            "validate": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Jira connection validated and saved."
+
+
+def test_api_config_validation_uses_gitlab_client_and_saves_only_after_both_pass(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            assert config.project_key == "WORK"
+
+        def validate(self) -> None:
+            calls.append("jira.validate")
+
+        def close(self) -> None:
+            calls.append("jira.close")
+
+    class FakeGitLabClient:
+        def __init__(self, config) -> None:
+            assert config.gitlab_base_url == "https://gitlab.example.test"
+            assert config.gitlab_token == "gitlab-secret"
+            calls.append("gitlab.init")
+
+        def validate(self) -> None:
+            calls.append("gitlab.validate")
+
+        def close(self) -> None:
+            calls.append("gitlab.close")
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", FakeGitLabClient)
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "work",
+            "issue_type": "Task",
+            "gitlab_base_url": "https://gitlab.example.test/",
+            "gitlab_token": "gitlab-secret",
+            "validate": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Jira and GitLab connections validated and saved."
+    assert calls == [
+        "jira.validate",
+        "jira.close",
+        "gitlab.init",
+        "gitlab.validate",
+        "gitlab.close",
+    ]
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.gitlab_base_url == "https://gitlab.example.test"
+        assert config.gitlab_token == "gitlab-secret"
+
+
+def test_api_config_validation_reports_gitlab_failure_without_saving(monkeypatch) -> None:
+    with SessionLocal() as db:
+        _seed_jira_config(
+            db,
+            base_url="https://previous.jira.example.test",
+            gitlab_base_url="https://previous.gitlab.example.test",
+            gitlab_token="previous-gitlab-secret",
+        )
+        db.commit()
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def validate(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class FailingGitLabClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def validate(self) -> None:
+            raise GitLabError("GitLab returned HTTP 401: Unauthorized.")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+    monkeypatch.setattr("work_tickets.app.GitLabClient", FailingGitLabClient)
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://new.jira.example.test",
+            "email": "new@example.test",
+            "api_token": "new-jira-token",
+            "project_key": "NEW",
+            "issue_type": "Bug",
+            "gitlab_base_url": "https://new.gitlab.example.test",
+            "gitlab_token": "new-gitlab-secret",
+            "validate": True,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "ok": False,
+        "message": "GitLab setup failed: GitLab returned HTTP 401: Unauthorized.",
+    }
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.base_url == "https://previous.jira.example.test"
+        assert config.gitlab_base_url == "https://previous.gitlab.example.test"
+        assert config.gitlab_token == "previous-gitlab-secret"
+
+
+def test_api_rejects_partial_gitlab_credentials_after_jira_validation(monkeypatch) -> None:
+    with SessionLocal() as db:
+        _seed_jira_config(
+            db,
+            base_url="https://previous.jira.example.test",
+            gitlab_base_url="",
+            gitlab_token="",
+        )
+        db.commit()
+
+    calls: list[str] = []
+
+    class FakeJiraClient:
+        def __init__(self, config) -> None:
+            del config
+
+        def validate(self) -> None:
+            calls.append("validate")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
+
+    jira_payload = {
+        "base_url": "https://jira.example.test",
+        "email": "person@example.test",
+        "api_token": "test-token",
+        "project_key": "WORK",
+        "issue_type": "Task",
+    }
+    for gitlab_payload in (
+        {"gitlab_base_url": "https://gitlab.example.test"},
+        {"gitlab_token": "gitlab-secret"},
+    ):
+        response = client.put(
+            "/api/settings/jira",
+            json={**jira_payload, **gitlab_payload, "validate": True},
+        )
+
+        assert response.status_code == 422
+        assert response.json() == {
+            "ok": False,
+            "message": "GitLab base URL and personal access token are required together.",
+        }
+    assert calls == ["validate", "validate"]
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.base_url == "https://previous.jira.example.test"
+
+
 def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -1594,6 +1798,31 @@ def test_gitlab_client_retrieves_merge_request_state_and_updated_at() -> None:
     assert requests[0].url.raw_path == (
         b"/gitlab/api/v4/projects/group%2Frepository/merge_requests/42"
     )
+    assert requests[0].headers["PRIVATE-TOKEN"] == "gitlab-secret"
+
+
+def test_gitlab_client_validates_authenticated_user_without_mutation() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"username": "person"})
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example/gitlab",
+        gitlab_token="gitlab-secret",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    gitlab.validate()
+    gitlab.close()
+
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.raw_path == b"/gitlab/api/v4/user"
     assert requests[0].headers["PRIVATE-TOKEN"] == "gitlab-secret"
 
 
