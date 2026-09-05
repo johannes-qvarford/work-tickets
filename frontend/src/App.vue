@@ -20,6 +20,7 @@ import {
 } from "./reviewActionLifecycle";
 import {
   buildSettingsRequest,
+  gitlabBaseUrlGuidance,
   requestErrorMessage,
   type JiraSettings,
 } from "./settingsAction";
@@ -214,6 +215,10 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
     </header>
     <Message v-if="notice" :severity="notice.severity" closable @close="notice = null">{{ notice.text }}</Message>
     <RefineSessionCoordinator :tickets="state.tickets" />
+    <section v-if="page === 'settings'" class="settings-guidance" aria-labelledby="gitlab-url-guidance-heading">
+      <h3 id="gitlab-url-guidance-heading">GitLab URL and token</h3>
+      <p>{{ gitlabBaseUrlGuidance }}</p>
+    </section>
 
     <main v-if="page === 'tickets'">
       <Card class="filter-card"><template #content><div class="filter-row"><label for="category-filter">Filter by category</label><Select id="category-filter" v-model="categoryFilter" :options="[{ id: null, name: 'All categories' }, ...state.categories]" optionLabel="name" optionValue="id" placeholder="All categories" /><Button type="button" class="view-toggle" severity="secondary" :label="ticketView === 'focus' ? 'Show Queue' : 'Show Focus'" :aria-label="ticketView === 'focus' ? 'Switch to Queue' : 'Switch to Focus'" :aria-controls="ticketView === 'focus' ? 'focus-section' : 'queue-section'" @click="switchTicketView" /><span>{{ visibleTickets.length }} tickets</span></div></template></Card>

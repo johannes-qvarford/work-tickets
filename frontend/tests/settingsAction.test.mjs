@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSettingsRequest, requestErrorMessage } from "../src/settingsAction.ts";
+import { buildSettingsRequest, gitlabBaseUrlGuidance, requestErrorMessage } from "../src/settingsAction.ts";
 
 const settings = {
   base_url: "https://jira.example.test",
@@ -35,4 +35,15 @@ test("GitLab validation errors remain displayable through the request error path
   const message = "GitLab setup failed: GitLab returned HTTP 401: Unauthorized.";
 
   assert.equal(requestErrorMessage({ message }), message);
+});
+
+test("GitLab base URL guidance covers installation paths, URL exclusions, examples, and token use", () => {
+  assert.match(gitlabBaseUrlGuidance, /site root/);
+  assert.match(gitlabBaseUrlGuidance, /installation context path/);
+  assert.match(gitlabBaseUrlGuidance, /\/api\/v4/);
+  assert.match(gitlabBaseUrlGuidance, /merge-request path/);
+  assert.match(gitlabBaseUrlGuidance, /https:\/\/gitlab\.com/);
+  assert.match(gitlabBaseUrlGuidance, /https:\/\/gitlab\.example\.com\/gitlab/);
+  assert.match(gitlabBaseUrlGuidance, /authenticated personal access token/);
+  assert.match(gitlabBaseUrlGuidance, /connection testing and Reviews merge-request operations/);
 });

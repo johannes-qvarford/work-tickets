@@ -15,6 +15,8 @@ export interface JiraSettings {
   validate: boolean;
 }
 
+export const gitlabBaseUrlGuidance = "Use the GitLab site root, including an installation context path when applicable. Do not include /api/v4 or a merge-request path. Examples: https://gitlab.com and https://gitlab.example.com/gitlab. An authenticated personal access token is required for connection testing and Reviews merge-request operations.";
+
 export function buildSettingsRequest(settings: JiraSettings, validate: boolean): RequestInit {
   return {
     method: "PUT",
