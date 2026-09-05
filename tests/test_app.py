@@ -2048,11 +2048,28 @@ def test_api_rejects_unsafe_gitlab_base_urls_without_persisting_or_exposing_them
     assert "gitlab_token" not in state["jira_config"]
 
 
-def test_jira_client_searches_issues_with_paging_fields() -> None:
+def test_jira_client_searches_cloud_issues_with_cursor_paging() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if request.url.params.get("nextPageToken") == "page-2":
+            return httpx.Response(
+                200,
+                json={
+                    "issues": [
+                        {
+                            "key": "WORK-504",
+                            "fields": {
+                                "summary": "Second search result",
+                                "issuetype": {"name": "Story"},
+                                "status": {"name": "In Review"},
+                            },
+                        }
+                    ],
+                    "isLast": True,
+                },
+            )
         return httpx.Response(
             200,
             json={
@@ -2066,19 +2083,24 @@ def test_jira_client_searches_issues_with_paging_fields() -> None:
                         },
                     }
                 ],
-                "total": 1,
+                "isLast": False,
+                "nextPageToken": "page-2",
             },
         )
 
     config = JiraConfig(
-        base_url="https://jira.example.test",
+        base_url="https://work.atlassian.net",
         email="person@example.test",
         api_token="test-token",
         project_key="WORK",
         issue_type="Story",
     )
     jira = JiraClient(config, transport=httpx.MockTransport(handler))
-    issues = jira.search_issues('project = "WORK"')
+    jql = (
+        'project = "WORK" AND issuetype = "Story" AND status = "In Review" '
+        "AND assignee = currentUser() ORDER BY key"
+    )
+    issues = jira.search_issues(jql)
     jira.close()
 
     assert issues == [
@@ -2087,13 +2109,137 @@ def test_jira_client_searches_issues_with_paging_fields() -> None:
             summary="Search result",
             issue_type_name="Story",
             status_name="In Review",
+        ),
+        JiraIssue(
+            key="WORK-504",
+            summary="Second search result",
+            issue_type_name="Story",
+            status_name="In Review",
+        ),
+    ]
+    assert [request.url.path for request in requests] == [
+        "/rest/api/3/search/jql",
+        "/rest/api/3/search/jql",
+    ]
+    assert requests[0].url.params["jql"] == jql
+    assert requests[0].url.params["maxResults"] == "100"
+    assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
+    assert "nextPageToken" not in requests[0].url.params
+    assert requests[1].url.params["jql"] == jql
+    assert requests[1].url.params["nextPageToken"] == "page-2"
+
+
+def test_jira_client_keeps_server_search_paging_endpoint() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "issues": [
+                    {
+                        "key": "WORK-505",
+                        "fields": {
+                            "summary": "Server search result",
+                            "issuetype": {"name": "Story"},
+                            "status": {"name": "In Review"},
+                        },
+                    }
+                ],
+                "total": 1,
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://jira.example.test/jira",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Story",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    jql = (
+        'project = "WORK" AND issuetype = "Story" AND status = "In Review" '
+        "AND assignee = currentUser() ORDER BY key"
+    )
+    issues = jira.search_issues(jql)
+    jira.close()
+
+    assert issues == [
+        JiraIssue(
+            key="WORK-505",
+            summary="Server search result",
+            issue_type_name="Story",
+            status_name="In Review",
         )
     ]
-    assert requests[0].url.path == "/rest/api/3/search"
-    assert requests[0].url.params["jql"] == 'project = "WORK"'
+    assert requests[0].url.path == "/jira/rest/api/2/search"
+    assert requests[0].url.params["jql"] == jql
     assert requests[0].url.params["startAt"] == "0"
     assert requests[0].url.params["maxResults"] == "100"
     assert requests[0].url.params["fields"] == "summary,description,issuetype,status"
+
+
+def test_jira_client_rejects_non_adjacent_cloud_cursor_cycles() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        token = request.url.params.get("nextPageToken")
+        next_token = {None: "page-a", "page-a": "page-b", "page-b": "page-a"}[token]
+        return httpx.Response(
+            200,
+            json={
+                "issues": [],
+                "isLast": False,
+                "nextPageToken": next_token,
+            },
+        )
+
+    config = JiraConfig(
+        base_url="https://work.atlassian.net",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Story",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(JiraError, match="repeating issue search pagination token"):
+            jira.search_issues('project = "WORK"')
+    finally:
+        jira.close()
+
+    assert [request.url.params.get("nextPageToken") for request in requests] == [
+        None,
+        "page-a",
+        "page-b",
+    ]
+
+
+def test_jira_client_rejects_cloud_missing_cursor_before_last_page() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"issues": [], "isLast": False})
+
+    config = JiraConfig(
+        base_url="https://work.atlassian.net",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+        issue_type="Story",
+    )
+    jira = JiraClient(config, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(JiraError, match="unexpected issue search pagination response"):
+            jira.search_issues('project = "WORK"')
+    finally:
+        jira.close()
+
+    assert len(requests) == 1
 
 
 def test_jira_client_adds_plain_text_comment() -> None:
