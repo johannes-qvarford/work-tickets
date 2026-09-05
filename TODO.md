@@ -6,7 +6,7 @@
 
   When the pointer enters a valid active drop target, highlight that ticket or subtask immediately. Do not require an arbitrary additional movement before showing feedback. Use the pointer position within the target to indicate whether the item will be inserted before or after it, and keep the same behavior when the queue is filtered.
 
-- [ ] Allow local-only edits to synced tickets.
+- [x] Allow local-only edits to synced tickets.
 
   After a ticket is synced to Jira, disable and visibly gray out its summary and description fields. Keep local-only fields editable: personal notes on top-level tickets, planned date, category, and component. The API should treat unchanged summary and description values as unchanged, save local-only changes without calling Jira, and reject attempted changes to those Jira-owned fields with a field-specific error. Saving changes to only local fields must succeed even when Jira is unavailable. If a save does require Jira and fails, display the actual Jira error rather than treating every failure as an unexplained 422. Add coverage for both the UI state and the API behavior.
 
