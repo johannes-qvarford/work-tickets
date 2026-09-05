@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from . import jira_service, refine, tickets, web
-from .gitlab import GitLabClient
+from .gitlab import GitLabClient, GitLabError
 from .jira import JiraClient
 from .local_projects import is_safe_local_component_name
 from .models import (
@@ -560,14 +560,26 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
                 {"ok": False, "message": f"{label} must start with http:// or https://."},
                 status_code=422,
             )
-    if (
-        payload.gitlab_base_url
-        and jira_service.parse_gitlab_base_url(payload.gitlab_base_url) is None
-    ):
-        return JSONResponse(
-            {"ok": False, "message": "GitLab base URL must start with http:// or https://."},
-            status_code=422,
-        )
+    gitlab_url_error = bool(payload.gitlab_base_url) and (
+        jira_service.parse_gitlab_base_url(payload.gitlab_base_url) is None
+    )
+    gitlab_credentials_error = bool(payload.gitlab_base_url or payload.gitlab_token.strip()) and (
+        bool(values["gitlab_base_url"]) != bool(values["gitlab_token"])
+    )
+    if not payload.validate_connection:
+        if gitlab_url_error:
+            return JSONResponse(
+                {"ok": False, "message": "GitLab base URL must start with http:// or https://."},
+                status_code=422,
+            )
+        if gitlab_credentials_error:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "GitLab base URL and personal access token are required together.",
+                },
+                status_code=422,
+            )
     candidate = JiraConfig(id=1, **values)
     try:
         if payload.validate_connection:
@@ -576,17 +588,47 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
                 jira.validate()
             finally:
                 jira.close()
+            if gitlab_url_error:
+                db.rollback()
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "message": "GitLab base URL must start with http:// or https://.",
+                    },
+                    status_code=422,
+                )
+            if gitlab_credentials_error:
+                db.rollback()
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "message": "GitLab base URL and personal access token are required "
+                        "together.",
+                    },
+                    status_code=422,
+                )
+            if values["gitlab_base_url"] and values["gitlab_token"]:
+                gitlab = GitLabClient(candidate)
+                try:
+                    gitlab.validate()
+                finally:
+                    gitlab.close()
         if existing is None:
             db.add(candidate)
         else:
             for key, value in values.items():
                 setattr(existing, key, value)
         db.commit()
+    except GitLabError as exc:
+        db.rollback()
+        return JSONResponse(
+            {"ok": False, "message": f"GitLab setup failed: {exc}"}, status_code=422
+        )
     except jira_service.JiraError as exc:
         db.rollback()
         return JSONResponse({"ok": False, "message": f"Jira setup failed: {exc}"}, status_code=422)
-    return (
-        "Jira connection validated and saved."
-        if payload.validate_connection
-        else "Jira configuration saved."
-    )
+    if not payload.validate_connection:
+        return "Jira configuration saved."
+    if values["gitlab_base_url"] and values["gitlab_token"]:
+        return "Jira and GitLab connections validated and saved."
+    return "Jira connection validated and saved."
