@@ -161,7 +161,8 @@ def update_ticket(
     db: Session,
     *,
     component_provided: bool = True,
-    jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
+    summary_provided: bool = True,
+    description_provided: bool = True,
 ) -> Response:
     ticket = db.get(Ticket, ticket_id)
     if ticket is None:
@@ -176,6 +177,25 @@ def update_ticket(
             400,
         )
     summary_value = summary.strip()
+    if ticket.jira_issue_key:
+        if summary_provided and summary_value != ticket.summary:
+            return mutation_response(
+                request,
+                "error",
+                "Ticket summary is owned by Jira and cannot be changed after sync.",
+                422,
+            )
+        if description_provided and description != ticket.description:
+            return mutation_response(
+                request,
+                "error",
+                "Ticket description is owned by Jira and cannot be changed after sync.",
+                422,
+            )
+        summary_value = ticket.summary
+        description_value = ticket.description
+    else:
+        description_value = description
     if not summary_value:
         return mutation_response(request, "error", "Ticket summary is required.", 422)
     planned_date_value = _parse_date(planned_date)
@@ -189,23 +209,14 @@ def update_ticket(
             return mutation_response(request, "error", "Ticket component was not found.", 422)
 
     ticket.summary = summary_value
-    ticket.description = description
+    ticket.description = description_value
     ticket.notes = notes
     ticket.planned_date = planned_date_value
     ticket.category_id = category_id
     if component_provided:
         if component_value is not None or not component:
             ticket.component = component_value
-    if ticket.jira_issue_key:
-        from .jira_service import sync_ticket
-
-        try:
-            sync_ticket(ticket, db, jira_client_factory=jira_client_factory)
-        except JiraError as exc:
-            db.rollback()
-            return mutation_response(request, "error", str(exc), 422)
-    else:
-        db.commit()
+    db.commit()
     return mutation_response(
         request,
         "success",
@@ -221,7 +232,9 @@ def update_subtask(
     description: str,
     planned_date: str,
     db: Session,
-    jira_client_factory: Callable[[JiraConfig], JiraClient] = JiraClient,
+    *,
+    summary_provided: bool = True,
+    description_provided: bool = True,
 ) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
@@ -237,6 +250,25 @@ def update_subtask(
         )
 
     summary_value = summary.strip()
+    if subtask.jira_issue_key:
+        if summary_provided and summary_value != subtask.summary:
+            return mutation_response(
+                request,
+                "error",
+                "Subtask summary is owned by Jira and cannot be changed after sync.",
+                422,
+            )
+        if description_provided and description != subtask.description:
+            return mutation_response(
+                request,
+                "error",
+                "Subtask description is owned by Jira and cannot be changed after sync.",
+                422,
+            )
+        summary_value = subtask.summary
+        description_value = subtask.description
+    else:
+        description_value = description
     if not summary_value:
         return mutation_response(request, "error", "Subtask summary is required.", 422)
     planned_date_value = _parse_date(planned_date)
@@ -245,18 +277,9 @@ def update_subtask(
 
     parent_id = subtask.parent_id
     subtask.summary = summary_value
-    subtask.description = description
+    subtask.description = description_value
     subtask.planned_date = planned_date_value
-    if subtask.jira_issue_key:
-        from .jira_service import sync_subtask
-
-        try:
-            sync_subtask(subtask, db, jira_client_factory=jira_client_factory)
-        except JiraError as exc:
-            db.rollback()
-            return mutation_response(request, "error", str(exc), 422)
-    else:
-        db.commit()
+    db.commit()
     parent = db.get(Ticket, parent_id)
     if parent is None:
         return mutation_response(request, "error", "Parent ticket was not found.", 404)

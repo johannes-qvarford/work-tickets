@@ -232,7 +232,8 @@ def api_update_ticket(
         payload.component,
         db,
         component_provided="component" in payload.model_fields_set,
-        jira_client_factory=JiraClient,
+        summary_provided="summary" in payload.model_fields_set,
+        description_provided="description" in payload.model_fields_set,
     )
     return _service_json_response(response, db)
 
@@ -248,7 +249,8 @@ def api_update_subtask(
         payload.description,
         payload.planned_date.isoformat() if payload.planned_date else "",
         db,
-        jira_client_factory=JiraClient,
+        summary_provided="summary" in payload.model_fields_set,
+        description_provided="description" in payload.model_fields_set,
     )
     return _service_json_response(response, db)
 
