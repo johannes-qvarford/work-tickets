@@ -66,23 +66,41 @@ _INITIAL_REQUIRED_COLUMNS = {
 def apply_migrations(engine: Engine, migrations_dir: Path = _MIGRATIONS_DIR) -> None:
     """Apply migrations with Alembic and keep old databases compatible."""
     config = _alembic_config(migrations_dir)
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        legacy_version = _legacy_version(connection)
-        if legacy_version is not None:
-            if legacy_version != 1:
-                raise ValueError(f"Unsupported legacy migration version: {legacy_version}")
-            _prepare_legacy_schema(connection)
-            # Version 1 is the only migration written by the old runner. Stamping
-            # it tells Alembic that the existing schema already contains that
-            # migration, without re-running DDL against a live database.
-            command.stamp(config, _INITIAL_REVISION)
+    with engine.connect() as connection:
+        foreign_keys_enabled = _disable_sqlite_foreign_keys(connection)
+        try:
+            with connection.begin():
+                config.attributes["connection"] = connection
+                legacy_version = _legacy_version(connection)
+                if legacy_version is not None:
+                    if legacy_version != 1:
+                        raise ValueError(f"Unsupported legacy migration version: {legacy_version}")
+                    _prepare_legacy_schema(connection)
+                    # Version 1 is the only migration written by the old runner. Stamping
+                    # it tells Alembic that the existing schema already contains that
+                    # migration, without re-running DDL against a live database.
+                    command.stamp(config, _INITIAL_REVISION)
 
-        command.upgrade(config, "head")
-        _validate_current_schema(connection)
+                command.upgrade(config, "head")
+                _validate_current_schema(connection)
 
-        if legacy_version is not None:
-            connection.exec_driver_sql(f"DROP TABLE {_LEGACY_MIGRATIONS_TABLE}")
+                if legacy_version is not None:
+                    connection.exec_driver_sql(f"DROP TABLE {_LEGACY_MIGRATIONS_TABLE}")
+        finally:
+            if foreign_keys_enabled:
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+                connection.commit()
+
+
+def _disable_sqlite_foreign_keys(connection: Connection) -> bool:
+    if connection.dialect.name != "sqlite":
+        return False
+    foreign_keys_enabled = bool(connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one())
+    connection.commit()
+    if foreign_keys_enabled:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.commit()
+    return foreign_keys_enabled
 
 
 def _alembic_config(migrations_dir: Path) -> Config:
