@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSettingsRequest, gitlabBaseUrlGuidance, requestErrorMessage } from "../src/settingsAction.ts";
+import { buildSettingsRequest, gitlabBaseUrlGuidance, jiraUrlGuidance, requestErrorMessage } from "../src/settingsAction.ts";
 
 const settings = {
   base_url: "https://jira.example.test",
@@ -46,4 +46,14 @@ test("GitLab base URL guidance covers installation paths, URL exclusions, exampl
   assert.match(gitlabBaseUrlGuidance, /https:\/\/gitlab\.example\.com\/gitlab/);
   assert.match(gitlabBaseUrlGuidance, /authenticated personal access token/);
   assert.match(gitlabBaseUrlGuidance, /connection testing and Reviews merge-request operations/);
+});
+
+test("Jira URL guidance distinguishes API and browser URLs and covers supported examples", () => {
+  assert.match(jiraUrlGuidance, /API URL and Jira browser URL/);
+  assert.match(jiraUrlGuidance, /base to which the REST path is appended/);
+  assert.match(jiraUrlGuidance, /https:\/\/company\.atlassian\.net/);
+  assert.match(jiraUrlGuidance, /https:\/\/api\.atlassian\.com\/ex\/jira\/<cloud-id>/);
+  assert.match(jiraUrlGuidance, /https:\/\/jira\.example\.com\/jira/);
+  assert.match(jiraUrlGuidance, /browser URL must be the site root rather than a \/browse\/\.\.\. URL/);
+  assert.match(jiraUrlGuidance, /construct issue links and Refine prompts/);
 });
