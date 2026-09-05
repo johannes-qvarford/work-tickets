@@ -10,7 +10,7 @@
 
   After a ticket is synced to Jira, disable and visibly gray out its summary and description fields. Keep local-only fields editable: personal notes on top-level tickets, planned date, category, and component. The API should treat unchanged summary and description values as unchanged, save local-only changes without calling Jira, and reject attempted changes to those Jira-owned fields with a field-specific error. Saving changes to only local fields must succeed even when Jira is unavailable. If a save does require Jira and fails, display the actual Jira error rather than treating every failure as an unexplained 422. Add coverage for both the UI state and the API behavior.
 
-- [ ] Fix new subtask creation returning HTTP 500.
+- [x] Fix new subtask creation returning HTTP 500.
 
   Creating a subtask currently passes `NULL` to the shared `tickets.notes` column, which is `NOT NULL` in the migrated development database. Subtasks must continue to have no notes field in the API or UI, while creation from both the ticket-creation flow and the ticket-edit flow succeeds. Do not regress existing tickets or the no-notes-on-subtasks invariant. Add a regression test using the migrated schema.
 
