@@ -16,7 +16,7 @@
 
 ## Refine Terminal
 
-- [ ] Fix the Refine terminal when a session is started.
+- [x] Fix the Refine terminal when a session is started.
 
   A WebSocket remaining open until the terminal is closed is expected; the issue is that the connected terminal currently shows no usable session and does not accept input. For a synced ticket with a valid local component, local projects directory, and Jira browser URL, launch `opencode --prompt "Refine <Jira issue URL>"`, display the process output, and forward terminal input to the process. Show a user-facing error when the command cannot start or the working directory is invalid. Keep one session per Jira key and reconnect to it after a browser refresh while the process is still running. Add a regression test for initial output, input forwarding, and reconnect behavior.
 
