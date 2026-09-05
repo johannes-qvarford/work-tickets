@@ -32,7 +32,7 @@
 
   `Save & test connection` must always validate Jira and must also validate GitLab when both a GitLab base URL and token are configured. Use an authenticated, non-mutating GitLab API request and report GitLab-specific failures without saving a connection that failed validation. If only one GitLab credential is supplied, show an actionable validation error instead of silently reporting success. Keep GitLab optional when neither GitLab field is configured.
 
-- [ ] Add GitLab URL guidance to Settings.
+- [x] Add GitLab URL guidance to Settings.
 
   Explain that the field accepts the GitLab site root, including an installation context path when applicable, and must not include `/api/v4` or a merge-request path. Include examples such as `https://gitlab.com` and `https://gitlab.example.com/gitlab`, and state that an authenticated personal access token is required for connection testing and Reviews merge-request operations.
 
