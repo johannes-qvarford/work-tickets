@@ -28,7 +28,7 @@
 
 ## Settings
 
-- [ ] Validate the configured GitLab connection when requested.
+- [x] Validate the configured GitLab connection when requested.
 
   `Save & test connection` must always validate Jira and must also validate GitLab when both a GitLab base URL and token are configured. Use an authenticated, non-mutating GitLab API request and report GitLab-specific failures without saving a connection that failed validation. If only one GitLab credential is supplied, show an actionable validation error instead of silently reporting success. Keep GitLab optional when neither GitLab field is configured.
 
