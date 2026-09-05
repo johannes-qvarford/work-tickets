@@ -110,6 +110,7 @@ interface Connection {
   ended: boolean;
   leases: number;
   output: string[];
+  pendingInput: string;
   listeners: Set<OutputListener>;
 }
 
@@ -120,6 +121,12 @@ function connect(connection: Connection): void {
   connection.socket = socket;
   connection.socketTransientClose = false;
   connection.socketExplicitClose = false;
+  socket.onopen = () => {
+    if (connection.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+    const pendingInput = connection.pendingInput;
+    connection.pendingInput = "";
+    if (pendingInput) socket.send(pendingInput);
+  };
   socket.onmessage = (event) => {
     const output = String(event.data);
     connection.output.push(output);
@@ -176,6 +183,7 @@ export function acquireRefineSession(
       ended: false,
       leases: 0,
       output: [],
+      pendingInput: "",
       listeners: new Set(),
     };
     connections.set(identity, connection);
@@ -190,7 +198,9 @@ export function acquireRefineSession(
       return () => connection?.listeners.delete(listener);
     },
     send(data) {
-      if (data && connection.socket?.readyState === WebSocket.OPEN) connection.socket.send(data);
+      if (!data || connection.ended) return;
+      if (connection.socket?.readyState === WebSocket.OPEN) connection.socket.send(data);
+      else connection.pendingInput += data;
     },
     release() {
       if (released) return;

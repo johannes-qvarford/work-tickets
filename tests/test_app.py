@@ -4442,7 +4442,7 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
     class FakeProcess:
         def __init__(self) -> None:
             self.returncode: int | None = None
-            self.stdin = None
+            self.stdin = FakeStdin()
             self.stdout = FakeStream()
             self.terminated = False
             self.finished = asyncio.Event()
@@ -4462,6 +4462,16 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
             self.returncode = -9
             self.stdout.close()
             self.finished.set()
+
+    class FakeStdin:
+        def __init__(self) -> None:
+            self.data: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.data.append(data)
+
+        async def drain(self) -> None:
+            pass
 
     class FakeWebSocket:
         def __init__(self) -> None:
@@ -4501,6 +4511,8 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
                 break
             await asyncio.sleep(0)
         assert first_client.output == ["buffered output"]
+        await first_session.send_input("user input")
+        assert processes[0].stdin.data == [b"user input"]
 
         await registry.detach(first_session, first_client)
         second_client = FakeWebSocket()
@@ -4517,6 +4529,36 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
         assert processes[0].terminated is True
 
     asyncio.run(exercise())
+
+
+def test_refine_websocket_reports_opencode_start_failure(monkeypatch, tmp_path) -> None:
+    project_directory = tmp_path / "refine-component-start-failure"
+    project_directory.mkdir()
+
+    async def fail_to_start(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise FileNotFoundError(2, "No such file or directory", "opencode")
+
+    monkeypatch.setattr("work_tickets.refine.asyncio.create_subprocess_exec", fail_to_start)
+    with SessionLocal() as db:
+        config = _seed_jira_config(db)
+        config.browser_base_url = "https://jira.example.test"
+        config.local_projects_directory = str(tmp_path)
+        component = Component(name=project_directory.name)
+        ticket = Ticket(
+            summary="Cannot start Refine",
+            position=0,
+            jira_issue_key="WORK-710",
+            component=component.name,
+        )
+        db.add_all([component, ticket])
+        db.commit()
+        ticket_id = ticket.id
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Refine error] Could not start opencode: No such file or directory\r\n"
+        )
 
 
 def test_refine_registry_cancellation_releases_reservation_and_stops_startup(

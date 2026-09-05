@@ -107,3 +107,68 @@ test("a marked subtask reconnects with a collapsed parent and shares its socket 
     globalThis.WebSocket = previousWebSocket;
   }
 });
+
+test("queues terminal input, replays initial output, and reconnects one Jira session", () => {
+  const sockets = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    readyState = 0;
+    onopen = null;
+    onmessage = null;
+    onclose = null;
+    sent = [];
+    constructor(url) {
+      this.url = url;
+      sockets.push(this);
+    }
+    send(data) {
+      this.sent.push(data);
+    }
+    open() {
+      this.readyState = FakeWebSocket.OPEN;
+      this.onopen?.();
+    }
+    output(data) {
+      this.onmessage?.({ data });
+    }
+    close() {
+      this.readyState = 3;
+      this.onclose?.({ code: 1006 });
+    }
+  }
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  const storage = {
+    value: addActiveSession(null, "WORK-73"),
+    getItem() { return this.value; },
+    setItem(_key, value) { this.value = value; },
+    removeItem() { this.value = null; },
+  };
+  try {
+    const first = acquireRefineSession("WORK-73", "/refine/73", storage);
+    const output = [];
+    first.subscribe((value) => output.push(value));
+    first.send("before-open");
+    assert.deepEqual(sockets[0].sent, []);
+    sockets[0].open();
+    assert.deepEqual(sockets[0].sent, ["before-open"]);
+    sockets[0].output("initial output");
+    assert.deepEqual(output, ["initial output"]);
+
+    sockets[0].readyState = 3;
+    sockets[0].onclose?.({ code: 1006 });
+    assert.equal(sockets.length, 2);
+    const second = acquireRefineSession("WORK-73", "/refine/73", storage);
+    const replayed = [];
+    second.subscribe((value) => replayed.push(value));
+    assert.deepEqual(replayed, ["initial output"]);
+    second.send("after-reconnect");
+    assert.deepEqual(sockets[1].sent, []);
+    sockets[1].open();
+    assert.deepEqual(sockets[1].sent, ["after-reconnect"]);
+    first.release();
+    second.release();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
