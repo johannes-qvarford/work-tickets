@@ -275,16 +275,26 @@ class JiraClient:
         """Return all issues matching a JQL query."""
         issues: list[JiraIssue] = []
         start_at = 0
+        next_page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        is_cloud = self._conventions.deployment == "cloud"
         while True:
+            params: dict[str, str | int] = {
+                "jql": jql,
+                "maxResults": 100,
+                "fields": "summary,description,issuetype,status",
+            }
+            if is_cloud:
+                if next_page_token is not None:
+                    params["nextPageToken"] = next_page_token
+                path = self._api_path("search/jql")
+            else:
+                params["startAt"] = start_at
+                path = self._api_path("search")
             response = self._request_dict(
                 "GET",
-                self._api_path("search"),
-                params={
-                    "jql": jql,
-                    "startAt": start_at,
-                    "maxResults": 100,
-                    "fields": "summary,description,issuetype,status",
-                },
+                path,
+                params=params,
             )
             raw_issues = response.get("issues")
             if not isinstance(raw_issues, list):
@@ -299,6 +309,21 @@ class JiraClient:
                     raise JiraError("Jira returned an issue search result without a key.")
                 page.append(self._issue_from_payload(key, raw_issue))
             issues.extend(page)
+
+            if is_cloud:
+                is_last = response.get("isLast")
+                if is_last is not None and not isinstance(is_last, bool):
+                    raise JiraError("Jira returned an unexpected issue search pagination response.")
+                if is_last is True:
+                    return issues
+                new_page_token = response.get("nextPageToken")
+                if not isinstance(new_page_token, str) or not new_page_token:
+                    raise JiraError("Jira returned an unexpected issue search pagination response.")
+                if new_page_token in seen_page_tokens:
+                    raise JiraError("Jira returned a repeating issue search pagination token.")
+                seen_page_tokens.add(new_page_token)
+                next_page_token = new_page_token
+                continue
 
             total = response.get("total")
             if not page or (isinstance(total, int) and len(issues) >= total):
