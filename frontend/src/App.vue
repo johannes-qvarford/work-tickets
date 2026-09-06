@@ -69,7 +69,6 @@ const reviewActionSuccesses = ref<Record<string, string>>({});
 const busy = ref(false);
 const draggingTicketId = ref<number | null>(null);
 const dragOverTicketId = ref<number | null>(null);
-const dragOverTicketAfter = ref<boolean | null>(null);
 const newTicket = ref({ summary: "", description: "", notes: "", planned_date: null as Date | null, category_id: null as number | null, component: null as string | null, jira_reference: "" });
 const newSubtasks = ref<Array<{ summary: string; description: string; planned_date: Date | null }>>([]);
 const newCategory = ref("");
@@ -174,22 +173,21 @@ async function saveSettings() { const validate = settings.value.validate; await 
 async function sync(url: string) { await run(() => request(url, { method: "POST" }), "Jira sync complete."); }
 async function moveTicket(ticketId: number, targetIndex: number) { await run(() => request(`/api/tickets/${ticketId}/move?target_index=${targetIndex}`, { method: "POST" }), "Ticket order saved."); }
 async function moveSubtask(subtaskId: number, targetIndex: number) { await run(() => request(`/api/subtasks/${subtaskId}/move?target_index=${targetIndex}`, { method: "POST" }), "Subtask order saved."); }
-function startTicketDrag(ticketId: number) { draggingTicketId.value = ticketId; dragOverTicketId.value = null; dragOverTicketAfter.value = null; }
-function endTicketDrag() { draggingTicketId.value = null; dragOverTicketId.value = null; dragOverTicketAfter.value = null; }
+function startTicketDrag(ticketId: number) { draggingTicketId.value = ticketId; dragOverTicketId.value = null; }
+function endTicketDrag() { draggingTicketId.value = null; dragOverTicketId.value = null; }
 function clearDragState() { endTicketDrag(); clearSubtaskDragState(); }
-function overTicket(ticketId: number, afterTarget: boolean) {
+function overTicket(ticketId: number) {
   if (draggingTicketId.value !== null && draggingTicketId.value !== ticketId) {
     dragOverTicketId.value = ticketId;
-    dragOverTicketAfter.value = afterTarget;
   }
 }
-function dropTicket(ticketId: number, afterTarget: boolean) {
+function dropTicket(ticketId: number) {
   const sourceId = draggingTicketId.value;
   endTicketDrag();
   if (sourceId === null) return;
   const targetIndex = categoryFilter.value === null
-    ? dropTargetIndex(state.value.tickets, sourceId, ticketId, afterTarget)
-    : displayedDropTargetIndex(state.value.tickets, sourceId, ticketId, afterTarget, (ticket) => ticket.category_id === categoryFilter.value);
+    ? dropTargetIndex(state.value.tickets, sourceId, ticketId)
+    : displayedDropTargetIndex(state.value.tickets, sourceId, ticketId, (ticket) => ticket.category_id === categoryFilter.value);
   if (targetIndex !== null) void moveTicket(sourceId, targetIndex);
 }
 function addDraftSubtask() { newSubtasks.value.push({ summary: "", description: "", planned_date: null }); }
@@ -228,7 +226,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
     <main v-if="page === 'tickets'">
       <Card class="filter-card"><template #content><div class="filter-row"><label for="category-filter">Filter by category</label><Select id="category-filter" v-model="categoryFilter" :options="[{ id: null, name: 'All categories' }, ...state.categories]" optionLabel="name" optionValue="id" placeholder="All categories" /><Button type="button" class="view-toggle" severity="secondary" :label="ticketView === 'focus' ? 'Show Queue' : 'Show Focus'" :aria-label="ticketView === 'focus' ? 'Switch to Queue' : 'Switch to Focus'" :aria-controls="ticketView === 'focus' ? 'focus-section' : 'queue-section'" @click="switchTicketView" /><span>{{ visibleTickets.length }} tickets</span></div></template></Card>
       <section v-if="ticketView === 'focus'" id="focus-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">FOCUS</span><h2>Today</h2></div><span class="muted">Due today and overdue</span></div><div v-if="dueTickets.length" class="ticket-grid"><TicketCard v-for="ticket in dueTickets" :key="`due-${ticket.id}`" :ticket="ticket" :categories="state.categories" :components="state.components" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-check-circle"></i><strong>Nothing due right now</strong><span>Add the next useful thing when it arrives.</span></div></section>
-       <section v-if="ticketView === 'queue'" id="queue-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">QUEUE</span><h2>All tickets</h2></div><span class="muted">Drag active tickets to reorder.</span></div><div v-if="visibleTickets.length" class="ticket-grid"><TicketCard v-for="ticket in visibleTickets" :key="ticket.id" :ticket="ticket" :categories="state.categories" :components="state.components" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" :reorderable="true" :dragging-ticket-id="draggingTicketId" :drag-over-ticket-id="dragOverTicketId" :drag-over-ticket-after="dragOverTicketAfter" @ticket-drag-start="startTicketDrag" @ticket-drag-end="endTicketDrag" @ticket-drag-over="overTicket" @ticket-drop="dropTicket" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-inbox"></i><strong>No tickets yet</strong><span>Create a ticket to start your queue.</span></div></section>
+        <section v-if="ticketView === 'queue'" id="queue-section" class="ticket-section"><div class="section-heading"><div><span class="eyebrow">QUEUE</span><h2>All tickets</h2></div><span class="muted">Drag active tickets to reorder.</span></div><div v-if="visibleTickets.length" class="ticket-grid"><TicketCard v-for="ticket in visibleTickets" :key="ticket.id" :ticket="ticket" :categories="state.categories" :components="state.components" :browser-base-url="state.jira_config?.browser_base_url || ''" :category-name="categoryName(ticket.category_id)" :reorderable="true" :dragging-ticket-id="draggingTicketId" :drag-over-ticket-id="dragOverTicketId" @ticket-drag-start="startTicketDrag" @ticket-drag-end="endTicketDrag" @ticket-drag-over="overTicket" @ticket-drop="dropTicket" @toggle="toggle(`/api/tickets/${ticket.id}/complete`)" @sync="sync(`/api/tickets/${ticket.id}/sync`)" @remove="remove(`/api/tickets/${ticket.id}`)" @save="saveTicket" @save-subtask="saveSubtask" @add-subtask="addSubtask" @toggle-subtask="toggle(`/api/subtasks/${$event}/complete`)" @remove-subtask="remove(`/api/subtasks/${$event}`)" @move-subtask="moveSubtask" /></div><div v-else class="empty-state"><i class="pi pi-inbox"></i><strong>No tickets yet</strong><span>Create a ticket to start your queue.</span></div></section>
      </main>
 
      <main v-else-if="page === 'reviews'" class="narrow">
