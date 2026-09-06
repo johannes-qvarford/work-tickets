@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -112,6 +113,17 @@ class Ticket(Base):
             Ticket.id,
         ),
     )
+
+
+class OpenCodeSession(Base):
+    __tablename__ = "opencode_sessions"
+    __table_args__ = (UniqueConstraint("jira_key", "kind"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    jira_key: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(40))
+    session_id: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 engine = create_engine(

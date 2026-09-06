@@ -47,6 +47,7 @@ _REQUIRED_COLUMNS = {
         "category_id",
         "component",
     },
+    "opencode_sessions": {"id", "jira_key", "kind", "session_id", "created_at"},
 }
 _INITIAL_REQUIRED_COLUMNS = {
     "categories": _REQUIRED_COLUMNS["categories"],

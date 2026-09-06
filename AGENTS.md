@@ -53,7 +53,7 @@ uv run pytest
   after frontend changes; the generated static assets are packaged with the Python wheel.
 - Use the FastAPI JSON endpoints under `/api` for SPA data and mutations.
 - Keep local-only workflow fields separate from future Jira-owned fields.
-- OpenCode integration is intentionally deferred.
+- OpenCode refinement sessions are persisted by Jira key and resumed after server restarts.
 - Run the complete local checks before committing changes.
 
 ## Product rules

@@ -8,15 +8,18 @@ import signal
 import subprocess
 from collections import deque
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from fastapi import WebSocket
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from starlette.websockets import WebSocketDisconnect
 
 from .jira_service import canonicalize_jira_key
 from .local_projects import is_safe_local_component_name
-from .models import JiraConfig, Ticket
+from .models import JiraConfig, OpenCodeSession, SessionLocal, Ticket
 from .pty_terminal import (
     DEFAULT_COLUMNS,
     DEFAULT_ROWS,
@@ -35,6 +38,10 @@ from .pty_terminal import (
 
 class RefineError(Exception):
     """An expected, user-facing Refine error."""
+
+
+REFINE_SESSION_KIND = "refine"
+SESSION_DISCOVERY_WINDOW = 60.0
 
 
 class _ClientReservation:
@@ -90,6 +97,157 @@ def refine_working_directory(ticket: Ticket, config: JiraConfig | None) -> Path:
     return resolved_project
 
 
+def get_opencode_session_id(jira_key: str, kind: str) -> str | None:
+    """Return the persisted OpenCode session for a Jira key and session kind."""
+    try:
+        with SessionLocal() as db:
+            session = db.scalar(
+                select(OpenCodeSession).where(
+                    OpenCodeSession.jira_key == canonicalize_jira_key(jira_key),
+                    OpenCodeSession.kind == kind,
+                )
+            )
+            return session.session_id if session is not None and session.session_id else None
+    except SQLAlchemyError:
+        return None
+
+
+def save_opencode_session_id(jira_key: str, kind: str, session_id: str) -> str | None:
+    """Persist the first session discovered for a Jira key and kind."""
+    if not session_id:
+        return None
+    canonical_key = canonicalize_jira_key(jira_key)
+    try:
+        with SessionLocal() as db:
+            existing = db.scalar(
+                select(OpenCodeSession).where(
+                    OpenCodeSession.jira_key == canonical_key,
+                    OpenCodeSession.kind == kind,
+                )
+            )
+            if existing is not None:
+                return existing.session_id
+            db.add(
+                OpenCodeSession(
+                    jira_key=canonical_key,
+                    kind=kind,
+                    session_id=session_id,
+                )
+            )
+            db.commit()
+            return session_id
+    except IntegrityError:
+        # Another discovery task won the unique Jira-key/kind race.
+        return get_opencode_session_id(canonical_key, kind)
+    except SQLAlchemyError:
+        return None
+
+
+def _session_timestamp(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        return timestamp / 1000 if timestamp > 100_000_000_000 else timestamp
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def _session_created_at(entry: dict[str, object]) -> float | None:
+    for key in ("created", "created_at", "createdAt"):
+        timestamp = _session_timestamp(entry.get(key))
+        if timestamp is not None:
+            return timestamp
+    time_value = entry.get("time")
+    if isinstance(time_value, dict):
+        for key in ("created", "created_at", "createdAt"):
+            timestamp = _session_timestamp(time_value.get(key))
+            if timestamp is not None:
+                return timestamp
+    return None
+
+
+def _parse_session_list(output: bytes) -> list[dict[str, object]]:
+    try:
+        parsed: object = json.loads(output.decode())
+    except (UnicodeDecodeError, ValueError):
+        return []
+    if isinstance(parsed, dict):
+        parsed = parsed.get("sessions")
+    if not isinstance(parsed, list):
+        return []
+    return [entry for entry in parsed if isinstance(entry, dict)]
+
+
+async def _list_opencode_sessions(working_directory: Path) -> list[dict[str, object]]:
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "opencode",
+            "session",
+            "list",
+            "--format",
+            "json",
+            cwd=str(working_directory),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        output, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+    except AttributeError:
+        return []
+    except asyncio.CancelledError:
+        if process is not None:
+            await _terminate_and_reap(process)
+        raise
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        if process is not None:
+            await _terminate_and_reap(process)
+        return []
+    if process is None or process.returncode != 0 or not isinstance(output, bytes):
+        return []
+    return _parse_session_list(output)
+
+
+async def _terminate_and_reap(process: asyncio.subprocess.Process) -> None:
+    try:
+        await _stop_process(process)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        pass
+
+
+async def _discover_opencode_session(
+    jira_key: str,
+    kind: str,
+    working_directory: Path,
+    pty_created_at: float,
+) -> None:
+    deadline = pty_created_at + SESSION_DISCOVERY_WINDOW
+    while True:
+        sessions = await _list_opencode_sessions(working_directory)
+        candidates = [
+            (entry.get("id"), created_at)
+            for entry in sessions
+            if isinstance(entry.get("id"), str)
+            and entry.get("id")
+            and (created_at := _session_created_at(entry)) is not None
+            and pty_created_at <= created_at <= deadline
+        ]
+        if candidates:
+            session_id, _ = max(candidates, key=lambda candidate: candidate[1])
+            if isinstance(session_id, str) and save_opencode_session_id(jira_key, kind, session_id):
+                return
+
+        remaining = deadline - datetime.now(UTC).timestamp()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(0.5, remaining))
+
+
 async def send_error(websocket: WebSocket, message: str) -> None:
     try:
         await websocket.send_text(f"\r\n[Refine error] {message}\r\n")
@@ -134,12 +292,14 @@ class RefineSession:
         stale_after: float,
         columns: int = DEFAULT_COLUMNS,
         rows: int = DEFAULT_ROWS,
+        session_kind: str = REFINE_SESSION_KIND,
     ) -> None:
         self.jira_key = jira_key
         self.prompt = prompt
         self.working_directory = working_directory
         self._on_finished = on_finished
         self._stale_after = stale_after
+        self.session_kind = session_kind
         self.columns = columns
         self.rows = rows
         self._lock = asyncio.Lock()
@@ -154,12 +314,19 @@ class RefineSession:
         self._ready = asyncio.Event()
         self.finished = asyncio.Event()
         self._stale_task: asyncio.Task[None] | None = None
+        self._discovery_task: asyncio.Task[None] | None = None
         self._task: asyncio.Task[None] | None = None
         self._master_fd = -1
         self._slave_fd = -1
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
+
+    def _discovery_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._discovery_task is task:
+            self._discovery_task = None
+        if not task.cancelled():
+            task.exception()
 
     async def reserve_client(self, reservation: _ClientReservation | None = None) -> bool:
         async with self._lock:
@@ -190,11 +357,17 @@ class RefineSession:
                 startup_task = None
             elif startup_task is not None and not startup_task.done():
                 startup_task.cancel()
+            discovery_task = self._discovery_task
+            self._discovery_task = None
+            if discovery_task is not None and not discovery_task.done():
+                discovery_task.cancel()
 
         if stale_task is not None and stale_task is not asyncio.current_task():
             await asyncio.gather(stale_task, return_exceptions=True)
         if startup_task is not None:
             await asyncio.gather(startup_task, return_exceptions=True)
+        if discovery_task is not None and discovery_task is not asyncio.current_task():
+            await asyncio.gather(discovery_task, return_exceptions=True)
 
         process = self._process
         if process is not None:
@@ -284,10 +457,15 @@ class RefineSession:
                         "LINES": str(self.rows),
                     }
                 )
+                pty_created_at = datetime.now(UTC).timestamp()
+                saved_session_id = get_opencode_session_id(self.jira_key, self.session_kind)
+                command = (
+                    ("opencode", "--session", saved_session_id)
+                    if saved_session_id is not None
+                    else ("opencode", "--prompt", self.prompt)
+                )
                 process = await asyncio.create_subprocess_exec(
-                    "opencode",
-                    "--prompt",
-                    self.prompt,
+                    *command,
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
@@ -314,6 +492,17 @@ class RefineSession:
             self._ready.set()
             if self._stopping:
                 return
+            if saved_session_id is None:
+                discovery_task = asyncio.create_task(
+                    _discover_opencode_session(
+                        self.jira_key,
+                        self.session_kind,
+                        self.working_directory,
+                        pty_created_at,
+                    )
+                )
+                self._discovery_task = discovery_task
+                discovery_task.add_done_callback(self._discovery_task_done)
             await self._monitor_process(process)
         finally:
             self._ready.set()

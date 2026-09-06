@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
@@ -66,6 +67,7 @@ from work_tickets.models import (  # noqa: E402
     CategoryComponent,
     Component,
     JiraConfig,
+    OpenCodeSession,
     SessionLocal,
     Ticket,
     engine,
@@ -4978,6 +4980,8 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
     processes: list[FakeProcess] = []
 
     async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        if args[1:3] == ("session", "list"):
+            raise OSError("session listing unavailable")
         del args, kwargs
         process = FakeProcess()
         processes.append(process)
@@ -5228,6 +5232,236 @@ def test_canonicalize_jira_key_is_used_for_storage_and_prompt() -> None:
     )
 
 
+def test_opencode_session_discovery_persists_newest_session_in_the_window(monkeypatch) -> None:
+    pty_created_at = time.time()
+
+    async def list_sessions(_working_directory: Path) -> list[dict[str, object]]:
+        return [
+            {"id": "old", "time": {"created": pty_created_at - 1}},
+            {"id": "first", "time": {"created": pty_created_at + 1}},
+            {"id": "newest", "time": {"created": (pty_created_at + 2) * 1000}},
+            {"id": "too-late", "time": {"created": pty_created_at + 61}},
+            {"id": "malformed", "time": {"created": "not-a-time"}},
+        ]
+
+    monkeypatch.setattr(refine, "_list_opencode_sessions", list_sessions)
+
+    async def exercise() -> None:
+        await refine._discover_opencode_session(
+            "work-799", refine.REFINE_SESSION_KIND, Path("/missing"), pty_created_at
+        )
+
+    asyncio.run(exercise())
+    with SessionLocal() as db:
+        session = db.scalar(
+            select(OpenCodeSession).where(
+                OpenCodeSession.jira_key == "WORK-799",
+                OpenCodeSession.kind == refine.REFINE_SESSION_KIND,
+            )
+        )
+        assert session is not None
+        assert session.session_id == "newest"
+
+
+def test_opencode_session_discovery_handles_malformed_output_and_subprocess_failure(
+    monkeypatch, tmp_path
+) -> None:
+    assert refine._parse_session_list(b"not json") == []
+    assert refine._parse_session_list(b'{"sessions": "not a list"}') == []
+
+    async def fail_to_list(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise FileNotFoundError(2, "No such file or directory", "opencode")
+
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", fail_to_list)
+    assert asyncio.run(refine._list_opencode_sessions(tmp_path)) == []
+
+    async def no_sessions(_working_directory: Path) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr(refine, "_list_opencode_sessions", no_sessions)
+    monkeypatch.setattr(refine, "SESSION_DISCOVERY_WINDOW", 0.0)
+    asyncio.run(
+        refine._discover_opencode_session(
+            "WORK-802", refine.REFINE_SESSION_KIND, tmp_path, time.time()
+        )
+    )
+    assert refine.get_opencode_session_id("WORK-802", refine.REFINE_SESSION_KIND) is None
+
+
+def test_opencode_session_discovery_continues_after_process_exit(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(refine, "SESSION_DISCOVERY_WINDOW", 1.0)
+    list_calls = 0
+
+    class MainProcess:
+        pid = None
+        returncode = 0
+        stdin = None
+
+        class _Output:
+            async def read(self, size: int) -> bytes:
+                del size
+                return b""
+
+        stdout = _Output()
+
+        async def wait(self) -> int:
+            return 0
+
+    class ListProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return b"[]", b""
+            return (
+                json.dumps(
+                    [{"id": "ses_delayed", "time": {"created": (time.time() + 0.1) * 1000}}]
+                ).encode(),
+                b"",
+            )
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object):
+        del kwargs
+        return ListProcess() if args[1:3] == ("session", "list") else MainProcess()
+
+    async def on_finished(_session: refine.RefineSession) -> None:
+        pass
+
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def exercise() -> None:
+        session = refine.RefineSession("WORK-803", "prompt", tmp_path, on_finished, stale_after=1)
+        session.start()
+        await asyncio.wait_for(session.finished.wait(), timeout=1)
+        assert session._discovery_task is not None
+        await asyncio.wait_for(session._discovery_task, timeout=1)
+
+    asyncio.run(exercise())
+    assert refine.get_opencode_session_id("WORK-803", refine.REFINE_SESSION_KIND) == "ses_delayed"
+
+
+def test_session_list_cancellation_terminates_and_reaps_process(monkeypatch, tmp_path) -> None:
+    class ListProcess:
+        pid = None
+        returncode: int | None = None
+        stdout = None
+        stderr = None
+
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.reaped = asyncio.Event()
+            self.terminated = False
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            self.started.set()
+            await asyncio.Future[None]()
+            return b"", b""
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        async def wait(self) -> int:
+            self.reaped.set()
+            return self.returncode or 0
+
+    process = ListProcess()
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> ListProcess:
+        del args, kwargs
+        return process
+
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(refine._list_opencode_sessions(tmp_path))
+        await process.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+    assert process.terminated is True
+    assert process.reaped.is_set()
+
+
+def test_stop_if_idle_cancels_discovery_task() -> None:
+    async def exercise() -> None:
+        session = refine.RefineSession(
+            "WORK-804", "prompt", Path("/tmp"), lambda _session: asyncio.sleep(0), stale_after=1
+        )
+
+        async def pending_discovery() -> None:
+            await asyncio.Future[None]()
+
+        discovery_task = asyncio.create_task(pending_discovery())
+        session._discovery_task = discovery_task
+
+        await session.stop_if_idle()
+
+        assert discovery_task.cancelled()
+        assert session._discovery_task is None
+
+    asyncio.run(exercise())
+
+
+def test_opencode_session_mapping_is_first_write_wins() -> None:
+    assert refine.save_opencode_session_id("work-800", "refine", "session-1") == "session-1"
+    assert refine.save_opencode_session_id("WORK-800", "refine", "session-2") == "session-1"
+    assert refine.get_opencode_session_id("work-800", "refine") == "session-1"
+    assert refine.save_opencode_session_id("WORK-800", "review", "session-3") == "session-3"
+
+
+def test_refine_resumes_with_saved_opencode_session(monkeypatch, tmp_path) -> None:
+    with SessionLocal() as db:
+        db.add(
+            OpenCodeSession(
+                jira_key="WORK-801",
+                kind=refine.REFINE_SESSION_KIND,
+                session_id="ses_saved",
+            )
+        )
+        db.commit()
+
+    class FakeStream:
+        async def read(self, size: int) -> bytes:
+            del size
+            return b""
+
+    class FakeProcess:
+        pid = None
+        returncode = 0
+        stdin = None
+        stdout = FakeStream()
+
+        async def wait(self) -> int:
+            return 0
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        calls.append((args, kwargs))
+        return FakeProcess()
+
+    async def on_finished(_session: refine.RefineSession) -> None:
+        pass
+
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    async def exercise() -> None:
+        session = refine.RefineSession(
+            "work-801", "must not be used", tmp_path, on_finished, stale_after=1
+        )
+        session.start()
+        await asyncio.wait_for(session.finished.wait(), timeout=1)
+
+    asyncio.run(exercise())
+    assert calls[0][0] == ("opencode", "--session", "ses_saved")
+
+
 def test_refine_registry_removes_sessions_after_process_exit(monkeypatch, tmp_path) -> None:
     class FakeStream:
         async def read(self, size: int) -> bytes:
@@ -5268,6 +5502,8 @@ def test_refine_registry_removes_sessions_after_process_exit(monkeypatch, tmp_pa
     processes: list[FakeProcess] = []
 
     async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
+        if args[1:3] == ("session", "list"):
+            raise OSError("session listing unavailable")
         del args, kwargs
         process = FakeProcess()
         processes.append(process)
@@ -5336,6 +5572,8 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_
 
     async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
         calls.append((args, kwargs))
+        if args[1:3] == ("session", "list"):
+            raise OSError("session listing unavailable")
         assert isinstance(kwargs["stdin"], int)
         assert kwargs["stdout"] == kwargs["stdin"]
         assert kwargs["stderr"] == kwargs["stdin"]
@@ -5401,7 +5639,7 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_
             "\r\n[Refine error] Refine is available only for tickets synced to Jira.\r\n"
         )
 
-    assert [call[0] for call in calls] == [
+    assert [call[0] for call in calls if call[0][1] == "--prompt"] == [
         ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-700"),
         ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-701"),
     ]
