@@ -374,7 +374,6 @@ def fetch_reviews(
     }
     jql = (
         f"project = {_jql_value(config.project_key)} "
-        f"AND issuetype = {_jql_value(config.issue_type)} "
         f"AND status = {_jql_value(config.in_review_status)} "
         "AND assignee = currentUser() ORDER BY key"
     )

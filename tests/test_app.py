@@ -1452,7 +1452,10 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
             return [
                 JiraIssue(key="WORK-501", summary="Local review", status_name="Awaiting Review"),
                 JiraIssue(
-                    key="WORK-502", summary="Remote-only review", status_name="Awaiting Review"
+                    key="WORK-502",
+                    summary="Remote-only review",
+                    issue_type_name="Bug",
+                    status_name="Awaiting Review",
                 ),
             ]
 
@@ -1463,7 +1466,7 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
                 key=key,
                 summary="Updated local review",
                 description="Review details: https://gitlab.example/group/repository/-/merge_requests/1234.",
-                issue_type_name="Story",
+                issue_type_name="Bug",
                 status_name="Awaiting Review",
             )
 
@@ -1509,11 +1512,11 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
 
     assert response.status_code == 200
     assert calls == [
-        'project = "WORK" AND issuetype = "Story" AND status = "Awaiting Review" '
-        "AND assignee = currentUser() ORDER BY key"
+        'project = "WORK" AND status = "Awaiting Review" AND assignee = currentUser() ORDER BY key'
     ]
     reviews = response.json()["reviews"]
     assert reviews[0]["summary"] == "Updated local review"
+    assert reviews[0]["issue_type_name"] == "Bug"
     assert reviews[0]["local_ticket"]["summary"] == "Local ticket"
     assert reviews[0]["error"] is None
     assert reviews[0]["merge_requests"] == [
