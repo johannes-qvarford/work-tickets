@@ -12,8 +12,8 @@ run_check() {
 run_check uv run ruff check .
 run_check uv run ruff format --check .
 run_check uv run mypy work_tickets
-run_check uv run pytest
 run_check npm run check --prefix frontend
 run_check npm run build --prefix frontend
+run_check uv run pytest
 
 printf '\n[pre-commit] All checks passed.\n'

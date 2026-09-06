@@ -15,10 +15,14 @@ A local-first personal ticket workflow for prioritizing work and syncing selecte
 
 ```sh
 uv sync
+npm install --prefix frontend
+npm run build --prefix frontend
 uv run uvicorn work_tickets.app:app --reload
 ```
 
-Then open <http://127.0.0.1:8000>. The root route serves the Vue/PrimeVue single-page
+The frontend build is required before starting the backend because it creates the generated
+files served from `work_tickets/static/`. Then open <http://127.0.0.1:8000>. The root route
+serves the Vue/PrimeVue single-page
 application. It provides separate hash-routed pages for tickets, ticket creation,
 categories, and application settings.
 
@@ -38,12 +42,13 @@ ticket synchronization and imports.
 Checks:
 
 ```sh
+npm install --prefix frontend
+npm run check --prefix frontend
+npm run build --prefix frontend
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy work_tickets
 uv run pytest
-npm run check --prefix frontend
-npm run build --prefix frontend
 ```
 
 Install the repository's verification hook once per checkout. The command can be run

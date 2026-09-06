@@ -39,3 +39,6 @@ build-backend = "hatchling.build"
  [tool.hatch.build.targets.wheel]
  packages = ["work_tickets"]
  artifacts = ["work_tickets/static"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["work_tickets/static"]
