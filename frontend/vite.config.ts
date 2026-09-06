@@ -6,6 +6,7 @@ export default defineConfig({
   build: {
     outDir: "../work_tickets/static",
     emptyOutDir: true,
+    target: "es2021",
   },
   server: { port: 5173 },
 });
