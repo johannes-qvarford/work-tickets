@@ -5216,11 +5216,20 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_
 
     async def fake_create_subprocess_exec(*args: object, **kwargs: object) -> FakeProcess:
         calls.append((args, kwargs))
-        assert kwargs["stdin"] == asyncio.subprocess.PIPE
-        assert kwargs["stdout"] == asyncio.subprocess.PIPE
-        assert kwargs["stderr"] == asyncio.subprocess.STDOUT
+        assert isinstance(kwargs["stdin"], int)
+        assert kwargs["stdout"] == kwargs["stdin"]
+        assert kwargs["stderr"] == kwargs["stdin"]
         assert kwargs["cwd"] == str(project_directory)
-        assert kwargs["env"] == os.environ
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert (
+            environment.items()
+            >= {
+                **os.environ,
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+            }.items()
+        )
         return FakeProcess()
 
     monkeypatch.setattr(
@@ -5264,9 +5273,9 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_
         unsynced_id = unsynced.id
 
     with client.websocket_connect(f"/api/tickets/{parent_id}/refine") as websocket:
-        assert websocket.receive_text() == "\r\n[Refine exited with code 0]\r\n"
+        assert websocket.receive_bytes().decode() == "\r\n[Refine exited with code 0]\r\n"
     with client.websocket_connect(f"/api/tickets/{child_id}/refine") as websocket:
-        assert websocket.receive_text() == "\r\n[Refine exited with code 0]\r\n"
+        assert websocket.receive_bytes().decode() == "\r\n[Refine exited with code 0]\r\n"
     with client.websocket_connect(f"/api/tickets/{unsynced_id}/refine") as websocket:
         assert websocket.receive_text() == (
             "\r\n[Refine error] Refine is available only for tickets synced to Jira.\r\n"
@@ -5276,6 +5285,90 @@ def test_refine_websocket_launches_only_with_synced_jira_items(monkeypatch, tmp_
         ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-700"),
         ("opencode", "--prompt", "Refine https://jira.example.test/context/browse/WORK-701"),
     ]
+
+
+def test_refine_websocket_bridges_a_real_pty_terminal(monkeypatch, tmp_path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    executable = fake_bin / "opencode"
+    executable.write_text(
+        """#!/usr/bin/env python3
+import fcntl
+import os
+import signal
+import struct
+import termios
+import tty
+
+def report_size():
+    rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\\0" * 8))
+    os.write(1, (f"size:{cols}x{rows}\\r\\n").encode())
+
+signal.signal(signal.SIGWINCH, lambda _, __: report_size())
+tty.setraw(0)
+os.write(1, b"ready\\r\\n")
+os.write(1, ("cwd:" + os.getcwd() + "\\r\\n").encode())
+os.write(1, ("term:" + os.environ.get("TERM", "") + "\\r\\n").encode())
+report_size()
+while data := os.read(0, 4096):
+    os.write(1, b"child:" + data)
+    if data == b"exit\\r\\n":
+        break
+"""
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    project_directory = tmp_path / "pty-refine-component"
+    project_directory.mkdir()
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        if config is None:
+            config = JiraConfig(
+                id=1,
+                base_url="https://api.example.test",
+                email="person@example.test",
+                api_token="test-token",
+                project_key="WORK",
+            )
+            db.add(config)
+        config.browser_base_url = "https://jira.example.test/context"
+        config.local_projects_directory = str(tmp_path)
+        component = Component(name="pty-refine-component")
+        ticket = Ticket(
+            summary="PTY Refine",
+            position=0,
+            jira_issue_key="WORK-720",
+            component=component.name,
+        )
+        db.add_all([component, ticket])
+        db.commit()
+        ticket_id = ticket.id
+
+    def receive_until(websocket, expected: bytes) -> bytes:
+        output = b""
+        for _ in range(20):
+            output += websocket.receive_bytes()
+            if expected in output:
+                return output
+        raise AssertionError(f"Did not receive {expected!r}; got {output!r}")
+
+    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine?cols=100&rows=40") as websocket:
+        output = receive_until(websocket, b"ready\r\n")
+        for expected in (b"cwd:", b"term:xterm-256color\r\n", b"size:100x40\r\n"):
+            if expected not in output:
+                output += receive_until(websocket, expected)
+        assert b"cwd:" + str(project_directory).encode() + b"\r\n" in output
+
+        websocket.send_text(json.dumps({"type": "resize", "cols": 120, "rows": 50}))
+        assert b"size:120x50\r\n" in receive_until(websocket, b"size:120x50\r\n")
+
+        websocket.send_text(json.dumps({"type": "input", "data": "from browser\r\n"}))
+        assert b"child:from browser\r\n" in receive_until(websocket, b"child:from browser\r\n")
+
+        websocket.send_text(json.dumps({"type": "input", "data": "exit\r\n"}))
+        assert b"child:exit\r\n" in receive_until(websocket, b"child:exit\r\n")
+        assert websocket.receive_bytes() == b"\r\n[Refine exited with code 0]\r\n"
 
 
 def test_refine_websocket_reports_malformed_browser_url() -> None:
