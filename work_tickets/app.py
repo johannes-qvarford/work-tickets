@@ -79,6 +79,7 @@ class SubtaskPayload(BaseModel):
     summary: str = ""
     description: str = ""
     planned_date: date | None = None
+    component: str | None = None
 
 
 class CategoryPayload(BaseModel):
@@ -276,6 +277,7 @@ def api_create_subtask(
         payload.summary,
         payload.description,
         payload.planned_date.isoformat() if payload.planned_date else "",
+        payload.component,
         db,
     )
     return _service_json_response(response, db)
@@ -312,9 +314,11 @@ def api_update_subtask(
         payload.summary,
         payload.description,
         payload.planned_date.isoformat() if payload.planned_date else "",
+        payload.component,
         db,
         summary_provided="summary" in payload.model_fields_set,
         description_provided="description" in payload.model_fields_set,
+        component_provided="component" in payload.model_fields_set,
     )
     return _service_json_response(response, db)
 

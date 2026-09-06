@@ -61,7 +61,7 @@ const emit = defineEmits<{
   saveSubtask: [subtask: Ticket];
   toggleSubtask: [id: number];
   removeSubtask: [id: number];
-  addSubtask: [ticket: Ticket, draft: { summary: string; description: string; planned_date: string }];
+  addSubtask: [ticket: Ticket, draft: { summary: string; description: string; planned_date: string; component: string | null }];
   ticketDragStart: [id: number];
   ticketDragEnd: [];
   ticketDragOver: [id: number];
@@ -69,7 +69,7 @@ const emit = defineEmits<{
   moveSubtask: [id: number, targetIndex: number];
 }>();
 const expanded = ref(false);
-const draftSubtask = ref({ summary: "", description: "", planned_date: "" });
+const draftSubtask = ref({ summary: "", description: "", planned_date: "", component: null as string | null });
 const activeSubtasks = computed(() => props.ticket.subtasks.filter((subtask) => !subtask.local_completed));
 
 const ticketCanDrag = computed(() => Boolean(props.reorderable && !props.ticket.local_completed));
@@ -109,7 +109,7 @@ function jiraIssueUrl(issueKey: string | null) {
 function saveDraftSubtask() {
   if (!draftSubtask.value.summary.trim()) return;
   emit("addSubtask", props.ticket, draftSubtask.value);
-  draftSubtask.value = { summary: "", description: "", planned_date: "" };
+  draftSubtask.value = { summary: "", description: "", planned_date: "", component: null };
 }
 
 function onTicketDragStart(event: DragEvent) {
@@ -292,6 +292,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
               <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" @update:model-value="saveSubtaskChange(subtask)" />
               <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="setSubtaskPlannedDate(subtask, todayValue())" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="setSubtaskPlannedDate(subtask, null)" />
             </div>
+            <label v-if="!subtask.local_completed" class="component-field">Component<ComponentSelect v-model="subtask.component" :categories="categories" :components="components" :category-id="ticket.category_id" @update:model-value="saveSubtaskChange(subtask)" /></label>
             <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text :aria-label="subtask.local_completed ? 'Mark subtask active' : 'Mark subtask done'" @click="emit('toggleSubtask', subtask.id)" />
             <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text aria-label="Delete subtask" @click="emit('removeSubtask', subtask.id)" />
             <Textarea v-if="!subtask.local_completed" v-model="subtask.description" rows="2" autoResize :aria-label="`Description for subtask ${subtask.summary}`" :disabled="!!subtask.jira_issue_key" :class="{ 'jira-owned-field': subtask.jira_issue_key }" @update:model-value="saveSubtaskChange(subtask)" />
@@ -300,6 +301,7 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
         <div v-if="!ticket.local_completed" class="subtask-row">
           <InputText v-model="draftSubtask.summary" placeholder="New subtask" />
           <div class="date-control"><InputText v-model="draftSubtask.planned_date" type="date" aria-label="New subtask planned date" /><Button type="button" label="Today" text aria-label="Set new subtask planned date to today" @click="draftSubtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove new subtask planned date" :disabled="!draftSubtask.planned_date" @click="draftSubtask.planned_date = ''" /></div>
+          <label class="component-field">Component<ComponentSelect v-model="draftSubtask.component" :categories="categories" :components="components" :category-id="ticket.category_id" /></label>
           <Button label="Add" icon="pi pi-plus" @click="saveDraftSubtask" />
         </div>
       </div>
