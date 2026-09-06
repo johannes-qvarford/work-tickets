@@ -101,6 +101,7 @@ def test_homepage_is_available_and_legacy_frontend_is_removed() -> None:
     response = client.get("/")
 
     assert response.status_code == 200
+    assert response.text.startswith("<!DOCTYPE html>")
     assert '<div id="app"></div>' in response.text
     assert 'type="module"' in response.text
     assert client.get("/legacy").status_code == 404
