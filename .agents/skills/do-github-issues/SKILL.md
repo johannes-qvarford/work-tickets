@@ -21,6 +21,151 @@ Process GitHub issues sequentially. The orchestrator owns the loop and delegates
 - Do not expose credentials, tokens, or secret values in prompts, logs, or reports.
 - Never use force-push, destructive Git commands, merge bypasses, or skipped hooks/checks unless the user explicitly authorizes the specific action.
 
+## Command Runbook
+
+Run the commands below in order, substituting the issue number and branch slug where shown. The fenced snippets are stages of one shell session so variables set earlier remain available. If a later snippet is copied independently, rerun its setup commands and honor its `: "${VAR:?}"` guards; never let an unset variable become an empty `gh` or `git` argument. A command that fails is a blocker; do not continue by guessing or by hiding the failure with `|| true`.
+
+```sh
+set -eu
+gh auth status
+gh repo view --json nameWithOwner,defaultBranchRef
+REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')"
+: "${REPO:?Repository lookup returned no repository}"
+: "${DEFAULT_BRANCH:?Repository lookup returned no default branch}"
+git status --short --branch
+test -z "$(git status --porcelain)" || {
+  printf '%s\n' 'Working tree is not clean; preserve those changes and stop before branching.' >&2
+  exit 1
+}
+git fetch origin "$DEFAULT_BRANCH"
+git switch "$DEFAULT_BRANCH"
+git pull --ff-only origin "$DEFAULT_BRANCH"
+gh issue list --repo "$REPO" --state open --limit 100 \
+  --json number,title,url,labels,assignees,state,updatedAt
+```
+
+For the selected issue, inspect its complete context before changing files:
+
+```sh
+ISSUE=123
+: "${REPO:?Set REPO before inspecting an issue}"
+: "${ISSUE:?Set ISSUE to the selected issue number}"
+gh issue view "$ISSUE" --repo "$REPO" --comments \
+  --json number,title,url,body,state,labels,assignees,comments
+```
+
+Before creating or resuming a branch, search for an existing issue branch and Pull Request. Classify every clearly matching Pull Request before continuing:
+
+- An open Pull Request is resumed after the read-only inspection below; do not create a duplicate.
+- A merged Pull Request must not get a duplicate. Verify the issue state, treat the issue as already covered, and report that outcome.
+- A closed and unmerged Pull Request is not replaced automatically. Stop and report the exact Pull Request and the intervention needed.
+- If no matching Pull Request exists, proceed normally with the issue branch.
+
+```sh
+: "${REPO:?Set REPO before searching for existing work}"
+: "${DEFAULT_BRANCH:?Set DEFAULT_BRANCH before searching for existing work}"
+: "${ISSUE:?Set ISSUE before searching for existing work}"
+BRANCH="issue/$ISSUE-short-slug"
+: "${BRANCH:?Set BRANCH before searching for existing work}"
+gh pr list --repo "$REPO" --state all --head "$BRANCH" \
+  --json number,title,url,state,isDraft,headRefName,baseRefName
+git branch --list "$BRANCH"
+```
+
+For an open Pull Request, set `PR` to the matching number and perform this read-only inspection before continuing. It records the Pull Request metadata, the branch history, and the complete branch diff against the default branch:
+
+```sh
+: "${REPO:?Set REPO before inspecting a Pull Request}"
+: "${DEFAULT_BRANCH:?Set DEFAULT_BRANCH before inspecting a Pull Request}"
+: "${BRANCH:?Set BRANCH before inspecting a Pull Request}"
+PR=123
+: "${PR:?Set PR to the matching open Pull Request number}"
+gh pr view "$PR" --repo "$REPO" \
+  --json number,title,url,state,isDraft,baseRefName,headRefName,mergedAt,closedAt,mergeCommit,mergeStateStatus,reviewDecision,statusCheckRollup,commits,files,closingIssuesReferences
+git log --oneline --decorate --graph "$BRANCH"
+git diff --stat "$DEFAULT_BRANCH...$BRANCH"
+git diff "$DEFAULT_BRANCH...$BRANCH"
+```
+
+For a merged Pull Request, verify the issue state before treating it as already covered:
+
+```sh
+: "${REPO:?Set REPO before verifying a merged Pull Request}"
+: "${ISSUE:?Set ISSUE before verifying a merged Pull Request}"
+PR=123
+: "${PR:?Set PR to the matching merged Pull Request number}"
+gh issue view "$ISSUE" --repo "$REPO" --json number,title,url,state,closedAt
+```
+
+For a new branch when no matching Pull Request exists, run `git switch -c "$BRANCH" "$DEFAULT_BRANCH"`. For a resumed open branch, inspect it and its Pull Request first, then run `git switch "$BRANCH"`; never silently discard its commits or working-tree changes. A closed and unmerged Pull Request stops this workflow rather than proceeding to branch creation or Pull Request creation.
+
+After local verification passes, inspect the final diff, stage only issue files, and create or resume exactly one Pull Request:
+
+```sh
+: "${REPO:?Set REPO before staging and creating a Pull Request}"
+: "${DEFAULT_BRANCH:?Set DEFAULT_BRANCH before staging and creating a Pull Request}"
+: "${ISSUE:?Set ISSUE before staging and creating a Pull Request}"
+: "${BRANCH:?Set BRANCH before staging and creating a Pull Request}"
+git status --short --branch
+git diff --check
+git diff --name-only
+git add -- path/to/issue-file path/to/test-file
+git diff --cached --check
+git diff --cached --stat
+git commit -m "Implement issue #$ISSUE"
+git push --set-upstream origin "$BRANCH"
+PR_BODY="$(printf '%s\n' \
+  '## Summary' \
+  '- [Replace with a concise summary of the implemented change.]' \
+  '' \
+  '## Validation' \
+  '- [Replace with the local checks run and their results.]' \
+  '' \
+  "Fixes #$ISSUE")"
+: "${PR_BODY:?Set PR_BODY before creating a Pull Request}"
+gh pr create --repo "$REPO" --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+  --title "[#${ISSUE}] Short issue title" --body "$PR_BODY"
+```
+
+Replace the `git add` paths, PR title, and the two PR body template lines with the actual issue details before running the commands. The body visibly includes a change summary, local validation, and `Fixes #$ISSUE` when appropriate. If the branch already has a matching open PR, do not run `gh pr create`; use its number instead. A merged or closed/unmerged matching PR follows the lifecycle rules above and never gets a duplicate.
+
+For PR number `PR`, inspect metadata and the exact GitHub diff before waiting for checks:
+
+```sh
+: "${REPO:?Set REPO before inspecting a Pull Request}"
+PR=123
+: "${PR:?Set PR before inspecting a Pull Request}"
+gh pr view "$PR" --repo "$REPO" \
+  --json number,title,url,state,isDraft,baseRefName,headRefName,mergeStateStatus,reviewDecision,statusCheckRollup,commits,files,closingIssuesReferences
+gh pr diff "$PR" --repo "$REPO"
+gh pr checks "$PR" --repo "$REPO" --watch
+```
+
+Treat a failed, cancelled, skipped-required, pending, unavailable, or unknown required check as a failure. Re-run `gh pr view` after checks finish to confirm the base/head, merge state, reviews, checks, and issue linkage still match the selected work.
+
+Only after all PR validation passes, use the permitted merge command and then confirm both PR and issue state:
+
+```sh
+: "${REPO:?Set REPO before merging a Pull Request}"
+: "${DEFAULT_BRANCH:?Set DEFAULT_BRANCH before merging a Pull Request}"
+: "${ISSUE:?Set ISSUE before merging a Pull Request}"
+PR=123
+: "${PR:?Set PR before merging a Pull Request}"
+gh pr merge "$PR" --repo "$REPO" --squash --delete-branch
+gh pr view "$PR" --repo "$REPO" \
+  --json number,state,mergedAt,mergeCommit,baseRefName,headRefName,mergeStateStatus
+gh issue view "$ISSUE" --repo "$REPO" --json number,state,closedAt
+MERGE_SHA="$(gh pr view "$PR" --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid')"
+git fetch origin "$DEFAULT_BRANCH"
+git merge-base --is-ancestor "$MERGE_SHA" "origin/$DEFAULT_BRANCH"
+git log -1 --oneline "origin/$DEFAULT_BRANCH"
+gh issue list --repo "$REPO" --state open --limit 100 \
+  --json number,title,url,labels,assignees,state,updatedAt
+```
+
+Do not use `--admin`, force-push, or a merge-bypass option. If merge or confirmation fails, leave the PR open and report the exact command failure.
+
 ## Orchestration Rules
 
 - List eligible open issues at the beginning and after every completed issue. Use structured `gh issue list --json` output where possible.
@@ -36,10 +181,10 @@ Process GitHub issues sequentially. The orchestrator owns the loop and delegates
 
 1. Determine the repository with `gh repo view --json nameWithOwner,defaultBranchRef`.
 2. List open issues with their number, title, URL, labels, assignees, state, and updated time. Apply any user-supplied label, milestone, number, starting point, or limit.
-3. Exclude pull requests, closed issues, issues explicitly marked as blocked, and issues already covered by an open or merged Pull Request unless the user explicitly requests resumption.
+3. Exclude pull requests, closed issues, issues explicitly marked as blocked, and issues already covered by a merged Pull Request. An issue with an open Pull Request is resumed after inspection; an issue with a closed and unmerged Pull Request stops for intervention rather than receiving a duplicate.
 4. Inspect the selected issue with `gh issue view NUMBER --comments` and identify its acceptance criteria, dependencies, and linked work.
 5. If appropriate and permitted, assign the issue to the authenticated user before implementation. Assignment is a coordination aid, not proof of completion.
-6. Check for an existing branch or Pull Request for the issue before creating anything. Resume a clearly matching existing Pull Request instead of opening a duplicate; otherwise create a new issue-specific branch from the current default branch.
+6. Check for an existing branch or Pull Request for the issue before creating anything. Resume a clearly matching open Pull Request instead of opening a duplicate; treat a merged Pull Request as already covered after verifying issue state, and stop for intervention on a closed and unmerged Pull Request. Only when no matching Pull Request exists should the workflow create a new issue-specific branch from the current default branch.
 
 The default branch must be up to date before branching. Use a non-destructive fetch and fast-forward/update operation appropriate to the repository. Do not overwrite local changes or reset the branch.
 
@@ -87,7 +232,7 @@ When local verification passes, start a Pull Request lifecycle subagent. It must
 - Create a concise, issue-scoped commit. Do not rewrite unrelated history or include unrelated changes.
 - Push the issue branch without force-pushing.
 - Create exactly one Pull Request targeting the repository default branch. The title should identify the issue, and the body must explain the change, list validation performed, and include a closing reference such as `Fixes #123` when appropriate.
-- If a matching Pull Request already exists, update and use it instead of creating a duplicate.
+- If a matching open Pull Request already exists, update and use it instead of creating a duplicate. If it is merged, verify the issue state and report it as already covered; if it is closed and unmerged, stop and report the required intervention rather than creating another Pull Request.
 - Report the commit SHA, branch, Pull Request number and URL, and the exact pushed revision.
 
 The Pull Request must exist before the issue is considered complete, even if local changes appear correct.
