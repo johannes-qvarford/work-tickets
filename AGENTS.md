@@ -12,6 +12,8 @@ Install dependencies:
 
 ```sh
 uv sync
+npm install --prefix frontend
+npm run build --prefix frontend
 ```
 
 Run the server:
@@ -32,12 +34,13 @@ npm run build --prefix frontend
 Run all checks:
 
 ```sh
+npm install --prefix frontend
+npm run check --prefix frontend
+npm run build --prefix frontend
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy work_tickets
 uv run pytest
-npm run check --prefix frontend
-npm run build --prefix frontend
 ```
 
 ## Conventions

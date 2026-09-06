@@ -8,3 +8,4 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 frontend/node_modules/
+work_tickets/static/

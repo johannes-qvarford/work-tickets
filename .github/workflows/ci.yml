@@ -23,7 +23,13 @@ jobs:
           enable-cache: true
       - name: Set up Python
         run: uv python install 3.13
-      - name: Install dependencies
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Check frontend types
+        run: npm run check --prefix frontend
+      - name: Build frontend assets
+        run: npm run build --prefix frontend
+      - name: Install Python dependencies
         run: uv sync --locked
       - name: Check lint
         run: uv run ruff check .
@@ -33,9 +39,3 @@ jobs:
         run: uv run mypy work_tickets
       - name: Test
         run: uv run pytest
-      - name: Install frontend dependencies
-        run: npm ci --prefix frontend
-      - name: Check frontend types
-        run: npm run check --prefix frontend
-      - name: Build frontend assets
-        run: npm run build --prefix frontend
