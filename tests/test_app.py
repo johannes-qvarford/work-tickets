@@ -830,24 +830,28 @@ def test_spa_disables_and_grays_jira_owned_ticket_fields() -> None:
     assert (
         '<InputText v-model="ticket.summary" aria-label="Ticket summary" '
         ':disabled="!!ticket.jira_issue_key" '
-        ":class=\"{ 'jira-owned-field': ticket.jira_issue_key }\" />"
+        ":class=\"{ 'jira-owned-field': ticket.jira_issue_key }\" "
+        '@update:model-value="saveTicketChange" />'
     ) in ticket_card_source
     assert (
         '<Textarea v-model="ticket.description" rows="3" autoResize '
         'aria-label="Ticket description" :disabled="!!ticket.jira_issue_key" '
-        ":class=\"{ 'jira-owned-field': ticket.jira_issue_key }\" />"
+        ":class=\"{ 'jira-owned-field': ticket.jira_issue_key }\" "
+        '@update:model-value="saveTicketChange" />'
     ) in ticket_card_source
     assert (
         '<InputText v-if="!subtask.local_completed" v-model="subtask.summary" '
         ':aria-label="`Subtask ${subtask.summary}`" '
         ':disabled="!!subtask.jira_issue_key" '
-        ":class=\"{ 'jira-owned-field': subtask.jira_issue_key }\" />"
+        ":class=\"{ 'jira-owned-field': subtask.jira_issue_key }\" "
+        '@update:model-value="saveSubtaskChange(subtask)" />'
     ) in ticket_card_source
     assert (
         '<Textarea v-if="!subtask.local_completed" v-model="subtask.description" '
         'rows="2" autoResize :aria-label="`Description for subtask ${subtask.summary}`" '
         ':disabled="!!subtask.jira_issue_key" '
-        ":class=\"{ 'jira-owned-field': subtask.jira_issue_key }\" />"
+        ":class=\"{ 'jira-owned-field': subtask.jira_issue_key }\" "
+        '@update:model-value="saveSubtaskChange(subtask)" />'
     ) in ticket_card_source
     assert ".details-form .jira-owned-field { color:" in style_source
     assert 'v-model="ticket.notes"' in ticket_card_source

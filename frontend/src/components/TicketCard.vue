@@ -78,6 +78,26 @@ function todayValue() {
   return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
 }
 
+function saveTicketChange() {
+  emit("save", props.ticket);
+}
+
+function saveSubtaskChange(subtask: Ticket) {
+  emit("saveSubtask", subtask);
+}
+
+function setTicketPlannedDate(value: string | null) {
+  if (props.ticket.planned_date === value) return;
+  props.ticket.planned_date = value;
+  saveTicketChange();
+}
+
+function setSubtaskPlannedDate(subtask: Ticket, value: string | null) {
+  if (subtask.planned_date === value) return;
+  subtask.planned_date = value;
+  saveSubtaskChange(subtask);
+}
+
 function jiraIssueUrl(issueKey: string | null) {
   const browserBaseUrl = props.browserBaseUrl.trim().replace(/\/+$/, "");
   return browserBaseUrl && issueKey
@@ -241,13 +261,12 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
       <Button v-if="!ticket.local_completed || ticket.subtasks.length" class="edit-toggle" :label="expanded ? 'Hide details' : (ticket.local_completed ? 'View subtasks' : 'Edit ticket and subtasks')" :icon="expanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'" text @click="expanded = !expanded" />
       <div v-if="expanded" class="form details-form">
         <template v-if="!ticket.local_completed">
-          <InputText v-model="ticket.summary" aria-label="Ticket summary" :disabled="!!ticket.jira_issue_key" :class="{ 'jira-owned-field': ticket.jira_issue_key }" />
-          <div class="date-control"><InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="ticket.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove planned date" :disabled="!ticket.planned_date" @click="ticket.planned_date = null" /></div>
-          <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" :disabled="!!ticket.jira_issue_key" :class="{ 'jira-owned-field': ticket.jira_issue_key }" />
-          <Textarea v-if="ticket.parent_id === null" v-model="ticket.notes" rows="4" autoResize aria-label="Personal notes" placeholder="Notes for your local workflow" />
-          <label class="category-field">Category<CategoryButtons v-model="ticket.category_id" :categories="categories" /></label>
-          <label class="component-field">Component<ComponentSelect v-model="ticket.component" :categories="categories" :components="components" :category-id="ticket.category_id" /></label>
-          <Button label="Save ticket" @click="emit('save', ticket)" />
+          <InputText v-model="ticket.summary" aria-label="Ticket summary" :disabled="!!ticket.jira_issue_key" :class="{ 'jira-owned-field': ticket.jira_issue_key }" @update:model-value="saveTicketChange" />
+          <div class="date-control"><InputText v-model="ticket.planned_date" type="date" aria-label="Planned date" @update:model-value="saveTicketChange" /><Button type="button" label="Today" text aria-label="Set planned date to today" @click="setTicketPlannedDate(todayValue())" /><Button type="button" label="Unfocus" text aria-label="Remove planned date" :disabled="!ticket.planned_date" @click="setTicketPlannedDate(null)" /></div>
+          <Textarea v-model="ticket.description" rows="3" autoResize aria-label="Ticket description" :disabled="!!ticket.jira_issue_key" :class="{ 'jira-owned-field': ticket.jira_issue_key }" @update:model-value="saveTicketChange" />
+          <Textarea v-if="ticket.parent_id === null" v-model="ticket.notes" rows="4" autoResize aria-label="Personal notes" placeholder="Notes for your local workflow" @update:model-value="saveTicketChange" />
+          <label class="category-field">Category<CategoryButtons v-model="ticket.category_id" :categories="categories" @update:model-value="saveTicketChange" /></label>
+          <label class="component-field">Component<ComponentSelect v-model="ticket.component" :categories="categories" :components="components" :category-id="ticket.category_id" @update:model-value="saveTicketChange" /></label>
         </template>
         <span v-else class="ticket-meta">Done items can only be marked active.</span>
         <div class="subtasks-heading"><h4>Subtasks ({{ ticket.subtasks.length }})</h4><span class="ticket-meta">Active subtasks can be dragged to reorder.</span></div>
@@ -264,16 +283,15 @@ function onSubtaskDrop(event: DragEvent, subtask: Ticket) {
             <a v-if="jiraIssueUrl(subtask.jira_issue_key)" class="jira-key" :href="jiraIssueUrl(subtask.jira_issue_key) || undefined" target="_blank" rel="noopener noreferrer">({{ subtask.jira_issue_key }})</a>
             <span v-else-if="subtask.jira_issue_key" class="jira-key">({{ subtask.jira_issue_key }})</span>
             <RefineTerminal :ticket="subtask" :browser-base-url="browserBaseUrl" />
-            <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" :disabled="!!subtask.jira_issue_key" :class="{ 'jira-owned-field': subtask.jira_issue_key }" />
+            <InputText v-if="!subtask.local_completed" v-model="subtask.summary" :aria-label="`Subtask ${subtask.summary}`" :disabled="!!subtask.jira_issue_key" :class="{ 'jira-owned-field': subtask.jira_issue_key }" @update:model-value="saveSubtaskChange(subtask)" />
             <span v-else class="ticket-meta subtask-completed">{{ subtask.summary }}</span>
             <div v-if="!subtask.local_completed" class="date-control">
-              <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" />
-              <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="subtask.planned_date = todayValue()" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="subtask.planned_date = null" />
+              <InputText v-model="subtask.planned_date" type="date" aria-label="Subtask planned date" @update:model-value="saveSubtaskChange(subtask)" />
+              <Button type="button" label="Today" text aria-label="Set subtask planned date to today" @click="setSubtaskPlannedDate(subtask, todayValue())" /><Button type="button" label="Unfocus" text aria-label="Remove subtask planned date" :disabled="!subtask.planned_date" @click="setSubtaskPlannedDate(subtask, null)" />
             </div>
             <Button :icon="subtask.local_completed ? 'pi pi-undo' : 'pi pi-check'" text :aria-label="subtask.local_completed ? 'Mark subtask active' : 'Mark subtask done'" @click="emit('toggleSubtask', subtask.id)" />
             <Button v-if="!subtask.local_completed" icon="pi pi-trash" severity="danger" text aria-label="Delete subtask" @click="emit('removeSubtask', subtask.id)" />
-            <Textarea v-if="!subtask.local_completed" v-model="subtask.description" rows="2" autoResize :aria-label="`Description for subtask ${subtask.summary}`" :disabled="!!subtask.jira_issue_key" :class="{ 'jira-owned-field': subtask.jira_issue_key }" />
-            <Button v-if="!subtask.local_completed" label="Save" text @click="emit('saveSubtask', subtask)" />
+            <Textarea v-if="!subtask.local_completed" v-model="subtask.description" rows="2" autoResize :aria-label="`Description for subtask ${subtask.summary}`" :disabled="!!subtask.jira_issue_key" :class="{ 'jira-owned-field': subtask.jira_issue_key }" @update:model-value="saveSubtaskChange(subtask)" />
           </div>
         </div>
         <div v-if="!ticket.local_completed" class="subtask-row">
