@@ -119,6 +119,7 @@ def create_subtask(
     summary: str,
     description: str,
     planned_date: str,
+    component: str | None,
     db: Session,
 ) -> Response:
     parent = db.get(Ticket, ticket_id)
@@ -145,6 +146,9 @@ def create_subtask(
     planned_date_value = _parse_date(planned_date)
     if planned_date and planned_date_value is None:
         return mutation_response(request, "error", "Subtask planned date is invalid.", 422)
+    component_value = _validate_component(component, db)
+    if component and component_value is None:
+        return mutation_response(request, "error", "Subtask component was not found.", 422)
 
     subtask = Ticket(
         parent_id=parent.id,
@@ -152,6 +156,7 @@ def create_subtask(
         description=description,
         notes="",
         planned_date=planned_date_value,
+        component=component_value,
         position=0,
     )
     _append_unfinished(_subtasks(db, parent.id), subtask)
@@ -247,10 +252,12 @@ def update_subtask(
     summary: str,
     description: str,
     planned_date: str,
+    component: str | None,
     db: Session,
     *,
     summary_provided: bool = True,
     description_provided: bool = True,
+    component_provided: bool = True,
 ) -> Response:
     subtask = db.get(Ticket, subtask_id)
     if subtask is None:
@@ -290,11 +297,18 @@ def update_subtask(
     planned_date_value = _parse_date(planned_date)
     if planned_date and planned_date_value is None:
         return mutation_response(request, "error", "Subtask planned date is invalid.", 422)
+    component_value = _validate_component(component, db)
+    if component_provided and component and component_value is None:
+        if component.strip() != (subtask.component or ""):
+            return mutation_response(request, "error", "Subtask component was not found.", 422)
 
     parent_id = subtask.parent_id
     subtask.summary = summary_value
     subtask.description = description_value
     subtask.planned_date = planned_date_value
+    if component_provided:
+        if component_value is not None or not component:
+            subtask.component = component_value
     db.commit()
     parent = db.get(Ticket, parent_id)
     if parent is None:

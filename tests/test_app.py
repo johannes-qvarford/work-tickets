@@ -8107,6 +8107,117 @@ def test_api_create_subtasks_persists_fields_and_orders_them() -> None:
         assert parent.subtasks[0].planned_date == date(2026, 8, 24)
 
 
+def test_api_subtask_components_create_update_clear_and_validate() -> None:
+    with SessionLocal() as db:
+        first_component = Component(name="subtask-component-first")
+        second_component = Component(name="subtask-component-second")
+        parent = Ticket(summary="Subtask component parent", position=0)
+        db.add_all([first_component, second_component, parent])
+        db.commit()
+        parent_id = parent.id
+
+    create_response = client.post(
+        f"/api/tickets/{parent_id}/subtasks",
+        json={"summary": "Component subtask", "component": "subtask-component-first"},
+    )
+    assert create_response.status_code == 200
+    subtask = next(
+        subtask
+        for ticket in create_response.json()["state"]["tickets"]
+        if ticket["id"] == parent_id
+        for subtask in ticket["subtasks"]
+    )
+    subtask_id = subtask["id"]
+    assert subtask["component"] == "subtask-component-first"
+    with SessionLocal() as db:
+        stored_subtask = db.get(Ticket, subtask_id)
+        assert stored_subtask is not None
+        stored_subtask.jira_issue_key = "WORK-SUBTASK-COMPONENT"
+        db.commit()
+
+    invalid_create = client.post(
+        f"/api/tickets/{parent_id}/subtasks",
+        json={"summary": "Invalid component subtask", "component": "missing-component"},
+    )
+    update_response = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={
+            "summary": "Component subtask",
+            "description": "",
+            "planned_date": None,
+            "component": "subtask-component-second",
+        },
+    )
+    preserved_response = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={"summary": "Component subtask", "description": "", "planned_date": None},
+    )
+    invalid_update = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={
+            "summary": "Component subtask",
+            "description": "",
+            "planned_date": None,
+            "component": "missing-component",
+        },
+    )
+    clear_response = client.put(
+        f"/api/subtasks/{subtask_id}",
+        json={
+            "summary": "Component subtask",
+            "description": "",
+            "planned_date": None,
+            "component": None,
+        },
+    )
+
+    assert invalid_create.status_code == 422
+    assert invalid_create.json() == {
+        "ok": False,
+        "message": "Subtask component was not found.",
+    }
+    assert update_response.status_code == 200
+    updated_subtask = next(
+        subtask
+        for ticket in update_response.json()["state"]["tickets"]
+        if ticket["id"] == parent_id
+        for subtask in ticket["subtasks"]
+    )
+    assert updated_subtask["component"] == "subtask-component-second"
+    assert preserved_response.status_code == 200
+    preserved_subtask = next(
+        subtask
+        for ticket in preserved_response.json()["state"]["tickets"]
+        if ticket["id"] == parent_id
+        for subtask in ticket["subtasks"]
+    )
+    assert preserved_subtask["component"] == "subtask-component-second"
+    assert invalid_update.status_code == 422
+    assert invalid_update.json() == {
+        "ok": False,
+        "message": "Subtask component was not found.",
+    }
+    assert clear_response.status_code == 200
+    cleared_subtask = next(
+        subtask
+        for ticket in clear_response.json()["state"]["tickets"]
+        if ticket["id"] == parent_id
+        for subtask in ticket["subtasks"]
+    )
+    assert cleared_subtask["component"] is None
+    reloaded_subtask = next(
+        subtask
+        for ticket in client.get("/api/state").json()["tickets"]
+        if ticket["id"] == parent_id
+        for subtask in ticket["subtasks"]
+    )
+    assert reloaded_subtask["component"] is None
+    with SessionLocal() as db:
+        stored_subtask = db.get(Ticket, subtask_id)
+        assert stored_subtask is not None
+        assert stored_subtask.component is None
+
+
 def test_api_edit_completed_subtask_is_rejected_without_mutation() -> None:
     with SessionLocal() as db:
         parent = Ticket(summary="Edit parent", position=0)
