@@ -167,6 +167,7 @@ def api_reviews(db: Session = Depends(get_db)) -> Response:
             gitlab_client_factory=GitLabClient,
         )
     except jira_service.JiraError as exc:
+        logger.exception("GET /api/reviews failed while fetching reviews")
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
     return JSONResponse({"ok": True, **reviews})
 
@@ -181,6 +182,7 @@ def api_ready_to_merge_review(issue_key: str, db: Session = Depends(get_db)) -> 
             gitlab_client_factory=GitLabClient,
         )
     except jira_service.JiraError as exc:
+        logger.exception("POST /api/reviews/%s/ready-to-merge failed", issue_key)
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
     return JSONResponse(
         {
@@ -203,6 +205,11 @@ async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
             prompt = refine.refine_prompt(ticket, config)
             working_directory = refine.refine_working_directory(ticket, config)
         except refine.RefineError as exc:
+            logger.exception(
+                "WebSocket /api/tickets/%s/refine setup failed for Jira issue %s",
+                ticket_id,
+                ticket.jira_issue_key if ticket is not None else "<unlinked>",
+            )
             await refine.send_error(websocket, str(exc))
             return
     assert ticket.jira_issue_key is not None
@@ -365,6 +372,11 @@ def api_sync_ticket(ticket_id: int, db: Session = Depends(get_db)) -> Response:
         jira_service.sync_ticket(ticket, db, jira_client_factory=JiraClient)
     except jira_service.JiraError as exc:
         db.rollback()
+        logger.exception(
+            "POST /api/tickets/%s/sync failed for Jira issue %s",
+            ticket_id,
+            ticket.jira_issue_key or "<unlinked>",
+        )
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
     return JSONResponse(
         {"ok": True, "message": f"{ticket.summary} synced to Jira.", "state": _api_state(db)}
@@ -380,6 +392,11 @@ def api_sync_ticket_from_jira(ticket_id: int, db: Session = Depends(get_db)) -> 
         jira_service.sync_ticket_from_jira(ticket, db, jira_client_factory=JiraClient)
     except jira_service.JiraError as exc:
         db.rollback()
+        logger.exception(
+            "POST /api/tickets/%s/sync-from-jira failed for Jira issue %s",
+            ticket_id,
+            ticket.jira_issue_key or "<unlinked>",
+        )
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=422)
     return JSONResponse(
         {
@@ -652,11 +669,13 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
         db.commit()
     except GitLabError as exc:
         db.rollback()
+        logger.exception("PUT /api/settings/jira GitLab validation failed")
         return JSONResponse(
             {"ok": False, "message": f"GitLab setup failed: {exc}"}, status_code=422
         )
     except jira_service.JiraError as exc:
         db.rollback()
+        logger.exception("PUT /api/settings/jira Jira validation failed")
         return JSONResponse({"ok": False, "message": f"Jira setup failed: {exc}"}, status_code=422)
     if not payload.validate_connection:
         return "Jira configuration saved."

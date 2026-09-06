@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import date
 
@@ -16,6 +17,8 @@ from .web import (
     mutation_response,
     ticket_move_response,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def create_ticket(
@@ -54,7 +57,15 @@ def create_ticket(
         return mutation_response(request, "error", "Ticket component was not found.", 422)
 
     if jira_reference_value:
-        from .jira_service import import_ticket_from_jira
+        from .jira_service import import_ticket_from_jira, parse_jira_issue_reference
+
+        jira_issue_key = "<unavailable>"
+        try:
+            config = db.get(JiraConfig, 1)
+            browser_base_url = config.browser_base_url or config.base_url if config else ""
+            jira_issue_key = parse_jira_issue_reference(jira_reference_value, browser_base_url)
+        except JiraError:
+            pass
 
         try:
             ticket = import_ticket_from_jira(
@@ -68,6 +79,10 @@ def create_ticket(
             )
         except JiraError as exc:
             db.rollback()
+            logger.exception(
+                "POST /api/tickets failed while importing a Jira ticket for Jira issue %s",
+                jira_issue_key,
+            )
             return mutation_response(request, "error", str(exc), 422)
         return mutation_response(
             request,

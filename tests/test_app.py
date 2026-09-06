@@ -497,7 +497,7 @@ def test_synced_ticket_saves_local_fields_without_jira_and_rejects_owned_fields(
         assert subtask.planned_date == date(2026, 8, 29)
 
 
-def test_ticket_sync_surfaces_the_actual_jira_error(monkeypatch) -> None:
+def test_ticket_sync_surfaces_and_logs_the_actual_jira_error(monkeypatch, caplog) -> None:
     class FailingJiraClient:
         def __init__(self, config) -> None:
             del config
@@ -517,13 +517,16 @@ def test_ticket_sync_surfaces_the_actual_jira_error(monkeypatch) -> None:
         db.commit()
         ticket_id = ticket.id
 
-    response = client.post(f"/api/tickets/{ticket_id}/sync")
+    with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+        response = client.post(f"/api/tickets/{ticket_id}/sync")
 
     assert response.status_code == 422
     assert response.json() == {
         "ok": False,
         "message": "Jira returned HTTP 503: unavailable.",
     }
+    assert f"POST /api/tickets/{ticket_id}/sync failed for Jira issue <unlinked>" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 def test_category_api_creates_and_deletes_without_deleting_tickets() -> None:
@@ -1333,7 +1336,9 @@ def test_api_config_validation_uses_gitlab_client_and_saves_only_after_both_pass
         assert config.gitlab_token == "gitlab-secret"
 
 
-def test_api_config_validation_reports_gitlab_failure_without_saving(monkeypatch) -> None:
+def test_api_config_validation_reports_and_logs_gitlab_failure_without_saving(
+    monkeypatch, caplog
+) -> None:
     with SessionLocal() as db:
         _seed_jira_config(
             db,
@@ -1365,25 +1370,30 @@ def test_api_config_validation_reports_gitlab_failure_without_saving(monkeypatch
 
     monkeypatch.setattr("work_tickets.app.JiraClient", FakeJiraClient)
     monkeypatch.setattr("work_tickets.app.GitLabClient", FailingGitLabClient)
-    response = client.put(
-        "/api/settings/jira",
-        json={
-            "base_url": "https://new.jira.example.test",
-            "email": "new@example.test",
-            "api_token": "new-jira-token",
-            "project_key": "NEW",
-            "issue_type": "Bug",
-            "gitlab_base_url": "https://new.gitlab.example.test",
-            "gitlab_token": "new-gitlab-secret",
-            "validate": True,
-        },
-    )
+    with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+        response = client.put(
+            "/api/settings/jira",
+            json={
+                "base_url": "https://new.jira.example.test",
+                "email": "new@example.test",
+                "api_token": "new-jira-token",
+                "project_key": "NEW",
+                "issue_type": "Bug",
+                "gitlab_base_url": "https://new.gitlab.example.test",
+                "gitlab_token": "new-gitlab-secret",
+                "validate": True,
+            },
+        )
 
     assert response.status_code == 422
     assert response.json() == {
         "ok": False,
         "message": "GitLab setup failed: GitLab returned HTTP 401: Unauthorized.",
     }
+    assert "PUT /api/settings/jira GitLab validation failed" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "new-jira-token" not in caplog.text
+    assert "new-gitlab-secret" not in caplog.text
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
         assert config is not None
@@ -1444,7 +1454,7 @@ def test_api_rejects_partial_gitlab_credentials_after_jira_validation(monkeypatc
         assert config.base_url == "https://previous.jira.example.test"
 
 
-def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch) -> None:
+def test_api_reviews_filters_jira_issues_and_logs_item_failures(monkeypatch, caplog) -> None:
     calls: list[str] = []
 
     class FakeJiraClient:
@@ -1514,7 +1524,8 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
         db.add(local_ticket)
         db.commit()
 
-    response = client.get("/api/reviews")
+    with caplog.at_level(logging.ERROR, logger="work_tickets.jira_service"):
+        response = client.get("/api/reviews")
 
     assert response.status_code == 200
     assert calls == [
@@ -1544,6 +1555,8 @@ def test_api_reviews_filters_jira_issues_and_isolates_item_failures(monkeypatch)
     assert reviews[1]["summary"] == "Remote-only review"
     assert reviews[1]["local_ticket"] is None
     assert reviews[1]["error"] == "Jira returned HTTP 503."
+    assert "GET /api/reviews failed to fetch Jira issue WORK-502" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 def test_api_reviews_exposes_selection_and_disables_ambiguous_or_failed_items(monkeypatch) -> None:
@@ -3939,7 +3952,7 @@ def test_ready_to_merge_review_reports_draft_failure_without_jira_side_effects()
 
 
 def test_api_ready_to_merge_review_reports_gitlab_approval_failure_without_jira_side_effects(
-    monkeypatch,
+    monkeypatch, caplog
 ) -> None:
     calls: list[str] = []
 
@@ -3999,13 +4012,16 @@ def test_api_ready_to_merge_review_reports_gitlab_approval_failure_without_jira_
         _seed_jira_config(db)
         db.commit()
 
-    response = client.post("/api/reviews/work-514/ready-to-merge")
+    with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+        response = client.post("/api/reviews/work-514/ready-to-merge")
 
     assert response.status_code == 422
     assert response.json() == {
         "ok": False,
         "message": "GitLab returned HTTP 503: approvals unavailable.",
     }
+    assert "POST /api/reviews/work-514/ready-to-merge failed" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
     assert calls == ["get:WORK-514", "gitlab-close", "close"]
 
 
@@ -5027,7 +5043,9 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
     asyncio.run(exercise())
 
 
-def test_refine_websocket_reports_opencode_start_failure(monkeypatch, tmp_path) -> None:
+def test_refine_websocket_reports_and_logs_opencode_start_failure(
+    monkeypatch, tmp_path, caplog
+) -> None:
     project_directory = tmp_path / "refine-component-start-failure"
     project_directory.mkdir()
 
@@ -5051,10 +5069,13 @@ def test_refine_websocket_reports_opencode_start_failure(monkeypatch, tmp_path) 
         db.commit()
         ticket_id = ticket.id
 
-    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
-        assert websocket.receive_text() == (
-            "\r\n[Refine error] Could not start opencode: No such file or directory\r\n"
-        )
+    with caplog.at_level(logging.ERROR, logger="work_tickets.refine"):
+        with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+            assert websocket.receive_text() == (
+                "\r\n[Refine error] Could not start opencode: No such file or directory\r\n"
+            )
+    assert "Refine process startup failed for Jira issue WORK-710" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 def test_refine_registry_cancellation_releases_reservation_and_stops_startup(
@@ -5808,7 +5829,7 @@ def test_refine_websocket_rejects_component_symlink_outside_root(tmp_path) -> No
 
 
 def test_refine_websocket_reports_working_directory_resolution_errors(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, caplog
 ) -> None:
     with SessionLocal() as db:
         config = db.get(JiraConfig, 1)
@@ -5830,10 +5851,14 @@ def test_refine_websocket_reports_working_directory_resolution_errors(
         raise OSError("path cannot be resolved")
 
     monkeypatch.setattr(Path, "resolve", raise_os_error)
-    with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
-        assert websocket.receive_text() == (
-            "\r\n[Refine error] The local project directory could not be resolved.\r\n"
-        )
+    with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+        with client.websocket_connect(f"/api/tickets/{ticket_id}/refine") as websocket:
+            assert websocket.receive_text() == (
+                "\r\n[Refine error] The local project directory could not be resolved.\r\n"
+            )
+    assert f"WebSocket /api/tickets/{ticket_id}/refine setup failed" in caplog.text
+    assert "Jira issue WORK-702B" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 def test_refine_websocket_reports_expanduser_runtime_errors(monkeypatch, tmp_path) -> None:
@@ -6843,7 +6868,7 @@ def test_sync_from_jira_preserves_local_fields_while_reconciling_active_children
 
 
 def test_sync_from_jira_rejects_duplicate_remote_children_without_mutating_local_data(
-    monkeypatch,
+    monkeypatch, caplog
 ) -> None:
     class FakeJiraClient:
         def __init__(self, config) -> None:
@@ -6878,10 +6903,15 @@ def test_sync_from_jira_rejects_duplicate_remote_children_without_mutating_local
         parent_id = parent.id
         child_id = child.id
 
-    response = client.post(f"/api/tickets/{parent_id}/sync-from-jira")
+    with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+        response = client.post(f"/api/tickets/{parent_id}/sync-from-jira")
 
     assert response.status_code == 422
     assert "duplicate subtask key WORK-91" in response.json()["message"]
+    assert f"POST /api/tickets/{parent_id}/sync-from-jira failed for Jira issue WORK-90" in (
+        caplog.text
+    )
+    assert "Traceback (most recent call last)" in caplog.text
     with SessionLocal() as db:
         parent = db.get(Ticket, parent_id)
         child = db.get(Ticket, child_id)
@@ -6986,7 +7016,9 @@ def test_delete_top_level_ticket_cascades_locally_and_deletes_linked_jira_issue(
         assert db.get(Ticket, child_id) is None
 
 
-def test_delete_ticket_keeps_local_cascade_when_jira_delete_fails(monkeypatch) -> None:
+def test_delete_ticket_keeps_local_cascade_and_logs_jira_delete_failure(
+    monkeypatch, caplog
+) -> None:
     class FakeJiraClient:
         def __init__(self, config) -> None:
             pass
@@ -7010,7 +7042,8 @@ def test_delete_ticket_keeps_local_cascade_when_jira_delete_fails(monkeypatch) -
         parent_id = parent.id
         child_id = child.id
 
-    response = client.delete(f"/api/tickets/{parent_id}")
+    with caplog.at_level(logging.ERROR, logger="work_tickets.jira_service"):
+        response = client.delete(f"/api/tickets/{parent_id}")
 
     assert response.status_code == 200
     result = response.json()
@@ -7018,6 +7051,8 @@ def test_delete_ticket_keeps_local_cascade_when_jira_delete_fails(monkeypatch) -
     assert "Delete despite Jira failure" in result["message"]
     assert "linked Jira issue WORK-92 could not be deleted" in result["message"]
     assert "Jira returned HTTP 403: Forbidden" in result["message"]
+    assert "Ticket deletion failed for linked Jira issue WORK-92" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
     with SessionLocal() as db:
         assert db.get(Ticket, parent_id) is None
         assert db.get(Ticket, child_id) is None
@@ -7390,18 +7425,25 @@ def test_sync_from_jira_requires_a_linked_ticket() -> None:
     }
 
 
-def test_create_ticket_requires_jira_configuration_for_import() -> None:
+def test_create_ticket_requires_jira_configuration_for_import_and_logs_failure(caplog) -> None:
     with SessionLocal() as db:
         db.query(JiraConfig).delete()
         db.commit()
 
-    response = client.post("/api/tickets", json={"jira_reference": "SCRUM-404"})
+    with caplog.at_level(logging.ERROR, logger="work_tickets.tickets"):
+        response = client.post("/api/tickets", json={"jira_reference": "SCRUM-404"})
 
     assert response.status_code == 422
     assert response.json() == {
         "ok": False,
         "message": "Jira is not configured. Configure Jira before importing.",
     }
+    assert (
+        "POST /api/tickets failed while importing a Jira ticket for Jira issue SCRUM-404"
+        in caplog.text
+    )
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "test-token" not in caplog.text
 
     with SessionLocal() as db:
         db.add(
