@@ -58,6 +58,13 @@ class JiraConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     base_url: Mapped[str] = mapped_column(String(300))
     browser_base_url: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    implement_prompt_template: Mapped[str] = mapped_column(
+        Text,
+        default="Please implement the work described at <TICKET_URL> and run the relevant tests.",
+        server_default=(
+            "Please implement the work described at <TICKET_URL> and run the relevant tests."
+        ),
+    )
     local_projects_directory: Mapped[str] = mapped_column(
         String(1000), default="", server_default=""
     )

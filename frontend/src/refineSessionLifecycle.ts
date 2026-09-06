@@ -7,7 +7,13 @@ export function refineSessionIdentity(ticketId: number, jiraIssueKey: string | n
   return canonicalizeJiraKey(jiraIssueKey || "");
 }
 
+export function implementSessionIdentity(ticketId: number, jiraIssueKey: string | null): string {
+  void ticketId;
+  return `implement:${canonicalizeJiraKey(jiraIssueKey || "")}`;
+}
+
 export const activeSessionStorageKey = "work-tickets-active-refine";
+export const activeImplementSessionStorageKey = "work-tickets-active-implement";
 
 export interface SessionStorageLike {
   getItem(key: string): string | null;
@@ -61,9 +67,12 @@ export function shouldForgetReconnectMarker(
   return confirmedSessionEnd || closeCode === 1000 || closeCode === 1011;
 }
 
-export function activeSessionMarker(storage = browserSessionStorage()): string | null {
+export function activeSessionMarker(
+  storage = browserSessionStorage(),
+  storageKey = activeSessionStorageKey,
+): string | null {
   try {
-    return storage?.getItem(activeSessionStorageKey) || null;
+    return storage?.getItem(storageKey) || null;
   } catch {
     return null;
   }
@@ -72,12 +81,13 @@ export function activeSessionMarker(storage = browserSessionStorage()): string |
 export function markActiveSession(
   identity: string,
   storage = browserSessionStorage(),
+  storageKey = activeSessionStorageKey,
 ): void {
   if (!storage) return;
   try {
     storage.setItem(
-      activeSessionStorageKey,
-      addActiveSession(activeSessionMarker(storage), identity),
+      storageKey,
+      addActiveSession(activeSessionMarker(storage, storageKey), identity),
     );
   } catch {
     // Storage may be unavailable.
@@ -87,12 +97,13 @@ export function markActiveSession(
 export function forgetActiveSession(
   identity: string,
   storage = browserSessionStorage(),
+  storageKey = activeSessionStorageKey,
 ): void {
   if (!storage) return;
   try {
-    const nextValue = removeActiveSession(activeSessionMarker(storage), identity);
-    if (nextValue === null) storage.removeItem(activeSessionStorageKey);
-    else storage.setItem(activeSessionStorageKey, nextValue);
+    const nextValue = removeActiveSession(activeSessionMarker(storage, storageKey), identity);
+    if (nextValue === null) storage.removeItem(storageKey);
+    else storage.setItem(storageKey, nextValue);
   } catch {
     // Storage may be unavailable.
   }
@@ -105,6 +116,8 @@ interface Connection {
   identity: string;
   url: string;
   storage: SessionStorageLike | null;
+  storageKey: string;
+  actionLabel: "Refine" | "Implement";
   socket: WebSocket | null;
   socketTransientClose: boolean;
   socketExplicitClose: boolean;
@@ -139,10 +152,11 @@ function connect(connection: Connection): void {
     if (connection.output.length > 512) connection.output.shift();
     if (
       typeof output === "string" &&
-      (output.includes("[Refine exited with code") || output.includes("[Refine error]"))
+      (output.includes(`[${connection.actionLabel} exited with code`) ||
+        output.includes(`[${connection.actionLabel} error]`))
     ) {
       connection.ended = true;
-      forgetActiveSession(connection.identity, connection.storage);
+      forgetActiveSession(connection.identity, connection.storage, connection.storageKey);
     }
     for (const listener of connection.listeners) listener(output);
   };
@@ -166,7 +180,7 @@ function connect(connection: Connection): void {
     );
     if (sessionEnded) {
       connection.ended = true;
-      forgetActiveSession(connection.identity, connection.storage);
+      forgetActiveSession(connection.identity, connection.storage, connection.storageKey);
     }
     if (connection.socket !== socket) return;
     connection.socket = null;
@@ -189,6 +203,8 @@ export function acquireRefineSession(
   identity: string,
   url: string,
   storage = browserSessionStorage(),
+  storageKey = activeSessionStorageKey,
+  actionLabel: "Refine" | "Implement" = "Refine",
 ): RefineSessionLease {
   let connection = connections.get(identity);
   if (!connection) {
@@ -196,15 +212,17 @@ export function acquireRefineSession(
       identity,
       url,
       storage,
-       socket: null,
+      storageKey,
+      actionLabel,
+      socket: null,
       socketTransientClose: false,
       socketExplicitClose: false,
       ended: false,
       leases: 0,
-       output: [],
-       pendingInput: "",
-       pendingResize: null,
-       listeners: new Set(),
+      output: [],
+      pendingInput: "",
+      pendingResize: null,
+      listeners: new Set(),
     };
     connections.set(identity, connection);
     connect(connection);
@@ -249,17 +267,51 @@ export function acquireRefineSession(
   };
 }
 
+export function acquireImplementSession(
+  identity: string,
+  url: string,
+  storage = browserSessionStorage(),
+): RefineSessionLease {
+  return acquireRefineSession(identity, url, storage, activeImplementSessionStorageKey, "Implement");
+}
+
 export function closeRefineSession(
   identity: string,
   storage = browserSessionStorage(),
+  storageKey = activeSessionStorageKey,
 ): void {
-  forgetActiveSession(identity, storage);
+  forgetActiveSession(identity, storage, storageKey);
   const connection = connections.get(identity);
   if (!connection) return;
   connection.ended = true;
   connection.socketExplicitClose = true;
   connections.delete(identity);
   connection.socket?.close();
+}
+
+export function activeImplementSessionMarker(storage = browserSessionStorage()): string | null {
+  return activeSessionMarker(storage, activeImplementSessionStorageKey);
+}
+
+export function markActiveImplementSession(
+  identity: string,
+  storage = browserSessionStorage(),
+): void {
+  markActiveSession(identity, storage, activeImplementSessionStorageKey);
+}
+
+export function hasActiveImplementSession(
+  storageValue: string | null,
+  identity: string,
+): boolean {
+  return hasActiveSession(storageValue, identity);
+}
+
+export function closeImplementSession(
+  identity: string,
+  storage = browserSessionStorage(),
+): void {
+  closeRefineSession(identity, storage, activeImplementSessionStorageKey);
 }
 
 export interface RefineTicketLifecycle {
@@ -272,21 +324,29 @@ export class RefineSessionCoordinator {
   private readonly leases = new Map<string, RefineSessionLease>();
   private readonly socketUrl: (ticketId: number) => string;
   private readonly storage: SessionStorageLike | null;
+  private readonly sessionKind: "refine" | "implement";
 
   constructor(
     socketUrl: (ticketId: number) => string,
     storage: SessionStorageLike | null = browserSessionStorage(),
+    sessionKind: "refine" | "implement" = "refine",
   ) {
     this.socketUrl = socketUrl;
     this.storage = storage;
+    this.sessionKind = sessionKind;
   }
 
   reconcile(tickets: RefineTicketLifecycle[]): void {
     const marked = new Map<string, number>();
     const visit = (ticket: RefineTicketLifecycle) => {
       if (ticket.jira_issue_key) {
-        const identity = refineSessionIdentity(ticket.id, ticket.jira_issue_key);
-        if (hasActiveSession(activeSessionMarker(this.storage), identity)) {
+        const identity = this.sessionKind === "refine"
+          ? refineSessionIdentity(ticket.id, ticket.jira_issue_key)
+          : implementSessionIdentity(ticket.id, ticket.jira_issue_key);
+        const marker = this.sessionKind === "refine"
+          ? activeSessionMarker(this.storage)
+          : activeImplementSessionMarker(this.storage);
+        if (hasActiveSession(marker, identity)) {
           marked.set(identity, ticket.id);
         }
       }
@@ -304,7 +364,9 @@ export class RefineSessionCoordinator {
       if (!this.leases.has(identity)) {
         this.leases.set(
           identity,
-          acquireRefineSession(identity, this.socketUrl(ticketId), this.storage),
+          this.sessionKind === "refine"
+            ? acquireRefineSession(identity, this.socketUrl(ticketId), this.storage)
+            : acquireImplementSession(identity, this.socketUrl(ticketId), this.storage),
         );
       }
     }
@@ -313,5 +375,14 @@ export class RefineSessionCoordinator {
   dispose(): void {
     for (const lease of this.leases.values()) lease.release();
     this.leases.clear();
+  }
+}
+
+export class ImplementSessionCoordinator extends RefineSessionCoordinator {
+  constructor(
+    socketUrl: (ticketId: number) => string,
+    storage: SessionStorageLike | null = browserSessionStorage(),
+  ) {
+    super(socketUrl, storage, "implement");
   }
 }

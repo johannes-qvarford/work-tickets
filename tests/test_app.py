@@ -81,6 +81,9 @@ def _seed_jira_config(db, **overrides: object) -> JiraConfig:
     defaults = {
         "base_url": "https://jira.example.test",
         "browser_base_url": "",
+        "implement_prompt_template": (
+            "Please implement the work described at <TICKET_URL> and run the relevant tests."
+        ),
         "email": "person@example.test",
         "api_token": "test-token",
         "project_key": "WORK",
@@ -996,6 +999,29 @@ def test_api_saves_jira_config_and_preserves_blank_browser_url() -> None:
         assert config.ready_to_deploy_status == "Ready to Deploy"
 
 
+def test_api_saves_implement_prompt_template_and_returns_it_in_state() -> None:
+    template = "Implement the Jira ticket at <TICKET_URL> and run tests."
+    response = client.put(
+        "/api/settings/jira",
+        json={
+            "base_url": "https://jira.example.test",
+            "email": "person@example.test",
+            "api_token": "test-token",
+            "project_key": "WORK",
+            "issue_type": "Task",
+            "implement_prompt_template": template,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["state"]["jira_config"]["implement_prompt_template"] == template
+    assert client.get("/api/state").json()["jira_config"]["implement_prompt_template"] == template
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        assert config.implement_prompt_template == template
+
+
 def test_api_saves_gitlab_settings_without_exposing_or_overwriting_token() -> None:
     response = client.put(
         "/api/settings/jira",
@@ -1082,6 +1108,9 @@ def test_api_saves_configured_jira_workflow_statuses() -> None:
     assert response.json()["state"]["jira_config"] == {
         "base_url": "https://jira.example.test",
         "browser_base_url": "",
+        "implement_prompt_template": (
+            "Please implement the work described at <TICKET_URL> and run the relevant tests."
+        ),
         "local_projects_directory": "",
         "gitlab_base_url": "",
         "email": "person@example.test",
@@ -4931,8 +4960,15 @@ def test_gitlab_settings_are_present_in_frontend() -> None:
     assert 'settings.value.gitlab_token = ""' in app_source
 
 
-def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("session_kind", "action_label"),
+    [
+        (refine.REFINE_SESSION_KIND, "Refine"),
+        (refine.IMPLEMENT_SESSION_KIND, "Implement"),
+    ],
+)
+def test_session_registry_reuses_key_replays_output_and_expires_idle_sessions(
+    monkeypatch, tmp_path, session_kind, action_label
 ) -> None:
     class FakeStream:
         def __init__(self) -> None:
@@ -5008,7 +5044,9 @@ def test_refine_registry_reuses_key_replays_output_and_expires_idle_sessions(
     )
 
     async def exercise() -> None:
-        registry = refine.RefineSessionRegistry(stale_after=0.01)
+        registry = refine.RefineSessionRegistry(
+            stale_after=0.01, session_kind=session_kind, action_label=action_label
+        )
         first_client = FakeWebSocket()
         first_session, error = await registry.attach(
             "WORK-706", "Refine prompt", tmp_path, first_client
@@ -5251,6 +5289,410 @@ def test_canonicalize_jira_key_is_used_for_storage_and_prompt() -> None:
     assert refine.refine_prompt(ticket, config) == (
         "Refine https://jira.example.test/context/browse/WORK-123"
     )
+
+
+def test_implement_prompt_substitutes_canonical_context_path_url() -> None:
+    ticket = Ticket(summary="Implement ticket", position=0, jira_issue_key=" work-123 ")
+    config = JiraConfig(browser_base_url="https://jira.example.test/context")
+    config.implement_prompt_template = "Please implement <TICKET_URL> and verify <TICKET_URL>."
+
+    prompt = refine.implement_prompt(ticket, config)
+
+    assert prompt == (
+        "Please implement https://jira.example.test/context/browse/WORK-123 and verify "
+        "https://jira.example.test/context/browse/WORK-123."
+    )
+    assert "<TICKET_URL>" not in prompt
+
+
+def test_implement_session_resume_uses_the_saved_kind(monkeypatch, tmp_path) -> None:
+    class FakeStream:
+        async def read(self, size: int) -> bytes:
+            del size
+            return b""
+
+    class FakeProcess:
+        pid = None
+        stdin = None
+        stdout = FakeStream()
+
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    calls: list[tuple[object, ...]] = []
+
+    def saved_session(_jira_key: str, kind: str) -> str:
+        return {
+            refine.REFINE_SESSION_KIND: "refine-saved",
+            refine.IMPLEMENT_SESSION_KIND: "implement-saved",
+        }[kind]
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        del kwargs
+        calls.append(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(refine, "get_opencode_session_id", saved_session)
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", create_process)
+
+    async def exercise() -> None:
+        finished: list[refine.RefineSession] = []
+
+        async def on_finished(session: refine.RefineSession) -> None:
+            finished.append(session)
+
+        for kind, label in (
+            (refine.REFINE_SESSION_KIND, "Refine"),
+            (refine.IMPLEMENT_SESSION_KIND, "Implement"),
+        ):
+            session = refine.RefineSession(
+                "WORK-901",
+                f"{label} prompt",
+                tmp_path,
+                on_finished,
+                stale_after=1,
+                session_kind=kind,
+                action_label=label,
+            )
+            session.start()
+            await asyncio.wait_for(session.finished.wait(), timeout=1)
+
+        assert len(finished) == 2
+
+    asyncio.run(exercise())
+    assert calls == [
+        ("opencode", "--session", "refine-saved"),
+        ("opencode", "--session", "implement-saved"),
+    ]
+
+
+def test_refine_and_implement_session_mappings_are_persisted_independently() -> None:
+    key = "WORK-902"
+
+    assert refine.save_opencode_session_id(key, refine.REFINE_SESSION_KIND, "refine-902") == (
+        "refine-902"
+    )
+    assert refine.save_opencode_session_id(key, refine.IMPLEMENT_SESSION_KIND, "implement-902") == (
+        "implement-902"
+    )
+    assert refine.get_opencode_session_id(key, refine.REFINE_SESSION_KIND) == "refine-902"
+    assert refine.get_opencode_session_id(key, refine.IMPLEMENT_SESSION_KIND) == "implement-902"
+
+
+def test_concurrent_refine_and_implement_discovery_allocates_distinct_sessions_and_resumes(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeStream:
+        async def read(self, size: int) -> bytes:
+            del size
+            return b""
+
+    class FakeProcess:
+        pid = None
+        stdin = None
+        stdout = FakeStream()
+
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    calls: list[tuple[object, ...]] = []
+    created_at = time.time() + 1
+    both_processes_started = asyncio.Event()
+    mappings_saved = asyncio.Event()
+
+    async def list_sessions(_working_directory: Path) -> list[dict[str, object]]:
+        await both_processes_started.wait()
+        return [
+            {"id": "session-refine", "time": {"created": created_at}},
+            {"id": "session-implement", "time": {"created": created_at}},
+        ]
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        del kwargs
+        calls.append(args)
+        if len(calls) == 2:
+            both_processes_started.set()
+        return FakeProcess()
+
+    monkeypatch.setattr(refine, "_list_opencode_sessions", list_sessions)
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", create_process)
+    original_save = refine.save_opencode_session_id
+
+    def save_session(jira_key: str, kind: str, session_id: str) -> str | None:
+        result = original_save(jira_key, kind, session_id)
+        if result is not None and len(_session_mappings(jira_key)) == 2:
+            mappings_saved.set()
+        return result
+
+    def _session_mappings(jira_key: str) -> list[OpenCodeSession]:
+        with SessionLocal() as db:
+            return list(
+                db.scalars(select(OpenCodeSession).where(OpenCodeSession.jira_key == jira_key))
+            )
+
+    monkeypatch.setattr(refine, "save_opencode_session_id", save_session)
+
+    async def exercise() -> None:
+        finished: list[refine.RefineSession] = []
+
+        async def on_finished(session: refine.RefineSession) -> None:
+            finished.append(session)
+
+        sessions = [
+            refine.RefineSession(
+                "WORK-903",
+                "Refine prompt",
+                tmp_path,
+                on_finished,
+                stale_after=1,
+                session_kind=refine.REFINE_SESSION_KIND,
+                action_label="Refine",
+            ),
+            refine.RefineSession(
+                "WORK-903",
+                "Implement prompt",
+                tmp_path,
+                on_finished,
+                stale_after=1,
+                session_kind=refine.IMPLEMENT_SESSION_KIND,
+                action_label="Implement",
+            ),
+        ]
+        for session in sessions:
+            session.start()
+        await asyncio.wait_for(mappings_saved.wait(), timeout=1)
+        await asyncio.gather(*(session.finished.wait() for session in sessions))
+        assert len(finished) == 2
+
+        with SessionLocal() as db:
+            mappings = {
+                session.kind: session.session_id
+                for session in db.scalars(
+                    select(OpenCodeSession).where(OpenCodeSession.jira_key == "WORK-903")
+                )
+            }
+        assert set(mappings) == {refine.REFINE_SESSION_KIND, refine.IMPLEMENT_SESSION_KIND}
+        assert len(set(mappings.values())) == 2
+
+        restart_calls: list[tuple[object, ...]] = []
+
+        async def create_restart_process(*args: object, **kwargs: object) -> FakeProcess:
+            del kwargs
+            restart_calls.append(args)
+            return FakeProcess()
+
+        monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", create_restart_process)
+        restarts = [
+            refine.RefineSession(
+                "WORK-903",
+                "unused refine prompt",
+                tmp_path,
+                on_finished,
+                stale_after=1,
+                session_kind=refine.REFINE_SESSION_KIND,
+                action_label="Refine",
+            ),
+            refine.RefineSession(
+                "WORK-903",
+                "unused implement prompt",
+                tmp_path,
+                on_finished,
+                stale_after=1,
+                session_kind=refine.IMPLEMENT_SESSION_KIND,
+                action_label="Implement",
+            ),
+        ]
+        for session in restarts:
+            session.start()
+        await asyncio.gather(*(session.finished.wait() for session in restarts))
+        assert {call[2] for call in restart_calls} == set(mappings.values())
+
+    asyncio.run(exercise())
+    assert {call[2] for call in calls} == {"Refine prompt", "Implement prompt"}
+
+
+def test_implement_websocket_launches_for_top_level_and_child_with_independent_prompts(
+    monkeypatch, tmp_path
+) -> None:
+    class FakeStream:
+        async def read(self, size: int) -> bytes:
+            del size
+            return b""
+
+    class FakeStdin:
+        def write(self, data: bytes) -> None:
+            del data
+
+        async def drain(self) -> None:
+            pass
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.stdin = FakeStdin()
+            self.stdout = FakeStream()
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    calls: list[tuple[object, ...]] = []
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        del kwargs
+        if args[1:3] == ("session", "list"):
+            raise OSError("session listing unavailable")
+        calls.append(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(refine.asyncio, "create_subprocess_exec", create_process)
+    project = tmp_path / "implement-component"
+    project.mkdir()
+    with SessionLocal() as db:
+        config = _seed_jira_config(db)
+        config.browser_base_url = "https://jira.example.test/context"
+        config.local_projects_directory = str(tmp_path)
+        config.implement_prompt_template = "Implement <TICKET_URL> now."
+        parent = Ticket(
+            summary="Implement parent",
+            position=0,
+            jira_issue_key="WORK-910",
+            component=project.name,
+        )
+        child = Ticket(
+            summary="Implement child",
+            position=0,
+            jira_issue_key="work-911",
+            component=project.name,
+            parent=parent,
+        )
+        db.add_all([parent, child])
+        unsynced = Ticket(summary="Unsynced implement", position=1, component=project.name)
+        db.add(unsynced)
+        db.commit()
+        parent_id, child_id, unsynced_id = parent.id, child.id, unsynced.id
+
+    with client.websocket_connect(f"/api/tickets/{parent_id}/implement") as websocket:
+        assert websocket.receive_bytes() == b"\r\n[Implement exited with code 0]\r\n"
+    with client.websocket_connect(f"/api/tickets/{child_id}/implement") as websocket:
+        assert websocket.receive_bytes() == b"\r\n[Implement exited with code 0]\r\n"
+    with client.websocket_connect(f"/api/tickets/{unsynced_id}/implement") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Implement error] Implement is available only for tickets synced to Jira.\r\n"
+        )
+
+    assert [call for call in calls if call[1] == "--prompt"] == [
+        (
+            "opencode",
+            "--prompt",
+            "Implement https://jira.example.test/context/browse/WORK-910 now.",
+        ),
+        (
+            "opencode",
+            "--prompt",
+            "Implement https://jira.example.test/context/browse/WORK-911 now.",
+        ),
+    ]
+
+
+def test_implement_websocket_reports_missing_and_invalid_setup_before_launch(tmp_path) -> None:
+    project = tmp_path / "implement-validation-component"
+    project.mkdir()
+    with SessionLocal() as db:
+        config = _seed_jira_config(db, local_projects_directory=str(tmp_path))
+        component = Component(name=project.name)
+        config.browser_base_url = ""
+        missing_browser = Ticket(
+            summary="Implement without browser URL",
+            position=0,
+            jira_issue_key="WORK-912",
+            component=component.name,
+        )
+        config.browser_base_url = "https://[invalid"
+        invalid_browser = Ticket(
+            summary="Implement with invalid browser URL",
+            position=1,
+            jira_issue_key="WORK-913",
+            component=component.name,
+        )
+        config.browser_base_url = "https://jira.example.test"
+        missing_component = Ticket(
+            summary="Implement without component",
+            position=2,
+            jira_issue_key="WORK-914",
+        )
+        db.add_all([component, missing_browser, invalid_browser, missing_component])
+        db.commit()
+        missing_browser_id = missing_browser.id
+        invalid_browser_id = invalid_browser.id
+        missing_component_id = missing_component.id
+        config.browser_base_url = ""
+        db.commit()
+
+    with client.websocket_connect(f"/api/tickets/{missing_browser_id}/implement") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Implement error] Configure the Jira browser URL before using Implement.\r\n"
+        )
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://[invalid"
+        db.commit()
+    with client.websocket_connect(f"/api/tickets/{invalid_browser_id}/implement") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Implement error] The configured Jira browser URL is invalid.\r\n"
+        )
+
+    with SessionLocal() as db:
+        config = db.get(JiraConfig, 1)
+        assert config is not None
+        config.browser_base_url = "https://jira.example.test"
+        db.commit()
+    with client.websocket_connect(f"/api/tickets/{missing_component_id}/implement") as websocket:
+        assert websocket.receive_text() == (
+            "\r\n[Implement error] Assign a local component before using Implement.\r\n"
+        )
+
+
+def test_implement_websocket_reports_and_logs_opencode_start_failure(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    project_directory = tmp_path / "implement-component-start-failure"
+    project_directory.mkdir()
+
+    async def fail_to_start(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise FileNotFoundError(2, "No such file or directory", "opencode")
+
+    monkeypatch.setattr("work_tickets.refine.asyncio.create_subprocess_exec", fail_to_start)
+    with SessionLocal() as db:
+        config = _seed_jira_config(db, local_projects_directory=str(tmp_path))
+        config.browser_base_url = "https://jira.example.test"
+        component = Component(name=project_directory.name)
+        ticket = Ticket(
+            summary="Cannot start Implement",
+            position=0,
+            jira_issue_key="WORK-915",
+            component=component.name,
+        )
+        db.add_all([component, ticket])
+        db.commit()
+        ticket_id = ticket.id
+
+    with caplog.at_level(logging.ERROR, logger="work_tickets.refine"):
+        with client.websocket_connect(f"/api/tickets/{ticket_id}/implement") as websocket:
+            assert websocket.receive_text() == (
+                "\r\n[Implement error] Could not start opencode: No such file or directory\r\n"
+            )
+    assert "Implement process startup failed for Jira issue WORK-915" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
 
 
 def test_opencode_session_discovery_persists_newest_session_in_the_window(monkeypatch) -> None:
@@ -5955,13 +6397,22 @@ def test_refine_websocket_reports_missing_component_before_launch(tmp_path) -> N
 def test_refine_frontend_uses_xterm_and_only_renders_for_jira_keys() -> None:
     frontend_source = Path(__file__).parents[1] / "frontend" / "src"
     terminal_source = (frontend_source / "components" / "RefineTerminal.vue").read_text()
+    implement_terminal_source = (
+        frontend_source / "components" / "ImplementTerminal.vue"
+    ).read_text()
     ticket_card_source = (frontend_source / "components" / "TicketCard.vue").read_text()
 
     assert 'from "@xterm/xterm"' in terminal_source
     assert "acquireRefineSession(sessionIdentity(), socketUrl())" in terminal_source
     assert 'v-if="ticket.jira_issue_key"' in terminal_source
     assert ':disabled="!ticket.component || !browserBaseUrl"' in terminal_source
+    assert 'label="Implement"' in implement_terminal_source
+    assert "/api/tickets/${props.ticket.id}/implement" in implement_terminal_source
+    assert "acquireImplementSession" in implement_terminal_source
+    assert ':disabled="!ticket.component || !browserBaseUrl"' in implement_terminal_source
+    assert 'v-if="ticket.jira_issue_key"' in implement_terminal_source
     assert '<RefineTerminal :ticket="subtask"' in ticket_card_source
+    assert '<ImplementTerminal :ticket="subtask"' in ticket_card_source
     assert "onMounted(() =>" in terminal_source
     coordinator_source = (
         frontend_source / "components" / "RefineSessionCoordinator.vue"
@@ -5969,6 +6420,8 @@ def test_refine_frontend_uses_xterm_and_only_renders_for_jira_keys() -> None:
     app_source = (frontend_source / "App.vue").read_text()
     assert "RefineSessionCoordinator" in coordinator_source
     assert '<RefineSessionCoordinator :tickets="state.tickets" />' in app_source
+    assert '<ImplementSessionCoordinator :tickets="state.tickets" />' in app_source
+    assert "settings.implement_prompt_template" in app_source
 
 
 def test_api_imports_jira_issue_and_subtasks_with_local_fields(monkeypatch) -> None:

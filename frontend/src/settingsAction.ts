@@ -1,6 +1,7 @@
 export interface JiraSettings {
   base_url: string;
   browser_base_url: string;
+  implement_prompt_template: string;
   local_projects_directory: string;
   gitlab_base_url: string;
   email: string;
@@ -13,6 +14,10 @@ export interface JiraSettings {
   ready_to_merge_status: string;
   ready_to_deploy_status: string;
   validate: boolean;
+}
+
+export function applyJiraConfig(settings: JiraSettings, config: Partial<JiraSettings>): void {
+  Object.assign(settings, config);
 }
 
 export const gitlabBaseUrlGuidance = "Use the GitLab site root, including an installation context path when applicable. Do not include /api/v4 or a merge-request path. Examples: https://gitlab.com and https://gitlab.example.com/gitlab. An authenticated personal access token is required for connection testing and Reviews merge-request operations.";

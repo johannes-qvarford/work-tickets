@@ -17,6 +17,7 @@ _REQUIRED_COLUMNS = {
         "id",
         "base_url",
         "browser_base_url",
+        "implement_prompt_template",
         "local_projects_directory",
         "gitlab_base_url",
         "email",
@@ -53,6 +54,7 @@ _INITIAL_REQUIRED_COLUMNS = {
     "categories": _REQUIRED_COLUMNS["categories"],
     "jira_config": _REQUIRED_COLUMNS["jira_config"]
     - {
+        "implement_prompt_template",
         "local_projects_directory",
         "gitlab_base_url",
         "gitlab_token",

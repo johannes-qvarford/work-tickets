@@ -10,6 +10,7 @@ import Textarea from "primevue/textarea";
 import CategoryButtons, { type Category, type CategoryComponent } from "./components/CategoryButtons.vue";
 import ComponentSelect from "./components/ComponentSelect.vue";
 import RefineSessionCoordinator from "./components/RefineSessionCoordinator.vue";
+import ImplementSessionCoordinator from "./components/ImplementSessionCoordinator.vue";
 import TicketCard, { type Ticket } from "./components/TicketCard.vue";
 import { clearSubtaskDragState, displayedDropTargetIndex, dropTargetIndex } from "./reordering";
 import {
@@ -20,6 +21,7 @@ import {
 } from "./reviewActionLifecycle";
 import {
   buildSettingsRequest,
+  applyJiraConfig,
   gitlabBaseUrlGuidance,
   jiraUrlGuidance,
   requestErrorMessage,
@@ -74,7 +76,7 @@ const newSubtasks = ref<Array<{ summary: string; description: string; planned_da
 const newCategory = ref("");
 const newComponent = ref("");
 const selectedComponentByCategory = ref<Record<number, number | null>>({});
-const settings = ref<JiraSettings>({ base_url: "", browser_base_url: "", local_projects_directory: "", gitlab_base_url: "", email: "", api_token: "", gitlab_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", in_review_status: "In Review", ready_to_merge_status: "Ready to Merge", ready_to_deploy_status: "Ready to Deploy", validate: false });
+const settings = ref<JiraSettings>({ base_url: "", browser_base_url: "", implement_prompt_template: "Please implement the work described at <TICKET_URL> and run the relevant tests.", local_projects_directory: "", gitlab_base_url: "", email: "", api_token: "", gitlab_token: "", project_key: "", issue_type: "Task", completed_statuses: "Done", in_review_status: "In Review", ready_to_merge_status: "Ready to Merge", ready_to_deploy_status: "Ready to Deploy", validate: false });
 
 const visibleTickets = computed(() => categoryFilter.value === null ? state.value.tickets : state.value.tickets.filter((ticket) => ticket.category_id === categoryFilter.value));
 const dueTickets = computed(() => visibleTickets.value.filter((ticket) => !ticket.local_completed && ticket.planned_date && ticket.planned_date <= dateValue(todayDate())));
@@ -112,7 +114,7 @@ async function request(url: string, init: RequestInit = {}) {
   if (result.state) state.value = result.state;
   return result;
 }
-async function load() { const loaded = await (await fetch("/api/state")).json() as State; state.value = loaded; if (loaded.jira_config) Object.assign(settings.value, loaded.jira_config); }
+async function load() { const loaded = await (await fetch("/api/state")).json() as State; state.value = loaded; if (loaded.jira_config) applyJiraConfig(settings.value, loaded.jira_config); }
 async function loadReviews() {
   reviewsLoading.value = true;
   reviewsError.value = null;
@@ -169,7 +171,7 @@ async function assignComponent(category: Category) {
 async function removeCategoryComponent(categoryId: number, componentId: number) { await run(() => request(`/api/categories/${categoryId}/components/${componentId}`, { method: "DELETE" }), "Component removed from category."); }
 async function moveCategoryComponent(categoryId: number, componentId: number, targetIndex: number) { await run(() => request(`/api/categories/${categoryId}/components/${componentId}/move?target_index=${targetIndex}`, { method: "POST" }), "Component order saved."); }
 function availableComponents(category: Category) { return state.value.components.filter((component) => !(category.components || []).some((assigned) => assigned.id === component.id)); }
-async function saveSettings() { const validate = settings.value.validate; await run(async () => { const result = await request("/api/settings/jira", buildSettingsRequest(settings.value, validate)); settings.value.api_token = ""; settings.value.gitlab_token = ""; if (result.state.jira_config) Object.assign(settings.value, result.state.jira_config); }, "Jira and GitLab settings saved."); }
+async function saveSettings() { const validate = settings.value.validate; await run(async () => { const result = await request("/api/settings/jira", buildSettingsRequest(settings.value, validate)); settings.value.api_token = ""; settings.value.gitlab_token = ""; if (result.state.jira_config) applyJiraConfig(settings.value, result.state.jira_config); }, "Jira and GitLab settings saved."); }
 async function sync(url: string) { await run(() => request(url, { method: "POST" }), "Jira sync complete."); }
 function syncUrl(ticket: Ticket) { return `/api/tickets/${ticket.id}/${ticket.jira_issue_key ? "sync-from-jira" : "sync"}`; }
 async function moveTicket(ticketId: number, targetIndex: number) { await run(() => request(`/api/tickets/${ticketId}/move?target_index=${targetIndex}`, { method: "POST" }), "Ticket order saved."); }
@@ -215,6 +217,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
     </header>
     <Message v-if="notice" :severity="notice.severity" closable @close="notice = null">{{ notice.text }}</Message>
     <RefineSessionCoordinator :tickets="state.tickets" />
+    <ImplementSessionCoordinator :tickets="state.tickets" />
     <section v-if="page === 'settings'" class="settings-guidance" aria-labelledby="jira-url-guidance-heading">
       <h3 id="jira-url-guidance-heading">Jira URL guidance</h3>
       <p>{{ jiraUrlGuidance }}</p>
@@ -266,6 +269,7 @@ onMounted(() => { load(); window.addEventListener("hashchange", () => { setPage(
     </main>
 
       <main v-else class="narrow"><section class="hero"><div><span class="eyebrow">CONNECTIONS</span><h2>Application settings</h2><p>Configure the local Jira and GitLab connections and local project root used by Refine.</p></div></section><Card><template #content><form class="form" @submit.prevent="saveSettings"><label>Jira API URL<InputText v-model="settings.base_url" type="url" required placeholder="https://api.atlassian.com/..." /></label><label>Jira browser URL<InputText v-model="settings.browser_base_url" type="url" placeholder="https://your-company.atlassian.net" /></label><label>Local projects directory<InputText v-model="settings.local_projects_directory" placeholder="/path/to/local/projects" /></label><div class="two-col"><label>Account email<InputText v-model="settings.email" type="email" required /></label><label>Project key<InputText v-model="settings.project_key" required /></label></div><div class="two-col"><label>Issue type<InputText v-model="settings.issue_type" required /></label><label>Completed statuses<InputText v-model="settings.completed_statuses" /></label></div><div class="two-col"><label>In Review status<InputText v-model="settings.in_review_status" required /></label><label>Ready to Merge status<InputText v-model="settings.ready_to_merge_status" required /></label></div><label>Ready to Deploy status<InputText v-model="settings.ready_to_deploy_status" required /></label><label>Jira API token<InputText v-model="settings.api_token" type="password" placeholder="Leave blank to keep saved token" /></label><label>GitLab base URL<InputText v-model="settings.gitlab_base_url" type="url" placeholder="https://gitlab.example" /></label><label>GitLab personal access token<InputText v-model="settings.gitlab_token" type="password" placeholder="Leave blank to keep saved token" /></label><div class="button-row"><Button type="submit" label="Save settings" icon="pi pi-save" :loading="busy" /><Button type="button" label="Save & test connection" severity="secondary" @click="settings.validate = true; saveSettings(); settings.validate = false" /></div></form></template></Card></main>
+    <Card v-if="page === 'settings'" class="settings-guidance"><template #content><label class="form">Implement prompt template<p class="muted">Example: <code>Please implement &lt;TICKET_URL&gt;</code> becomes <code>Please implement https://jira.example/browse/WORK-123</code>.</p><Textarea v-model="settings.implement_prompt_template" rows="4" autoResize aria-label="Implement prompt template" /></label></template></Card>
     <Card v-if="page === 'create'" class="create-notes-card"><template #content><label class="form">Personal notes<Textarea v-model="newTicket.notes" rows="4" autoResize placeholder="Notes for your local workflow" /></label></template></Card>
   </div>
 </template>
