@@ -78,10 +78,27 @@ _MERGE_POLL_TIMEOUT_SECONDS = 60.0
 _MERGE_POLL_INITIAL_DELAY_SECONDS = 0.5
 _MERGE_POLL_MAX_DELAY_SECONDS = 5.0
 _GIT_SHA = re.compile(r"[0-9a-fA-F]{7,40}\Z")
+_GITLAB_HTTP_STATUS = re.compile(r"GitLab returned HTTP (?P<status>[0-9]{3})(?:[:.]|$)")
 _REVIEW_COMMENT = "Tested and reviewed."
 _DISCUSSION_APPROVAL_COMMENT = "Approved 👑"
 _ready_to_merge_locks: dict[str, threading.Lock] = {}
 _ready_to_merge_locks_guard = threading.Lock()
+
+
+def _is_gitlab_not_found(error: GitLabError) -> bool:
+    status_code = getattr(error, "status_code", None)
+    if status_code == 404:
+        return True
+    match = _GITLAB_HTTP_STATUS.search(str(error))
+    return match is not None and match.group("status") == "404"
+
+
+def _unavailable_merge_request_message(project_path: str, number: int) -> str:
+    return (
+        f"GitLab returned HTTP 404 for merge request {project_path}!{number}. "
+        "The project path or merge request may be invalid, deleted, or moved, or the "
+        "configured GitLab credentials may not have visibility or permission to access it."
+    )
 
 
 def canonicalize_jira_key(key: str) -> str:
@@ -346,6 +363,10 @@ def _retrieve_merge_requests(
         try:
             merge_request = gitlab_client.get_merge_request(project_path, reference.number)
         except GitLabError as exc:
+            if _is_gitlab_not_found(exc):
+                raise JiraError(
+                    _unavailable_merge_request_message(project_path, reference.number)
+                ) from exc
             raise JiraError(str(exc)) from exc
         details.append((reference, merge_request))
 
@@ -679,6 +700,10 @@ def _refresh_selected_merge_request(
     try:
         current = gitlab_client.get_merge_request(project_path, reference.number)
     except GitLabError as exc:
+        if _is_gitlab_not_found(exc):
+            raise JiraError(
+                _unavailable_merge_request_message(project_path, reference.number)
+            ) from exc
         raise JiraError(str(exc)) from exc
     if current.state not in _KNOWN_MERGE_REQUEST_STATES:
         raise JiraError(
@@ -747,9 +772,17 @@ def _merge_selected_merge_request(
         # did not succeed before reporting the mutation error.
         try:
             current = gitlab_client.get_merge_request(project_path, reference.number)
-        except GitLabError:
+        except GitLabError as confirmation_error:
+            if _is_gitlab_not_found(exc) or _is_gitlab_not_found(confirmation_error):
+                raise JiraError(
+                    _unavailable_merge_request_message(project_path, reference.number)
+                ) from exc
             raise JiraError(str(exc)) from exc
         if current.state != "merged":
+            if _is_gitlab_not_found(exc):
+                raise JiraError(
+                    _unavailable_merge_request_message(project_path, reference.number)
+                ) from exc
             raise JiraError(str(exc)) from exc
         return current
     except JiraError:
@@ -799,6 +832,10 @@ def _wait_for_merge(
             merged = _merged_after_gitlab_failure(gitlab_client, project_path, reference.number)
             if merged is not None:
                 return merged
+            if _is_gitlab_not_found(exc):
+                raise JiraError(
+                    _unavailable_merge_request_message(project_path, reference.number)
+                ) from exc
             raise JiraError(str(exc)) from exc
         if current.state == "merged":
             return current

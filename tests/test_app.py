@@ -2071,6 +2071,30 @@ def test_gitlab_client_squash_merges_and_validates_merge_response() -> None:
     assert json.loads(requests[0].content) == {"squash": True}
 
 
+def test_gitlab_client_404_does_not_expose_response_details() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(404, json={"message": "private project internals"})
+
+    config = JiraConfig(
+        gitlab_base_url="https://gitlab.example",
+        gitlab_token="gitlab-secret",
+        base_url="https://jira.example.test",
+        email="person@example.test",
+        api_token="test-token",
+        project_key="WORK",
+    )
+    gitlab = GitLabClient(config, transport=httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GitLabError, match=r"^GitLab returned HTTP 404\.$") as error:
+            gitlab.merge_merge_request("group/repository", 42)
+    finally:
+        gitlab.close()
+
+    assert error.value.status_code == 404
+    assert "private project internals" not in str(error.value)
+
+
 def test_gitlab_client_uses_squash_sha_only_when_present_and_non_null() -> None:
     base_payload = {
         "state": "merged",
@@ -3034,6 +3058,80 @@ def test_merge_selected_merge_request_treats_already_merged_as_success() -> None
     )
 
     _merge_selected_merge_request("https://gitlab.example", selection, FakeGitLabClient())
+
+
+def test_merge_selected_merge_request_reports_unavailable_404_after_failed_confirmation() -> None:
+    selection = MergeRequestSelection(
+        selected={
+            "repository": "repository",
+            "number": 518,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/518",
+            "state": "opened",
+        },
+        enabled=True,
+        reason="Selected the only open MR; closed MRs were ignored.",
+    )
+
+    class FakeGitLabClient:
+        def __init__(self) -> None:
+            self.gets = 0
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 518)
+            self.gets += 1
+            if self.gets == 1:
+                return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+            raise GitLabError("GitLab returned HTTP 404.", status_code=404)
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 518)
+            raise GitLabError("GitLab returned HTTP 404.", status_code=404)
+
+    with pytest.raises(JiraError) as error:
+        _merge_selected_merge_request("https://gitlab.example", selection, FakeGitLabClient())
+
+    assert str(error.value) == (
+        "GitLab returned HTTP 404 for merge request group/repository!518. "
+        "The project path or merge request may be invalid, deleted, or moved, or the "
+        "configured GitLab credentials may not have visibility or permission to access it."
+    )
+
+
+def test_merge_selected_merge_request_accepts_concurrent_404_when_merge_is_confirmed() -> None:
+    selection = MergeRequestSelection(
+        selected={
+            "repository": "repository",
+            "number": 519,
+            "url": "https://gitlab.example/group/repository/-/merge_requests/519",
+            "state": "opened",
+        },
+        enabled=True,
+        reason="Selected the only open MR; closed MRs were ignored.",
+    )
+
+    class FakeGitLabClient:
+        def __init__(self) -> None:
+            self.gets = 0
+
+        def get_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 519)
+            self.gets += 1
+            if self.gets == 1:
+                return GitLabMergeRequest("opened", "2026-08-30T10:00:00Z")
+            return GitLabMergeRequest(
+                "merged",
+                "2026-08-30T10:01:00Z",
+                merge_commit_sha="abcdef0123456789abcdef0123456789abcdef01",
+                web_url="https://gitlab.example/group/repository/-/merge_requests/519",
+            )
+
+        def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
+            assert (project_path, number) == ("group/repository", 519)
+            raise GitLabError("GitLab returned HTTP 404.", status_code=404)
+
+    result = _merge_selected_merge_request("https://gitlab.example", selection, FakeGitLabClient())
+
+    assert result.state == "merged"
 
 
 @pytest.mark.parametrize(
@@ -4052,6 +4150,25 @@ def test_api_ready_to_merge_review_reports_gitlab_approval_failure_without_jira_
     assert "POST /api/reviews/work-514/ready-to-merge failed" in caplog.text
     assert "Traceback (most recent call last)" in caplog.text
     assert calls == ["get:WORK-514", "gitlab-close", "close"]
+
+
+def test_api_ready_to_merge_review_reports_unavailable_merge_request(monkeypatch) -> None:
+    message = (
+        "GitLab returned HTTP 404 for merge request group/repository!518. "
+        "The project path or merge request may be invalid, deleted, or moved, or the "
+        "configured GitLab credentials may not have visibility or permission to access it."
+    )
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        raise JiraError(message)
+
+    monkeypatch.setattr("work_tickets.app.jira_service.ready_to_merge_review", fail)
+
+    response = client.post("/api/reviews/work-518/ready-to-merge")
+
+    assert response.status_code == 422
+    assert response.json() == {"ok": False, "message": message}
 
 
 def test_ready_to_merge_review_resolves_all_currently_unresolved_discussions_in_order() -> None:
