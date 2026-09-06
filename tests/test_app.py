@@ -2091,7 +2091,13 @@ def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> 
                     "id": "discussion-2",
                     "notes": [
                         {"id": 21, "resolvable": True, "resolved": True},
-                        {"id": 22, "resolvable": False, "resolved": False},
+                        {
+                            "id": 22,
+                            "resolvable": False,
+                            "resolved": None,
+                            "body": "Approved 👑",
+                        },
+                        {"id": 23, "resolvable": False, "body": "Approved 👑"},
                     ],
                 }
             ],
@@ -2101,7 +2107,15 @@ def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> 
             200,
             json={
                 "id": "discussion-1",
-                "notes": [{"id": 11, "resolvable": True, "resolved": True}],
+                "notes": [
+                    {"id": 11, "resolvable": True, "resolved": True},
+                    {
+                        "id": 31,
+                        "resolvable": False,
+                        "resolved": None,
+                        "body": "Approved 👑",
+                    },
+                ],
             },
         ),
     ]
@@ -2140,7 +2154,18 @@ def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> 
             id="discussion-2",
             notes=(
                 GitLabMergeRequestDiscussionNote(id=21, resolvable=True, resolved=True),
-                GitLabMergeRequestDiscussionNote(id=22, resolvable=False, resolved=False),
+                GitLabMergeRequestDiscussionNote(
+                    id=22,
+                    resolvable=False,
+                    resolved=False,
+                    body="Approved 👑",
+                ),
+                GitLabMergeRequestDiscussionNote(
+                    id=23,
+                    resolvable=False,
+                    resolved=False,
+                    body="Approved 👑",
+                ),
             ),
         ),
     ]
@@ -2156,9 +2181,30 @@ def test_gitlab_client_retrieves_paginated_discussions_and_mutates_threads() -> 
     assert json.loads(requests[3].content) == {"resolved": True}
 
 
+def test_gitlab_client_rejects_malformed_discussion_notes() -> None:
+    malformed_notes = (
+        {"id": 0, "resolvable": True, "resolved": False},
+        {"id": "1", "resolvable": True, "resolved": False},
+        {"id": True, "resolvable": True, "resolved": False},
+        {"id": 1, "resolvable": None, "resolved": False},
+        {"id": 1, "resolvable": "false", "resolved": False},
+        {"id": 1, "resolvable": True, "resolved": None},
+        {"id": 1, "resolvable": True, "resolved": "false"},
+        {"id": 1, "resolvable": False, "resolved": "false"},
+        {"id": 1, "resolvable": False, "resolved": False, "body": 123},
+    )
+
+    for raw_note in malformed_notes:
+        with pytest.raises(GitLabError, match="invalid note"):
+            GitLabClient._discussion_from_payload({"id": "discussion-1", "notes": [raw_note]})
+
+
 def test_gitlab_client_validates_discussion_and_mutation_responses() -> None:
     responses = [
-        httpx.Response(200, json=[{"id": "discussion-1", "notes": [{"id": 1}]}]),
+        httpx.Response(
+            200,
+            json=[{"id": "discussion-1", "notes": [{"id": 1, "resolvable": True}]}],
+        ),
         httpx.Response(201, json={}),
         httpx.Response(
             200,
@@ -4193,7 +4239,9 @@ def test_ready_to_merge_review_preserves_discussion_failure_and_skips_later_step
         "jira-deploy-transition",
     ),
 )
-def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_stage: str) -> None:
+def test_ready_to_merge_review_retries_remote_mutations_without_duplicates(
+    failure_stage: str,
+) -> None:
     state = {
         "approved": True,
         "draft": False,
@@ -4241,18 +4289,19 @@ def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_sta
         def add_comment(self, key: str, comment: str) -> None:
             assert key == "WORK-518"
             state["comments"].append(comment)
+            state["jira_comments"].append(comment)
             if (
                 failure_stage in {"jira-review-comment", "jira-commit-comment"}
                 and not state["failed"]
             ):
                 state["failed"] = True
                 raise JiraError(f"forced failure at {failure_stage}")
-            state["jira_comments"].append(comment)
 
         def transition_issue(self, key: str, target_status: str, *, current_status: str):
             assert key == "WORK-518"
             assert current_status == state["jira_status"]
             state["transitions"].append(target_status)
+            state["jira_status"] = target_status
             if target_status == "Ready to Merge" and failure_stage == "jira-ready-transition":
                 if not state["failed"]:
                     state["failed"] = True
@@ -4261,7 +4310,6 @@ def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_sta
                 if not state["failed"]:
                     state["failed"] = True
                     raise JiraError("forced failure at jira-deploy-transition")
-            state["jira_status"] = target_status
             return JiraIssue(key=key, status_name=target_status)
 
         def close(self) -> None:
@@ -4317,19 +4365,25 @@ def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_sta
             self, project_path: str, number: int
         ) -> list[GitLabMergeRequestDiscussion]:
             assert (project_path, number) == ("group/repository", 518)
-            return [
-                GitLabMergeRequestDiscussion(
-                    "thread-1",
-                    (
-                        GitLabMergeRequestDiscussionNote(
-                            1,
-                            resolvable=True,
-                            resolved=state["discussion_resolved"],
-                            body=state["discussion_body"],
-                        ),
-                    ),
-                )
+            raw_notes: list[dict[str, object]] = [
+                {
+                    "id": 1,
+                    "resolvable": True,
+                    "resolved": state["discussion_resolved"],
+                    "body": "Needs review",
+                }
             ]
+            if state["discussion_body"] is not None:
+                # Model the raw app-added note returned by GitLab. The
+                # non-resolvable note omits its resolution field.
+                raw_notes.append(
+                    {
+                        "id": 2,
+                        "resolvable": False,
+                        "body": state["discussion_body"],
+                    }
+                )
+            return [GitLabClient._discussion_from_payload({"id": "thread-1", "notes": raw_notes})]
 
         def add_merge_request_discussion_note(
             self, project_path: str, number: int, discussion_id: str, body: str
@@ -4341,28 +4395,28 @@ def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_sta
                 "Approved 👑",
             )
             state["discussion_comments"] += 1
+            state["discussion_body"] = body
             if failure_stage == "discussion-comment" and not state["failed"]:
                 state["failed"] = True
                 raise GitLabError("forced failure at discussion-comment")
-            state["discussion_body"] = body
 
         def resolve_merge_request_discussion(
             self, project_path: str, number: int, discussion_id: str
         ) -> None:
             assert (project_path, number, discussion_id) == ("group/repository", 518, "thread-1")
             state["discussion_resolutions"] += 1
+            state["discussion_resolved"] = True
             if failure_stage == "discussion-resolve" and not state["failed"]:
                 state["failed"] = True
                 raise GitLabError("forced failure at discussion-resolve")
-            state["discussion_resolved"] = True
 
         def merge_merge_request(self, project_path: str, number: int) -> GitLabMergeRequest:
             assert (project_path, number) == ("group/repository", 518)
             state["merges"] += 1
+            state["mr_state"] = "merged"
             if failure_stage == "merge" and not state["failed"]:
                 state["failed"] = True
                 raise GitLabError("forced failure at merge")
-            state["mr_state"] = "merged"
             return GitLabMergeRequest(
                 "merged",
                 "2026-08-30T10:01:00Z",
@@ -4376,13 +4430,19 @@ def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_sta
     with SessionLocal() as db:
         _seed_jira_config(db, in_review_status="In Review")
         db.commit()
-        with pytest.raises(JiraError, match=failure_stage):
+        try:
             ready_to_merge_review(
                 "WORK-518",
                 db,
                 jira_client_factory=FakeJiraClient,
                 gitlab_client_factory=FakeGitLabClient,
             )
+        except JiraError:
+            # Approval and draft mutations do not have an independent
+            # confirmation step, so their lost responses surface once.
+            assert failure_stage in {"approval", "draft"}
+        else:
+            assert failure_stage not in {"approval", "draft"}
         result = ready_to_merge_review(
             "WORK-518",
             db,
@@ -4400,11 +4460,14 @@ def test_ready_to_merge_review_retries_each_stage_from_current_state(failure_sta
         "Tested and reviewed.",
         "Merged with [abcdef01|https://gitlab.example/group/repository/-/commit/abcdef0123456789abcdef0123456789abcdef01]",
     ]
-    assert state["discussion_comments"] == (2 if failure_stage == "discussion-comment" else 1)
-    assert state["discussion_resolutions"] == (2 if failure_stage == "discussion-resolve" else 1)
-    assert state["approval_mutations"] <= 1
-    assert state["draft_mutations"] <= 1
-    assert state["merges"] == (2 if failure_stage == "merge" else 1)
+    assert state["discussion_comments"] == 1
+    assert state["discussion_resolutions"] == 1
+    assert state["approval_mutations"] == (1 if failure_stage == "approval" else 0)
+    assert state["draft_mutations"] == (
+        0 if failure_stage in {"discussion-comment", "discussion-resolve"} else 1
+    )
+    assert state["merges"] == 1
+    assert state["transitions"] == ["Ready to Merge", "Ready to Deploy"]
 
 
 def test_ready_to_merge_review_serializes_concurrent_attempts_for_one_issue() -> None:

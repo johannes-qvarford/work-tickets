@@ -252,10 +252,13 @@ class GitLabClient:
             resolvable = raw_note.get("resolvable")
             resolved = raw_note.get("resolved")
             body = raw_note.get("body")
+            # GitLab may omit or return null for the resolution state of a
+            # non-resolvable reply, such as the approval note this app adds.
             if (
                 not _is_positive_integer(note_id)
                 or not isinstance(resolvable, bool)
-                or not isinstance(resolved, bool)
+                or (resolvable and not isinstance(resolved, bool))
+                or (not resolvable and resolved is not None and not isinstance(resolved, bool))
                 or (body is not None and not isinstance(body, str))
             ):
                 raise GitLabError(f"GitLab returned an invalid note in discussion {discussion_id}.")
@@ -264,7 +267,7 @@ class GitLabClient:
                 GitLabMergeRequestDiscussionNote(
                     id=note_id,
                     resolvable=resolvable,
-                    resolved=resolved,
+                    resolved=resolved if isinstance(resolved, bool) else False,
                     body=body,
                 )
             )
