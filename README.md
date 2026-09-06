@@ -9,7 +9,7 @@ A local-first personal ticket workflow for prioritizing work and syncing selecte
 - Local-only fields remain local: category, planned date, and priority ordering.
 - Editing a synced ticket is supported; local workflow fields remain editable, while Jira-owned summary and description fields are read-only after sync.
 - Jira setup is configured once and can be revalidated when needed.
-- OpenCode integration is intentionally deferred.
+- OpenCode refinement sessions are persisted by Jira key and resumed after server restarts.
 
 ## Development
 

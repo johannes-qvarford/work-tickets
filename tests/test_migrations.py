@@ -20,6 +20,7 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
         "categories",
         "components",
         "jira_config",
+        "opencode_sessions",
         "tickets",
     }
     assert {column["name"] for column in inspect(database_engine).get_columns("jira_config")} == {
@@ -50,7 +51,7 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
     with database_engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one() == 1
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-            "007_repair_ticket_notes"
+            "008_add_opencode_sessions"
         )
 
 
@@ -166,7 +167,7 @@ def test_nullable_notes_from_old_002_are_backfilled_and_rejected(tmp_path) -> No
             (11, "Keep this note"),
         ]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "007_repair_ticket_notes"
+            "008_add_opencode_sessions"
         )
 
     with pytest.raises(IntegrityError):
@@ -222,7 +223,7 @@ def test_existing_homegrown_tracking_is_converted_without_losing_data(tmp_path) 
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Legacy parent", 1), (10, "Legacy subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "007_repair_ticket_notes"
+            "008_add_opencode_sessions"
         )
 
 
@@ -263,7 +264,7 @@ def test_untracked_pre_migration_schema_is_upgraded_without_losing_data(tmp_path
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Pre-migration parent", 1), (20, "Pre-migration subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "007_repair_ticket_notes"
+            "008_add_opencode_sessions"
         )
 
 
