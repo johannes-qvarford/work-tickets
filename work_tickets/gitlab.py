@@ -15,6 +15,10 @@ _GIT_SHA = re.compile(r"[0-9a-fA-F]{7,40}\Z")
 class GitLabError(Exception):
     """An expected, user-facing GitLab integration error."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 @dataclass(frozen=True)
 class GitLabMergeRequest:
@@ -305,16 +309,22 @@ class GitLabClient:
             response = self._client.request(method, path, **kwargs)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
             detail = ""
-            try:
-                body = exc.response.json()
-                if isinstance(body, dict):
-                    message = body.get("message")
-                    if isinstance(message, str) and message:
-                        detail = f": {message}"
-            except ValueError:
-                pass
-            raise GitLabError(f"GitLab returned HTTP {exc.response.status_code}{detail}.") from exc
+            # GitLab can use 404 for inaccessible resources. Do not expose its
+            # response body because it may contain details about a private project.
+            if status_code != 404:
+                try:
+                    body = exc.response.json()
+                    if isinstance(body, dict):
+                        message = body.get("message")
+                        if isinstance(message, str) and message:
+                            detail = f": {message}"
+                except ValueError:
+                    pass
+            raise GitLabError(
+                f"GitLab returned HTTP {status_code}{detail}.", status_code=status_code
+            ) from exc
         except httpx.RequestError as exc:
             raise GitLabError(f"Could not reach GitLab: {exc}") from exc
         return response
