@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -22,7 +23,11 @@ os.environ["WORK_TICKETS_DATABASE_URL"] = f"sqlite:///{_test_db_path}"
 atexit.register(_test_db_path.unlink, missing_ok=True)
 
 from work_tickets import refine  # noqa: E402
-from work_tickets.app import app, parse_jira_issue_reference  # noqa: E402
+from work_tickets.app import (  # noqa: E402
+    ExceptionLoggingMiddleware,
+    app,
+    parse_jira_issue_reference,
+)
 from work_tickets.db_migrations import apply_migrations  # noqa: E402
 from work_tickets.gitlab import (  # noqa: E402
     GitLabClient,
@@ -106,6 +111,50 @@ def test_homepage_is_available_and_legacy_frontend_is_removed() -> None:
     assert 'type="module"' in response.text
     assert client.get("/legacy").status_code == 404
     assert not list((Path(__file__).parents[1] / "work_tickets" / "templates").glob("*.html"))
+
+
+def test_unhandled_request_exception_is_logged(monkeypatch, caplog) -> None:
+    def fail(_db) -> dict[str, object]:
+        raise RuntimeError("forced backend failure")
+
+    monkeypatch.setattr("work_tickets.app._api_state", fail)
+    with TestClient(app, raise_server_exceptions=False) as error_client:
+        with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+            response = error_client.get("/api/state?api_token=must-not-be-logged")
+
+    assert response.status_code == 500
+    assert "Unhandled exception while processing GET /api/state" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "forced backend failure" in caplog.text
+    assert "must-not-be-logged" not in caplog.text
+
+
+def test_unhandled_websocket_exception_is_logged(caplog) -> None:
+    assert any(middleware.cls is ExceptionLoggingMiddleware for middleware in app.user_middleware)
+
+    async def fail(_scope, _receive, _send) -> None:
+        raise RuntimeError("forced websocket failure")
+
+    async def receive() -> dict[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(_message: dict[str, object]) -> None:
+        return None
+
+    middleware = ExceptionLoggingMiddleware(fail)
+    scope = {
+        "type": "websocket",
+        "path": "/api/tickets/1/refine",
+        "query_string": b"api_token=websocket-secret",
+    }
+    with caplog.at_level(logging.ERROR, logger="work_tickets.app"):
+        with pytest.raises(RuntimeError, match="forced websocket failure"):
+            asyncio.run(middleware(scope, receive, send))
+
+    assert "Unhandled exception while processing WebSocket /api/tickets/1/refine" in caplog.text
+    assert "Traceback (most recent call last)" in caplog.text
+    assert "forced websocket failure" in caplog.text
+    assert "websocket-secret" not in caplog.text
 
 
 def test_spa_state_api_serializes_tickets_categories_and_jira_config() -> None:
