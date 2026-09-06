@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 from datetime import date
 from pathlib import Path
@@ -10,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import jira_service, refine, tickets, web
 from .gitlab import GitLabClient, GitLabError
@@ -26,7 +28,36 @@ from .models import (
 )
 
 app = FastAPI(title="Work Tickets")
+logger = logging.getLogger(__name__)
 parse_jira_issue_reference = jira_service.parse_jira_issue_reference
+
+
+class ExceptionLoggingMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await self.app(scope, receive, send)
+        except Exception:
+            scope_type = scope["type"]
+            path = scope.get("path", "")
+            if scope_type == "http":
+                logger.exception(
+                    "Unhandled exception while processing %s %s", scope["method"], path
+                )
+            elif scope_type == "websocket":
+                logger.exception("Unhandled exception while processing WebSocket %s", path)
+            else:
+                logger.exception(
+                    "Unhandled exception while processing %s scope %s", scope_type, path
+                )
+            raise
+
+
+app.add_middleware(ExceptionLoggingMiddleware)
+
+
 app.mount(
     "/assets",
     StaticFiles(directory=Path(__file__).parent / "static" / "assets"),
