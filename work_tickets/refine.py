@@ -7,6 +7,7 @@ import os
 import pty
 import signal
 import subprocess
+import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -44,7 +45,14 @@ class RefineError(Exception):
 
 
 REFINE_SESSION_KIND = "refine"
+IMPLEMENT_SESSION_KIND = "implement"
+DEFAULT_IMPLEMENT_PROMPT_TEMPLATE = (
+    "Please implement the work described at <TICKET_URL> and run the relevant tests."
+)
 SESSION_DISCOVERY_WINDOW = 60.0
+_session_discovery_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 class _ClientReservation:
@@ -52,11 +60,11 @@ class _ClientReservation:
         self.acquired = False
 
 
-def refine_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
+def _jira_browser_url(ticket: Ticket, config: JiraConfig | None, action_label: str) -> str:
     if not ticket.jira_issue_key:
-        raise RefineError("Refine is available only for tickets synced to Jira.")
+        raise RefineError(f"{action_label} is available only for tickets synced to Jira.")
     if config is None or not config.browser_base_url:
-        raise RefineError("Configure the Jira browser URL before using Refine.")
+        raise RefineError(f"Configure the Jira browser URL before using {action_label}.")
 
     try:
         browser_url = urlsplit(config.browser_base_url.rstrip("/"))
@@ -66,16 +74,30 @@ def refine_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
         raise RefineError("The configured Jira browser URL is invalid.")
     jira_key = canonicalize_jira_key(ticket.jira_issue_key)
     path = f"{browser_url.path.rstrip('/')}/browse/{quote(jira_key, safe='')}"
-    return f"Refine {urlunsplit((browser_url.scheme, browser_url.netloc, path, '', ''))}"
+    return urlunsplit((browser_url.scheme, browser_url.netloc, path, "", ""))
 
 
-def refine_working_directory(ticket: Ticket, config: JiraConfig | None) -> Path:
+def refine_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
+    return f"Refine {_jira_browser_url(ticket, config, 'Refine')}"
+
+
+def implement_prompt(ticket: Ticket, config: JiraConfig | None) -> str:
+    url = _jira_browser_url(ticket, config, "Implement")
+    template = (
+        config.implement_prompt_template or DEFAULT_IMPLEMENT_PROMPT_TEMPLATE
+        if config is not None
+        else DEFAULT_IMPLEMENT_PROMPT_TEMPLATE
+    )
+    return template.replace("<TICKET_URL>", url)
+
+
+def _working_directory(ticket: Ticket, config: JiraConfig | None, action_label: str) -> Path:
     if not ticket.component:
-        raise RefineError("Assign a local component before using Refine.")
+        raise RefineError(f"Assign a local component before using {action_label}.")
     if not is_safe_local_component_name(ticket.component):
         raise RefineError("The ticket component is not a valid local project name.")
     if config is None or not config.local_projects_directory:
-        raise RefineError("Configure the local projects directory before using Refine.")
+        raise RefineError(f"Configure the local projects directory before using {action_label}.")
 
     try:
         root = Path(config.local_projects_directory).expanduser()
@@ -100,6 +122,14 @@ def refine_working_directory(ticket: Ticket, config: JiraConfig | None) -> Path:
     return resolved_project
 
 
+def refine_working_directory(ticket: Ticket, config: JiraConfig | None) -> Path:
+    return _working_directory(ticket, config, "Refine")
+
+
+def implement_working_directory(ticket: Ticket, config: JiraConfig | None) -> Path:
+    return _working_directory(ticket, config, "Implement")
+
+
 def get_opencode_session_id(jira_key: str, kind: str) -> str | None:
     """Return the persisted OpenCode session for a Jira key and session kind."""
     try:
@@ -113,6 +143,14 @@ def get_opencode_session_id(jira_key: str, kind: str) -> str | None:
             return session.session_id if session is not None and session.session_id else None
     except SQLAlchemyError:
         return None
+
+
+def _persisted_opencode_session_ids() -> set[str]:
+    try:
+        with SessionLocal() as db:
+            return set(db.scalars(select(OpenCodeSession.session_id)))
+    except SQLAlchemyError:
+        return set()
 
 
 def save_opencode_session_id(jira_key: str, kind: str, session_id: str) -> str | None:
@@ -130,6 +168,14 @@ def save_opencode_session_id(jira_key: str, kind: str, session_id: str) -> str |
             )
             if existing is not None:
                 return existing.session_id
+            conflicting = db.scalar(
+                select(OpenCodeSession).where(
+                    OpenCodeSession.session_id == session_id,
+                    (OpenCodeSession.jira_key != canonical_key) | (OpenCodeSession.kind != kind),
+                )
+            )
+            if conflicting is not None:
+                return None
             db.add(
                 OpenCodeSession(
                     jira_key=canonical_key,
@@ -231,19 +277,25 @@ async def _discover_opencode_session(
 ) -> None:
     deadline = pty_created_at + SESSION_DISCOVERY_WINDOW
     while True:
-        sessions = await _list_opencode_sessions(working_directory)
-        candidates = [
-            (entry.get("id"), created_at)
-            for entry in sessions
-            if isinstance(entry.get("id"), str)
-            and entry.get("id")
-            and (created_at := _session_created_at(entry)) is not None
-            and pty_created_at <= created_at <= deadline
-        ]
-        if candidates:
-            session_id, _ = max(candidates, key=lambda candidate: candidate[1])
-            if isinstance(session_id, str) and save_opencode_session_id(jira_key, kind, session_id):
-                return
+        lock = _session_discovery_locks.setdefault(asyncio.get_running_loop(), asyncio.Lock())
+        async with lock:
+            sessions = await _list_opencode_sessions(working_directory)
+            persisted_ids = _persisted_opencode_session_ids()
+            candidates = [
+                (entry.get("id"), created_at)
+                for entry in sessions
+                if isinstance(entry.get("id"), str)
+                and entry.get("id")
+                and entry.get("id") not in persisted_ids
+                and (created_at := _session_created_at(entry)) is not None
+                and pty_created_at <= created_at <= deadline
+            ]
+            if candidates:
+                session_id, _ = max(candidates, key=lambda candidate: candidate[1])
+                if isinstance(session_id, str) and save_opencode_session_id(
+                    jira_key, kind, session_id
+                ):
+                    return
 
         remaining = deadline - datetime.now(UTC).timestamp()
         if remaining <= 0:
@@ -251,9 +303,9 @@ async def _discover_opencode_session(
         await asyncio.sleep(min(0.5, remaining))
 
 
-async def send_error(websocket: WebSocket, message: str) -> None:
+async def send_error(websocket: WebSocket, message: str, *, action_label: str = "Refine") -> None:
     try:
-        await websocket.send_text(f"\r\n[Refine error] {message}\r\n")
+        await websocket.send_text(f"\r\n[{action_label} error] {message}\r\n")
         await websocket.close(code=1011)
     except (OSError, RuntimeError, WebSocketDisconnect):
         pass
@@ -296,6 +348,7 @@ class RefineSession:
         columns: int = DEFAULT_COLUMNS,
         rows: int = DEFAULT_ROWS,
         session_kind: str = REFINE_SESSION_KIND,
+        action_label: str = "Refine",
     ) -> None:
         self.jira_key = jira_key
         self.prompt = prompt
@@ -303,6 +356,7 @@ class RefineSession:
         self._on_finished = on_finished
         self._stale_after = stale_after
         self.session_kind = session_kind
+        self.action_label = action_label
         self.columns = columns
         self.rows = rows
         self._lock = asyncio.Lock()
@@ -477,7 +531,11 @@ class RefineSession:
                     preexec_fn=lambda: _prepare_child_terminal(slave_fd),
                 )
             except (OSError, subprocess.SubprocessError) as exc:
-                logger.exception("Refine process startup failed for Jira issue %s", self.jira_key)
+                logger.exception(
+                    "%s process startup failed for Jira issue %s",
+                    self.action_label,
+                    self.jira_key,
+                )
                 self._error = f"Could not start opencode: {getattr(exc, 'strerror', None) or exc}"
                 return
             self._process = process
@@ -592,7 +650,7 @@ class RefineSession:
             returncode = process.returncode if process is not None else None
 
         if process is not None and error is None:
-            exit_message = f"\r\n[Refine exited with code {returncode}]\r\n".encode()
+            exit_message = f"\r\n[{self.action_label} exited with code {returncode}]\r\n".encode()
             await asyncio.gather(
                 *(self._close_client(websocket, exit_message) for websocket in clients),
                 return_exceptions=True,
@@ -641,8 +699,15 @@ class RefineSession:
 class RefineSessionRegistry:
     """In-memory Jira-keyed Refine session registry for this server process."""
 
-    def __init__(self, stale_after: float = 300.0) -> None:
+    def __init__(
+        self,
+        stale_after: float = 300.0,
+        session_kind: str = REFINE_SESSION_KIND,
+        action_label: str = "Refine",
+    ) -> None:
         self._stale_after = stale_after
+        self._session_kind = session_kind
+        self._action_label = action_label
         self._lock = asyncio.Lock()
         self._sessions: dict[str, RefineSession] = {}
 
@@ -678,6 +743,8 @@ class RefineSessionRegistry:
                         self._stale_after,
                         columns,
                         rows,
+                        self._session_kind,
+                        self._action_label,
                     )
                     self._sessions[canonical_key] = session
                     session.start()
@@ -718,6 +785,10 @@ class RefineSessionRegistry:
 
 
 session_registry = RefineSessionRegistry()
+implement_session_registry = RefineSessionRegistry(
+    session_kind=IMPLEMENT_SESSION_KIND,
+    action_label="Implement",
+)
 
 
 async def run_refine(
@@ -761,3 +832,46 @@ async def run_refine(
         pass
     finally:
         await session_registry.detach(session, websocket)
+
+
+async def run_implement(
+    websocket: WebSocket,
+    jira_key: str,
+    prompt: str,
+    working_directory: Path,
+) -> None:
+    columns, rows = _initial_size(websocket)
+    session, error = await implement_session_registry.attach(
+        jira_key, prompt, working_directory, websocket, columns, rows
+    )
+    if error is not None:
+        await send_error(websocket, error, action_label="Implement")
+        return
+    if session is None:
+        return
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            text = message.get("text")
+            if text is None:
+                raw_data = message.get("bytes")
+                text = raw_data.decode(errors="replace") if raw_data is not None else ""
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError):
+                payload = {"type": "input", "data": text}
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("type") == "resize":
+                await session.resize(payload.get("cols"), payload.get("rows"))
+            elif payload.get("type") == "input":
+                data = payload.get("data")
+                if isinstance(data, str):
+                    await session.send_input(data)
+    except (OSError, RuntimeError, WebSocketDisconnect):
+        pass
+    finally:
+        await implement_session_registry.detach(session, websocket)

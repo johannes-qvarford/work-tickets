@@ -27,6 +27,7 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
         "id",
         "base_url",
         "browser_base_url",
+        "implement_prompt_template",
         "local_projects_directory",
         "gitlab_base_url",
         "email",
@@ -51,7 +52,7 @@ def test_initial_migration_creates_current_schema_on_a_fresh_database(tmp_path) 
     with database_engine.connect() as connection:
         assert connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one() == 1
         assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == (
-            "008_add_opencode_sessions"
+            "009_add_implement_prompt_template"
         )
 
 
@@ -91,6 +92,35 @@ def test_reapplying_migrations_preserves_an_initialized_database(tmp_path) -> No
             "",
         )
         assert connection.execute(text("SELECT COUNT(*) FROM alembic_version")).scalar_one() == 1
+
+
+def test_existing_opencode_schema_gets_default_implement_prompt_template(tmp_path) -> None:
+    database_engine = create_engine(f"sqlite:///{tmp_path / 'opencode-008.db'}")
+    apply_migrations(database_engine)
+    with database_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO jira_config "
+                "(id, base_url, browser_base_url, email, api_token, project_key, issue_type, "
+                "completed_statuses, updated_at) VALUES "
+                "(1, 'https://api.example.test', '', 'person@example.test', 'secret', 'WORK', "
+                "'Task', 'Done', '2026-08-23 00:00:00')"
+            )
+        )
+        connection.exec_driver_sql("ALTER TABLE jira_config DROP COLUMN implement_prompt_template")
+        connection.execute(
+            text("UPDATE alembic_version SET version_num = '008_add_opencode_sessions'")
+        )
+
+    apply_migrations(database_engine)
+
+    with database_engine.connect() as connection:
+        assert connection.scalar(text("SELECT implement_prompt_template FROM jira_config")) == (
+            "Please implement the work described at <TICKET_URL> and run the relevant tests."
+        )
+        assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+            "009_add_implement_prompt_template"
+        )
 
 
 def test_nullable_notes_from_old_002_are_backfilled_and_rejected(tmp_path) -> None:
@@ -167,7 +197,7 @@ def test_nullable_notes_from_old_002_are_backfilled_and_rejected(tmp_path) -> No
             (11, "Keep this note"),
         ]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "008_add_opencode_sessions"
+            "009_add_implement_prompt_template"
         )
 
     with pytest.raises(IntegrityError):
@@ -223,7 +253,7 @@ def test_existing_homegrown_tracking_is_converted_without_losing_data(tmp_path) 
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Legacy parent", 1), (10, "Legacy subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "008_add_opencode_sessions"
+            "009_add_implement_prompt_template"
         )
 
 
@@ -264,7 +294,7 @@ def test_untracked_pre_migration_schema_is_upgraded_without_losing_data(tmp_path
             text("SELECT parent_id, summary, category_id FROM tickets ORDER BY id")
         ).all() == [(None, "Pre-migration parent", 1), (20, "Pre-migration subtask", 1)]
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-            "008_add_opencode_sessions"
+            "009_add_implement_prompt_template"
         )
 
 

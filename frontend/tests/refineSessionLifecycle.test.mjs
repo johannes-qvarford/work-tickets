@@ -3,11 +3,17 @@ import test from "node:test";
 import {
   addActiveSession,
   acquireRefineSession,
+  acquireImplementSession,
+  activeImplementSessionMarker,
   canonicalizeJiraKey,
+  closeImplementSession,
+  markActiveImplementSession,
   hasActiveSession,
   removeActiveSession,
   RefineSessionCoordinator,
+  ImplementSessionCoordinator,
   refineSessionIdentity,
+  implementSessionIdentity,
   shouldForgetReconnectMarker,
 } from "../src/refineSessionLifecycle.ts";
 
@@ -43,6 +49,148 @@ test("closing either session preserves the other marker", () => {
   const afterSecondCloses = removeActiveSession(storageValue, second);
   assert.equal(hasActiveSession(afterSecondCloses, first), true);
   assert.equal(hasActiveSession(afterSecondCloses, second), false);
+});
+
+test("Refine and Implement use independent identities, markers, and sockets", () => {
+  const sockets = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onmessage = null;
+    onclose = null;
+    constructor(url) { this.url = url; sockets.push(this); }
+    send() {}
+    close() { this.readyState = 3; this.onclose?.({ code: 1000 }); }
+  }
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  const storage = {
+    values: new Map(),
+    getItem(key) { return this.values.get(key) ?? null; },
+    setItem(key, value) { this.values.set(key, value); },
+    removeItem(key) { this.values.delete(key); },
+  };
+  try {
+    const refine = acquireRefineSession(refineSessionIdentity(42, "work-123"), "/refine", storage);
+    const implement = acquireImplementSession(implementSessionIdentity(42, "work-123"), "/implement", storage);
+    assert.equal(sockets.length, 2);
+    assert.equal(sockets[0].url, "/refine");
+    assert.equal(sockets[1].url, "/implement");
+    refine.release();
+    assert.equal(sockets[1].readyState, FakeWebSocket.OPEN);
+    implement.release();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("Implement reconnects after a disconnect and explicit close clears its marker", () => {
+  const sockets = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onmessage = null;
+    onclose = null;
+    constructor(url) { this.url = url; sockets.push(this); }
+    send() {}
+    close() { this.readyState = 3; this.onclose?.({ code: 1006 }); }
+  }
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  const storage = {
+    values: new Map(),
+    getItem(key) { return this.values.get(key) ?? null; },
+    setItem(key, value) { this.values.set(key, value); },
+    removeItem(key) { this.values.delete(key); },
+  };
+  const identity = implementSessionIdentity(44, "work-144");
+  try {
+    markActiveImplementSession(identity, storage);
+    const lease = acquireImplementSession(identity, "/implement/44", storage);
+    sockets[0].onclose?.({ code: 1006 });
+    assert.equal(sockets.length, 2);
+    assert.equal(activeImplementSessionMarker(storage), JSON.stringify([identity]));
+
+    closeImplementSession(identity, storage);
+    assert.equal(activeImplementSessionMarker(storage), null);
+    assert.equal(sockets[1].readyState, 3);
+    lease.release();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("Implement startup errors end the session without reconnecting", () => {
+  const sockets = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onmessage = null;
+    onclose = null;
+    constructor(url) { this.url = url; sockets.push(this); }
+    send() {}
+    output(data) { this.onmessage?.({ data }); }
+    close() { this.readyState = 3; this.onclose?.({ code: 1011 }); }
+  }
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  const storage = {
+    values: new Map(),
+    getItem(key) { return this.values.get(key) ?? null; },
+    setItem(key, value) { this.values.set(key, value); },
+    removeItem(key) { this.values.delete(key); },
+  };
+  const identity = implementSessionIdentity(47, "work-147");
+  try {
+    markActiveImplementSession(identity, storage);
+    const lease = acquireImplementSession(identity, "/implement/47", storage);
+    sockets[0].output("\r\n[Implement error] Could not start opencode\r\n");
+    assert.equal(activeImplementSessionMarker(storage), null);
+    sockets[0].onclose?.({ code: 1011 });
+    assert.equal(sockets.length, 1);
+    lease.release();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
+});
+
+test("Implement coordinator reconnects a marked child independently", () => {
+  const sockets = [];
+  class FakeWebSocket {
+    static OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onmessage = null;
+    onclose = null;
+    constructor(url) { this.url = url; sockets.push(this); }
+    send() {}
+    close() { this.readyState = 3; this.onclose?.({ code: 1000 }); }
+  }
+  const previousWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeWebSocket;
+  const childIdentity = implementSessionIdentity(46, "work-146");
+  const storage = {
+    value: addActiveSession(null, childIdentity),
+    getItem() { return this.value; },
+    setItem(_key, value) { this.value = value; },
+    removeItem() { this.value = null; },
+  };
+  const parent = {
+    id: 45,
+    jira_issue_key: "WORK-145",
+    subtasks: [{ id: 46, jira_issue_key: "work-146", subtasks: [] }],
+  };
+  try {
+    const coordinator = new ImplementSessionCoordinator(
+      (id) => `/api/tickets/${id}/implement`,
+      storage,
+    );
+    coordinator.reconcile([parent]);
+    assert.equal(sockets.length, 1);
+    assert.equal(sockets[0].url, "/api/tickets/46/implement");
+    coordinator.dispose();
+  } finally {
+    globalThis.WebSocket = previousWebSocket;
+  }
 });
 
 test("reload and transient disconnects retain the reconnect marker", () => {

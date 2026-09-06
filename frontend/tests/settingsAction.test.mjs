@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildSettingsRequest, gitlabBaseUrlGuidance, jiraUrlGuidance, requestErrorMessage } from "../src/settingsAction.ts";
+import {
+  applyJiraConfig,
+  buildSettingsRequest,
+  gitlabBaseUrlGuidance,
+  jiraUrlGuidance,
+  requestErrorMessage,
+} from "../src/settingsAction.ts";
 
 const settings = {
   base_url: "https://jira.example.test",
   browser_base_url: "",
+  implement_prompt_template: "Please implement <TICKET_URL>",
   local_projects_directory: "",
   gitlab_base_url: "https://gitlab.example.test",
   email: "person@example.test",
@@ -25,10 +32,26 @@ function requestPayload(validate) {
 
 test("normal settings save sends validate false", () => {
   assert.equal(requestPayload(false).validate, false);
+  assert.equal(requestPayload(false).implement_prompt_template, settings.implement_prompt_template);
 });
 
 test("Save & test connection sends validate true", () => {
   assert.equal(requestPayload(true).validate, true);
+  assert.equal(requestPayload(true).implement_prompt_template, settings.implement_prompt_template);
+});
+
+test("SPA config loading and save response preserve the Implement template", () => {
+  const loadedSettings = { ...settings, implement_prompt_template: "old <TICKET_URL>" };
+  const serverTemplate = "new <TICKET_URL> and run checks";
+
+  applyJiraConfig(loadedSettings, { implement_prompt_template: serverTemplate });
+  assert.equal(loadedSettings.implement_prompt_template, serverTemplate);
+
+  const savedPayload = JSON.parse(buildSettingsRequest(loadedSettings, false).body);
+  applyJiraConfig(loadedSettings, {
+    implement_prompt_template: savedPayload.implement_prompt_template,
+  });
+  assert.equal(loadedSettings.implement_prompt_template, serverTemplate);
 });
 
 test("GitLab validation errors remain displayable through the request error path", () => {

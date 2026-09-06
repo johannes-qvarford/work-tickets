@@ -96,6 +96,9 @@ class CategoryComponentPayload(BaseModel):
 class JiraConfigPayload(BaseModel):
     base_url: str
     browser_base_url: str = ""
+    implement_prompt_template: str = (
+        "Please implement the work described at <TICKET_URL> and run the relevant tests."
+    )
     local_projects_directory: str = ""
     gitlab_base_url: str = ""
     email: str
@@ -214,6 +217,29 @@ async def api_refine_ticket(websocket: WebSocket, ticket_id: int) -> None:
             return
     assert ticket.jira_issue_key is not None
     await refine.run_refine(websocket, ticket.jira_issue_key, prompt, working_directory)
+
+
+@app.websocket("/api/tickets/{ticket_id}/implement")
+async def api_implement_ticket(websocket: WebSocket, ticket_id: int) -> None:
+    await websocket.accept()
+    with SessionLocal() as db:
+        ticket = db.get(Ticket, ticket_id)
+        config = db.get(JiraConfig, 1)
+        try:
+            if ticket is None:
+                raise refine.RefineError("Ticket was not found.")
+            prompt = refine.implement_prompt(ticket, config)
+            working_directory = refine.implement_working_directory(ticket, config)
+        except refine.RefineError as exc:
+            logger.exception(
+                "WebSocket /api/tickets/%s/implement setup failed for Jira issue %s",
+                ticket_id,
+                ticket.jira_issue_key if ticket is not None else "<unlinked>",
+            )
+            await refine.send_error(websocket, str(exc), action_label="Implement")
+            return
+    assert ticket.jira_issue_key is not None
+    await refine.run_implement(websocket, ticket.jira_issue_key, prompt, working_directory)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -584,6 +610,7 @@ def _save_jira_config(payload: JiraConfigPayload, db: Session) -> str | JSONResp
     values = {
         "base_url": normalized_base_url,
         "browser_base_url": browser_base_url,
+        "implement_prompt_template": payload.implement_prompt_template,
         "local_projects_directory": local_projects_directory,
         "gitlab_base_url": gitlab_base_url,
         "email": payload.email.strip(),
