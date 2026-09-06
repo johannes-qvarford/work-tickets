@@ -6,6 +6,8 @@ Load [`../SKILL.md`](../SKILL.md) first, then this file. This file is for the or
 
 Run the commands below in order, substituting the issue number and branch slug where shown. The fenced snippets are stages of one shell session so variables set earlier remain available. If a later snippet is copied independently, rerun its setup commands and honor its `: "${VAR:?}"` guards; never let an unset variable become an empty `gh` or `git` argument. A command that fails is a blocker; do not continue by guessing or by hiding the failure with `|| true`.
 
+The workflow has two required `main` synchronization boundaries. Before selecting or working on any issue, establish the latest clean `main` baseline from `origin`. After the issue/Pull Request lifecycle has finished, synchronize `main` again before reporting termination. In this repository, `DEFAULT_BRANCH` must resolve to `main`; verify that value through `gh repo view` before proceeding.
+
 ```sh
 set -eu
 gh auth status
@@ -14,17 +16,23 @@ REPO="$(gh repo view --json nameWithOwner --jq '.nameWithOwner')"
 DEFAULT_BRANCH="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name')"
 : "${REPO:?Repository lookup returned no repository}"
 : "${DEFAULT_BRANCH:?Repository lookup returned no default branch}"
+test "$DEFAULT_BRANCH" = main || {
+  printf '%s\n' "Expected the repository default branch to be main, got $DEFAULT_BRANCH" >&2
+  exit 1
+}
 git status --short --branch
 test -z "$(git status --porcelain)" || {
   printf '%s\n' 'Working tree is not clean; preserve those changes and stop before branching.' >&2
   exit 1
 }
-git fetch origin "$DEFAULT_BRANCH"
-git switch "$DEFAULT_BRANCH"
-git pull --ff-only origin "$DEFAULT_BRANCH"
+git fetch origin main
+git switch main
+git pull --ff-only origin main
 gh issue list --repo "$REPO" --state open --limit 100 \
   --json number,title,url,labels,assignees,state,updatedAt
 ```
+
+The initial synchronization must complete before issue selection, branching, or any implementation work. The clean-tree check is a safety gate: preserve any existing uncommitted or unrelated changes and stop rather than switching branches or trying to make the tree appear clean. Both the initial and final synchronization must remain fast-forward-only; never reset, clean, rebase, force-push, or otherwise discard work to make `main` match `origin`.
 
 Select exactly one eligible issue in the requested or selected order. Exclude Pull Requests, closed issues, explicitly blocked issues, and issues already covered by a merged Pull Request. An open Pull Request is resumed after inspection. A closed and unmerged Pull Request is not replaced automatically. If the user names an issue, verify that it exists and is actionable. If appropriate and permitted, assignment is only a coordination aid, not proof of completion.
 
@@ -97,6 +105,26 @@ Repeat these stages for one issue until it is merged or an explicit blocker requ
 ## Loop Termination and Reporting
 
 List eligible open issues at the beginning and after every completed issue with structured `gh issue list --json` output where possible. Continue until no eligible issues remain or the user-supplied limit or boundary is reached. Do not silently skip an issue; report ambiguity, blocking, existing work, or unsuitability and ask the user unless a safe repository rule resolves it.
+
+When all issue and Pull Request lifecycle work is finished, perform the final `main` synchronization below before reporting termination. This is required both after the last completed issue and when the loop stops because there are no eligible issues or the requested limit/boundary has been reached. If a lifecycle blocker leaves work in progress, do not bypass it just to synchronize; report the blocker and leave the worktree untouched unless it is independently safe to run this stage.
+
+```sh
+: "${DEFAULT_BRANCH:?Set DEFAULT_BRANCH before final synchronization}"
+test "$DEFAULT_BRANCH" = main || {
+  printf '%s\n' "Expected the repository default branch to be main, got $DEFAULT_BRANCH" >&2
+  exit 1
+}
+git status --short --branch
+test -z "$(git status --porcelain)" || {
+  printf '%s\n' 'Working tree is not clean; preserve those changes and stop before final synchronization.' >&2
+  exit 1
+}
+git fetch origin main
+git switch main
+git pull --ff-only origin main
+```
+
+The final synchronization must not discard uncommitted or unrelated changes. If the clean-tree check fails, leave the current branch and changes exactly as they are and report that `main` could not be synchronized. If `git switch` or `git pull --ff-only` fails, stop and report the failure; do not use a non-fast-forward update or a destructive command as a workaround.
 
 At the end, report:
 
