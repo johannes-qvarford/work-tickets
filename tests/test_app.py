@@ -724,17 +724,14 @@ def test_api_reordering_uses_active_items_and_persists_positions() -> None:
         assert [child.id for child in parent.subtasks] == [child_middle_id, child_first_id]
 
 
-def test_spa_reordering_adjusts_target_index_after_source_removal() -> None:
+def test_spa_reordering_uses_target_active_list_position() -> None:
     helper_source = (Path(__file__).parents[1] / "frontend" / "src" / "reordering.ts").read_text()
 
     assert (
         "const sourceIndex = activeItems.findIndex((item) => item.id === sourceId)" in helper_source
     )
-    assert (
-        "const adjustedTargetIndex = targetIndex > sourceIndex ? targetIndex - 1 : targetIndex"
-        in helper_source
-    )
-    assert "return adjustedTargetIndex + (afterTarget ? 1 : 0)" in helper_source
+    assert "return targetIndex" in helper_source
+    assert "adjustedTargetIndex" not in helper_source
 
 
 def test_spa_reordering_uses_drag_handles_without_arrow_controls() -> None:
