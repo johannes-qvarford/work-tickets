@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -15,6 +16,8 @@ from sqlalchemy.orm import Session
 from .gitlab import GitLabClient, GitLabError, GitLabMergeRequest
 from .jira import JiraClient, JiraError, JiraIssue
 from .models import JiraConfig, Ticket
+
+logger = logging.getLogger(__name__)
 
 _JIRA_ISSUE_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]*-[A-Za-z0-9]+")
 _URL_CANDIDATE = re.compile(r"(?<![A-Za-z0-9_])https?://[^\s<>\"']+", re.IGNORECASE)
@@ -379,12 +382,13 @@ def fetch_reviews(
     )
     jira = jira_client_factory(config)
     gitlab: GitLabClient | None = None
-    gitlab_error: str | None = None
+    gitlab_error: GitLabError | None = None
     if parse_gitlab_base_url(config.gitlab_base_url) is not None:
         try:
             gitlab = gitlab_client_factory(config)
         except GitLabError as exc:
-            gitlab_error = str(exc)
+            logger.exception("GET /api/reviews failed to initialize the GitLab client")
+            gitlab_error = exc
     try:
         search_results = jira.search_issues(jql)
         reviews: list[dict[str, object]] = []
@@ -399,6 +403,9 @@ def fetch_reviews(
             try:
                 issue = jira.get_issue(search_result.key)
             except JiraError as exc:
+                logger.exception(
+                    "GET /api/reviews failed to fetch Jira issue %s", search_result.key
+                )
                 review["error"] = str(exc)
             else:
                 try:
@@ -412,6 +419,10 @@ def fetch_reviews(
                         )
                     )
                 except JiraError as exc:
+                    logger.exception(
+                        "GET /api/reviews failed to load GitLab details for Jira issue %s",
+                        issue.key,
+                    )
                     review.update(
                         _review_data(
                             issue,
@@ -1022,7 +1033,7 @@ def _review_data(
     gitlab_base_url: str,
     *,
     gitlab_client: GitLabClient | None,
-    gitlab_error: str | None = None,
+    gitlab_error: GitLabError | None = None,
     resolve_merge_requests: bool = True,
 ) -> dict[str, object]:
     local_ticket = local_tickets_by_key.get(canonicalize_jira_key(issue.key))
@@ -1031,7 +1042,7 @@ def _review_data(
     selection = select_merge_request([])
     if merge_requests and resolve_merge_requests:
         if gitlab_error is not None:
-            raise JiraError(gitlab_error)
+            raise JiraError(str(gitlab_error)) from gitlab_error
         merge_request_data, selection = _retrieve_merge_requests(
             description, gitlab_base_url, gitlab_client
         )
@@ -1126,6 +1137,7 @@ def delete_linked_jira_issue(
         jira = jira_client_factory(config)
         jira.delete_issue(issue_key)
     except JiraError as exc:
+        logger.exception("Ticket deletion failed for linked Jira issue %s", issue_key)
         return f"linked Jira issue {issue_key} could not be deleted: {exc}"
     finally:
         if jira is not None:

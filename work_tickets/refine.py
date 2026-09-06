@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import pty
 import signal
@@ -34,6 +35,8 @@ from .pty_terminal import (
 from .pty_terminal import (
     _stop_process as _stop_pty_process,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RefineError(Exception):
@@ -474,6 +477,7 @@ class RefineSession:
                     preexec_fn=lambda: _prepare_child_terminal(slave_fd),
                 )
             except (OSError, subprocess.SubprocessError) as exc:
+                logger.exception("Refine process startup failed for Jira issue %s", self.jira_key)
                 self._error = f"Could not start opencode: {getattr(exc, 'strerror', None) or exc}"
                 return
             self._process = process
