@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import pty
+import signal
+import subprocess
 from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -13,6 +17,20 @@ from starlette.websockets import WebSocketDisconnect
 from .jira_service import canonicalize_jira_key
 from .local_projects import is_safe_local_component_name
 from .models import JiraConfig, Ticket
+from .pty_terminal import (
+    DEFAULT_COLUMNS,
+    DEFAULT_ROWS,
+    _dimension,
+    _initial_size,
+    _prepare_child_terminal,
+    _process_group_signal,
+    _read_pty,
+    _set_terminal_size,
+    _write_pty,
+)
+from .pty_terminal import (
+    _stop_process as _stop_pty_process,
+)
 
 
 class RefineError(Exception):
@@ -81,6 +99,9 @@ async def send_error(websocket: WebSocket, message: str) -> None:
 
 
 async def _stop_process(process: asyncio.subprocess.Process) -> None:
+    if getattr(process, "pid", None) is not None:
+        await _stop_pty_process(process)
+        return
     if process.returncode is not None:
         return
     try:
@@ -111,17 +132,21 @@ class RefineSession:
         working_directory: Path,
         on_finished: Callable[[RefineSession], Awaitable[None]],
         stale_after: float,
+        columns: int = DEFAULT_COLUMNS,
+        rows: int = DEFAULT_ROWS,
     ) -> None:
         self.jira_key = jira_key
         self.prompt = prompt
         self.working_directory = working_directory
         self._on_finished = on_finished
         self._stale_after = stale_after
+        self.columns = columns
+        self.rows = rows
         self._lock = asyncio.Lock()
         self._stdin_lock = asyncio.Lock()
         self._clients: set[WebSocket] = set()
         self._pending_clients = 0
-        self._output: deque[str] = deque()
+        self._output: deque[bytes] = deque()
         self._output_size = 0
         self._process: asyncio.subprocess.Process | None = None
         self._error: str | None = None
@@ -130,6 +155,8 @@ class RefineSession:
         self.finished = asyncio.Event()
         self._stale_task: asyncio.Task[None] | None = None
         self._task: asyncio.Task[None] | None = None
+        self._master_fd = -1
+        self._slave_fd = -1
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -187,7 +214,7 @@ class RefineSession:
                 self._cancel_stale_locked()
                 self._clients.add(websocket)
                 for output in self._output:
-                    await websocket.send_text(output)
+                    await self._send_output(websocket, output)
                 return True, None
         except (OSError, RuntimeError, WebSocketDisconnect):
             async with self._lock:
@@ -214,32 +241,76 @@ class RefineSession:
             return
         async with self._stdin_lock:
             process = self._process
-            if process is None or process.returncode is not None or process.stdin is None:
+            if process is None or process.returncode is not None:
                 return
             try:
-                process.stdin.write(data.encode())
-                await process.stdin.drain()
+                if self._master_fd >= 0:
+                    await _write_pty(self._master_fd, data.encode())
+                elif process.stdin is not None:
+                    process.stdin.write(data.encode())
+                    await process.stdin.drain()
             except (BrokenPipeError, OSError, RuntimeError):
+                pass
+
+    async def resize(self, columns: object, rows: object) -> None:
+        async with self._stdin_lock:
+            if self._master_fd < 0:
+                return
+            self.columns = _dimension(columns, self.columns, 2, 500)
+            self.rows = _dimension(rows, self.rows, 2, 500)
+            try:
+                _set_terminal_size(self._master_fd, self.columns, self.rows)
+                process = self._process
+                if process is not None:
+                    _process_group_signal(process, signal.SIGWINCH)
+            except (OSError, RuntimeError):
                 pass
 
     async def _run(self) -> None:
         process: asyncio.subprocess.Process | None = None
+        master_fd = -1
+        slave_fd = -1
         try:
+            master_fd, slave_fd = pty.openpty()
+            os.set_blocking(master_fd, False)
+            _set_terminal_size(master_fd, self.columns, self.rows)
             try:
+                environment = os.environ.copy()
+                environment.update(
+                    {
+                        "TERM": "xterm-256color",
+                        "COLORTERM": "truecolor",
+                        "COLUMNS": str(self.columns),
+                        "LINES": str(self.rows),
+                    }
+                )
                 process = await asyncio.create_subprocess_exec(
                     "opencode",
                     "--prompt",
                     self.prompt,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
                     cwd=str(self.working_directory),
-                    env=os.environ.copy(),
+                    env=environment,
+                    preexec_fn=lambda: _prepare_child_terminal(slave_fd),
                 )
-            except OSError as exc:
-                self._error = f"Could not start opencode: {exc.strerror or exc}"
+            except (OSError, subprocess.SubprocessError) as exc:
+                self._error = f"Could not start opencode: {getattr(exc, 'strerror', None) or exc}"
                 return
             self._process = process
+            if getattr(process, "pid", None) is None:
+                # Unit-test doubles use the historical pipe transport.
+                os.close(master_fd)
+                os.close(slave_fd)
+                master_fd = -1
+                slave_fd = -1
+            else:
+                os.close(slave_fd)
+                slave_fd = -1
+                self._master_fd = master_fd
+                self._slave_fd = -1
+                master_fd = -1
             self._ready.set()
             if self._stopping:
                 return
@@ -248,6 +319,16 @@ class RefineSession:
             self._ready.set()
             if process is not None and process.returncode is None:
                 await _stop_process(process)
+            if self._master_fd >= 0:
+                os.close(self._master_fd)
+                self._master_fd = -1
+            if self._slave_fd >= 0:
+                os.close(self._slave_fd)
+                self._slave_fd = -1
+            if master_fd >= 0:
+                os.close(master_fd)
+            if slave_fd >= 0:
+                os.close(slave_fd)
             await self._finish(process)
 
     async def _monitor_process(self, process: asyncio.subprocess.Process) -> None:
@@ -267,12 +348,15 @@ class RefineSession:
             await asyncio.gather(output_task, wait_task, return_exceptions=True)
 
     async def _forward_output(self, process: asyncio.subprocess.Process) -> None:
-        if process.stdout is None:
+        if self._master_fd >= 0:
+            while chunk := await _read_pty(self._master_fd):
+                await self._broadcast(chunk)
             return
-        while chunk := await process.stdout.read(4096):
-            await self._broadcast(chunk.decode(errors="replace"))
+        if process.stdout is not None:
+            while chunk := await process.stdout.read(4096):
+                await self._broadcast(chunk)
 
-    async def _broadcast(self, output: str) -> None:
+    async def _broadcast(self, output: bytes) -> None:
         async with self._lock:
             self._output.append(output)
             self._output_size += len(output)
@@ -292,9 +376,15 @@ class RefineSession:
                     self._clients.discard(websocket)
                 self._schedule_stale_locked()
 
-    async def _send_output(self, websocket: WebSocket, output: str) -> bool:
+    async def _send_output(self, websocket: WebSocket, output: bytes) -> bool:
         try:
-            await asyncio.wait_for(websocket.send_text(output), timeout=5)
+            send_bytes = getattr(websocket, "send_bytes", None)
+            if callable(send_bytes):
+                await asyncio.wait_for(send_bytes(output), timeout=5)
+            else:
+                await asyncio.wait_for(
+                    websocket.send_text(output.decode(errors="replace")), timeout=5
+                )
         except (OSError, RuntimeError, TimeoutError, WebSocketDisconnect):
             return False
         return True
@@ -309,7 +399,7 @@ class RefineSession:
             returncode = process.returncode if process is not None else None
 
         if process is not None and error is None:
-            exit_message = f"\r\n[Refine exited with code {returncode}]\r\n"
+            exit_message = f"\r\n[Refine exited with code {returncode}]\r\n".encode()
             await asyncio.gather(
                 *(self._close_client(websocket, exit_message) for websocket in clients),
                 return_exceptions=True,
@@ -318,7 +408,7 @@ class RefineSession:
         await self._on_finished(self)
         self.finished.set()
 
-    async def _close_client(self, websocket: WebSocket, output: str) -> None:
+    async def _close_client(self, websocket: WebSocket, output: bytes) -> None:
         if not await self._send_output(websocket, output):
             return
         try:
@@ -378,6 +468,8 @@ class RefineSessionRegistry:
         prompt: str,
         working_directory: Path,
         websocket: WebSocket,
+        columns: int = DEFAULT_COLUMNS,
+        rows: int = DEFAULT_ROWS,
     ) -> tuple[RefineSession | None, str | None]:
         canonical_key = canonicalize_jira_key(jira_key)
         while True:
@@ -391,6 +483,8 @@ class RefineSessionRegistry:
                         working_directory,
                         self._remove,
                         self._stale_after,
+                        columns,
+                        rows,
                     )
                     self._sessions[canonical_key] = session
                     session.start()
@@ -439,7 +533,10 @@ async def run_refine(
     prompt: str,
     working_directory: Path,
 ) -> None:
-    session, error = await session_registry.attach(jira_key, prompt, working_directory, websocket)
+    columns, rows = _initial_size(websocket)
+    session, error = await session_registry.attach(
+        jira_key, prompt, working_directory, websocket, columns, rows
+    )
     if error is not None:
         await send_error(websocket, error)
         return
@@ -451,11 +548,22 @@ async def run_refine(
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 break
-            data = message.get("text")
-            if data is None:
+            text = message.get("text")
+            if text is None:
                 raw_data = message.get("bytes")
-                data = raw_data.decode(errors="replace") if raw_data is not None else ""
-            await session.send_input(data)
+                text = raw_data.decode(errors="replace") if raw_data is not None else ""
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError):
+                payload = {"type": "input", "data": text}
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("type") == "resize":
+                await session.resize(payload.get("cols"), payload.get("rows"))
+            elif payload.get("type") == "input":
+                data = payload.get("data")
+                if isinstance(data, str):
+                    await session.send_input(data)
     except (OSError, RuntimeError, WebSocketDisconnect):
         pass
     finally:

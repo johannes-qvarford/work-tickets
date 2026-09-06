@@ -98,7 +98,8 @@ export function forgetActiveSession(
   }
 }
 
-type OutputListener = (output: string) => void;
+export type RefineTerminalOutput = string | ArrayBuffer;
+type OutputListener = (output: RefineTerminalOutput) => void;
 
 interface Connection {
   identity: string;
@@ -109,8 +110,9 @@ interface Connection {
   socketExplicitClose: boolean;
   ended: boolean;
   leases: number;
-  output: string[];
+  output: RefineTerminalOutput[];
   pendingInput: string;
+  pendingResize: { cols: number; rows: number } | null;
   listeners: Set<OutputListener>;
 }
 
@@ -119,23 +121,39 @@ const connections = new Map<string, Connection>();
 function connect(connection: Connection): void {
   const socket = new WebSocket(connection.url);
   connection.socket = socket;
+  socket.binaryType = "arraybuffer";
   connection.socketTransientClose = false;
   connection.socketExplicitClose = false;
   socket.onopen = () => {
     if (connection.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
     const pendingInput = connection.pendingInput;
     connection.pendingInput = "";
-    if (pendingInput) socket.send(pendingInput);
+    if (connection.pendingResize) {
+      socket.send(JSON.stringify({ type: "resize", ...connection.pendingResize }));
+      connection.pendingResize = null;
+    }
+    if (pendingInput) socket.send(JSON.stringify({ type: "input", data: pendingInput }));
   };
-  socket.onmessage = (event) => {
-    const output = String(event.data);
+  const publishOutput = (output: RefineTerminalOutput) => {
     connection.output.push(output);
     if (connection.output.length > 512) connection.output.shift();
-    if (output.includes("[Refine exited with code") || output.includes("[Refine error]")) {
+    if (
+      typeof output === "string" &&
+      (output.includes("[Refine exited with code") || output.includes("[Refine error]"))
+    ) {
       connection.ended = true;
       forgetActiveSession(connection.identity, connection.storage);
     }
     for (const listener of connection.listeners) listener(output);
+  };
+  socket.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      publishOutput(event.data);
+    } else if (typeof Blob !== "undefined" && event.data instanceof Blob) {
+      void event.data.arrayBuffer().then(publishOutput);
+    } else {
+      publishOutput(String(event.data));
+    }
   };
   socket.onclose = (event) => {
     const wasTransientClose = connection.socketTransientClose;
@@ -163,6 +181,7 @@ function connect(connection: Connection): void {
 export interface RefineSessionLease {
   subscribe(listener: OutputListener): () => void;
   send(data: string): void;
+  resize(cols: number, rows: number): void;
   release(): void;
 }
 
@@ -177,14 +196,15 @@ export function acquireRefineSession(
       identity,
       url,
       storage,
-      socket: null,
+       socket: null,
       socketTransientClose: false,
       socketExplicitClose: false,
       ended: false,
       leases: 0,
-      output: [],
-      pendingInput: "",
-      listeners: new Set(),
+       output: [],
+       pendingInput: "",
+       pendingResize: null,
+       listeners: new Set(),
     };
     connections.set(identity, connection);
     connect(connection);
@@ -199,8 +219,19 @@ export function acquireRefineSession(
     },
     send(data) {
       if (!data || connection.ended) return;
-      if (connection.socket?.readyState === WebSocket.OPEN) connection.socket.send(data);
+      if (connection.socket?.readyState === WebSocket.OPEN) {
+        connection.socket.send(JSON.stringify({ type: "input", data }));
+      }
       else connection.pendingInput += data;
+    },
+    resize(cols, rows) {
+      if (connection.ended) return;
+      const size = { cols, rows };
+      if (connection.socket?.readyState === WebSocket.OPEN) {
+        connection.socket.send(JSON.stringify({ type: "resize", ...size }));
+      } else {
+        connection.pendingResize = size;
+      }
     },
     release() {
       if (released) return;

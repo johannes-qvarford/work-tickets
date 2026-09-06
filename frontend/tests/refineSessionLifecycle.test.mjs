@@ -148,12 +148,18 @@ test("queues terminal input, replays initial output, and reconnects one Jira ses
     const first = acquireRefineSession("WORK-73", "/refine/73", storage);
     const output = [];
     first.subscribe((value) => output.push(value));
+    first.resize(100, 30);
     first.send("before-open");
     assert.deepEqual(sockets[0].sent, []);
     sockets[0].open();
-    assert.deepEqual(sockets[0].sent, ["before-open"]);
+    assert.deepEqual(sockets[0].sent, [
+      '{"type":"resize","cols":100,"rows":30}',
+      '{"type":"input","data":"before-open"}',
+    ]);
     sockets[0].output("initial output");
-    assert.deepEqual(output, ["initial output"]);
+    const binaryOutput = new TextEncoder().encode("binary output").buffer;
+    sockets[0].output(binaryOutput);
+    assert.deepEqual(output, ["initial output", binaryOutput]);
 
     sockets[0].readyState = 3;
     sockets[0].onclose?.({ code: 1006 });
@@ -161,11 +167,11 @@ test("queues terminal input, replays initial output, and reconnects one Jira ses
     const second = acquireRefineSession("WORK-73", "/refine/73", storage);
     const replayed = [];
     second.subscribe((value) => replayed.push(value));
-    assert.deepEqual(replayed, ["initial output"]);
+    assert.deepEqual(replayed, ["initial output", binaryOutput]);
     second.send("after-reconnect");
     assert.deepEqual(sockets[1].sent, []);
     sockets[1].open();
-    assert.deepEqual(sockets[1].sent, ["after-reconnect"]);
+    assert.deepEqual(sockets[1].sent, ['{"type":"input","data":"after-reconnect"}']);
     first.release();
     second.release();
   } finally {
